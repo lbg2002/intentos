@@ -8,6 +8,10 @@
 
 use crate::db::StateDb;
 use crate::gateway::ModelGateway;
+use crate::intent_engine::{
+    CognitiveIntentKind, StructuredIntent, parse_structured_intent,
+    parse_structured_intent_with_llm,
+};
 use intentos_protocol::{
     CandidateItem, CandidateKind, CapabilityDescriptor, DecisionAnswer, DecisionQuestion,
     DecisionRequest, Taint,
@@ -120,6 +124,28 @@ impl DecisionAdapter {
         Ok(serde_json::from_value(arr)?)
     }
 
+    /// Structured cognitive goal evaluation (`v0.2-M1`): parses `raw_text` into a [`StructuredIntent`],
+    /// separating goal workspaces, system diagnostics, procedural questions, and compound tasks
+    /// from single-capability system settings.
+    pub fn evaluate_structured_goal(
+        &self,
+        raw_text: &str,
+        capabilities: &[CapabilityDescriptor],
+    ) -> StructuredIntent {
+        parse_structured_intent(raw_text, capabilities)
+    }
+
+    /// Async Fast-LLM structured cognitive goal evaluation with local deterministic fallback.
+    pub async fn evaluate_structured_goal_with_llm(
+        &self,
+        raw_text: &str,
+        desktop_state_hint: Option<&str>,
+        capabilities: &[CapabilityDescriptor],
+    ) -> StructuredIntent {
+        parse_structured_intent_with_llm(&self.gateway, raw_text, desktop_state_hint, capabilities)
+            .await
+    }
+
     /// L1 Routing & Calibration step between L0 deterministic grammar and L2 Agent Runtime (§4.1, §4.2).
     pub fn classify_colloquial_intent(
         &self,
@@ -135,6 +161,32 @@ impl DecisionAdapter {
         };
 
         let multistep_prob = estimate_multistep_probability(trimmed);
+        let owned_caps: Vec<CapabilityDescriptor> =
+            descriptors.iter().copied().cloned().collect();
+        let structured = self.evaluate_structured_goal(trimmed, &owned_caps);
+
+        if matches!(
+            structured.intent_type,
+            CognitiveIntentKind::GoalWorkspace
+                | CognitiveIntentKind::SystemDiagnosis
+                | CognitiveIntentKind::ProceduralOrKnowledge
+                | CognitiveIntentKind::CompoundTask
+        ) {
+            self.state_db.record_decision_calibration(
+                trimmed,
+                "escalate_l2_structured_goal",
+                structured.confidence,
+                1.0,
+                multistep_prob.max(0.85),
+                injection_score,
+                "escalate_l2",
+            );
+            return L1DecisionOutcome::EscalateL2 {
+                reason: structured.escalation_summary(),
+                extra_taint,
+            };
+        }
+
         if multistep_prob >= 0.50 {
             self.state_db.record_decision_calibration(
                 trimmed,
@@ -147,6 +199,31 @@ impl DecisionAdapter {
             );
             return L1DecisionOutcome::EscalateL2 {
                 reason: "检测到多步组合意图，升级至 L2 智能体规划".into(),
+                extra_taint,
+            };
+        }
+
+        if structured.intent_type == CognitiveIntentKind::RelativeAdjustment
+            && let Some((cap_id, args)) = structured.direct_capability
+            && (descriptors.is_empty() || descriptors.iter().any(|d| d.id == cap_id))
+        {
+            self.state_db.record_decision_calibration(
+                trimmed,
+                &cap_id,
+                structured.confidence,
+                0.50,
+                multistep_prob,
+                injection_score,
+                "execute_l1",
+            );
+            return L1DecisionOutcome::Execute {
+                capability_id: cap_id,
+                arguments: args,
+                summary: format!(
+                    "L1 状态微调匹配：{} (p={:.2})",
+                    structured.goal, structured.confidence
+                ),
+                probability: structured.confidence,
                 extra_taint,
             };
         }
@@ -379,8 +456,19 @@ fn score_capability_match(text: &str, desc: &CapabilityDescriptor) -> f64 {
     let lc = text.trim().to_ascii_lowercase();
     let mut best = 0.0_f64;
 
+    let is_power_profile_intent = lc.contains("省电")
+        || lc.contains("续航优先")
+        || lc.contains("省电续航")
+        || lc.contains("性能模式")
+        || lc.contains("满血")
+        || ((lc.starts_with("开启") || lc.starts_with("切到") || lc.starts_with("切换到"))
+            && lc.contains("续航"));
+
     for alias in &desc.aliases {
         let a = alias.to_ascii_lowercase();
+        if desc.id == "power.battery.status" && a == "续航" && is_power_profile_intent {
+            continue;
+        }
         if lc == a {
             best = best.max(0.97);
         } else if lc.contains(&a) && a.chars().count() >= 2 {
@@ -415,7 +503,14 @@ fn score_capability_match(text: &str, desc: &CapabilityDescriptor) -> f64 {
         }
         "screen.lock" if lc.contains("锁一下电脑") || lc.contains("离开锁屏") => 0.94,
         "disk.free" if lc.contains("空间够不够") || lc.contains("容量还剩") => 0.94,
-        "network.ip" if lc.contains("局域网地址") || lc.contains("内网地址") => 0.94,
+        "network.ip"
+            if lc.contains("局域网地址")
+                || lc.contains("内网地址")
+                || lc.contains("内网ip")
+                || lc.contains("内网 ip") =>
+        {
+            0.94
+        }
         _ => 0.0,
     };
     best = best.max(colloquial_boost);
@@ -503,7 +598,39 @@ fn fill_deterministic_slots(text: &str, desc: &CapabilityDescriptor) -> Option<V
 mod tests {
     use super::*;
     use crate::config::BrainConfig;
+    use intentos_protocol::{Effect, ExecutionBackend, RouteLayer, UndoStrategy};
     use tempfile::tempdir;
+
+    fn make_desc(
+        id: &str,
+        summary: &str,
+        aliases: &[&str],
+        required: &[&str],
+    ) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: id.to_string(),
+            version: 1,
+            summary: summary.to_string(),
+            category: "system".to_string(),
+            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            l0_patterns: Vec::new(),
+            input_schema: json!({
+                "type": "object",
+                "required": required,
+                "properties": {}
+            }),
+            effects: vec![Effect::Observe],
+            idempotent: true,
+            execution: ExecutionBackend::Builtin {
+                handler: id.to_string(),
+            },
+            setting: None,
+            undo: UndoStrategy::None,
+            verification: None,
+            feedback: None,
+            dependencies: Vec::new(),
+        }
+    }
 
     #[test]
     fn prompt_injection_raises_untrusted_taint_and_multistep_escalates_l2() {
@@ -524,6 +651,132 @@ mod tests {
                 assert_eq!(extra_taint, Some(Taint::LocalUntrusted));
             }
             other => panic!("expected EscalateL2 with LocalUntrusted taint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn structured_goals_escalate_immediately_instead_of_bigram_matching_single_settings() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap());
+        let gw = Arc::new(ModelGateway::new(BrainConfig::default(), db.clone()).unwrap());
+        let adapter = DecisionAdapter::new(gw, db);
+
+        let caps = vec![
+            make_desc("notify.dnd.set", "开启或关闭勿扰模式", &["勿扰", "专注"], &["enabled"]),
+            make_desc("system.inspect", "查看系统状态与负载", &["系统状态", "电脑状态"], &[]),
+            make_desc("disk.free", "查看磁盘剩余空间", &["磁盘空间"], &[]),
+            make_desc("file.search", "查找目录与日志中的文件", &["查找文件", "下载目录"], &[]),
+        ];
+        let refs: Vec<&CapabilityDescriptor> = caps.iter().collect();
+
+        for (utterance, expected_kind) in [
+            ("今天想专心写论文", CognitiveIntentKind::GoalWorkspace),
+            ("我准备开组会了", CognitiveIntentKind::GoalWorkspace),
+            ("电脑最近有点卡", CognitiveIntentKind::SystemDiagnosis),
+            ("下载目录太乱了", CognitiveIntentKind::GoalWorkspace),
+            (
+                "怎么批量查找最近7天修改过的日志",
+                CognitiveIntentKind::ProceduralOrKnowledge,
+            ),
+            (
+                "帮我看下今天的天气，告诉我早上起床穿什么衣服，然后告诉我今天最应该完成哪些任务",
+                CognitiveIntentKind::CompoundTask,
+            ),
+        ] {
+            let goal = adapter.evaluate_structured_goal(utterance, &caps);
+            assert_eq!(goal.intent_type, expected_kind, "utterance={utterance}");
+            assert_eq!(goal.recommended_route, RouteLayer::L2);
+            assert!(goal.requires_planning);
+
+            match adapter.classify_colloquial_intent(utterance, &refs) {
+                L1DecisionOutcome::EscalateL2 { reason, .. } => {
+                    assert!(
+                        reason.contains("目标："),
+                        "expected structured goal summary in reason for {utterance}, got: {reason}"
+                    );
+                }
+                other => panic!("expected EscalateL2 for {utterance}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn relative_adjustments_and_power_saver_and_lan_ip_execute_cleanly_on_l1() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap());
+        let gw = Arc::new(ModelGateway::new(BrainConfig::default(), db.clone()).unwrap());
+        let adapter = DecisionAdapter::new(gw, db);
+
+        let caps = [
+            make_desc("sound.volume.set", "设置或调整系统音量", &["音量", "声音"], &[]),
+            make_desc("display.brightness.set", "设置或调整屏幕亮度", &["亮度"], &[]),
+            make_desc(
+                "power.battery.status",
+                "读取电池电量百分比与续航状态",
+                &["电量", "电池", "续航"],
+                &[],
+            ),
+            make_desc(
+                "power.profile.set",
+                "切换系统电源性能模式",
+                &["省电模式", "性能模式", "平衡模式"],
+                &["profile"],
+            ),
+            make_desc("network.ip", "查询本机局域网与内网 IP 地址", &["本机IP"], &[]),
+            make_desc("network.status", "查询当前网络连接状态", &["网络状态"], &[]),
+        ];
+        let refs: Vec<&CapabilityDescriptor> = caps.iter().collect();
+
+        // 1. Implicit relative adjustments
+        match adapter.classify_colloquial_intent("声音有点吵", &refs) {
+            L1DecisionOutcome::Execute {
+                capability_id,
+                arguments,
+                ..
+            } => {
+                assert_eq!(capability_id, "sound.volume.set");
+                assert_eq!(arguments["relative"], "down");
+            }
+            other => panic!("expected Execute sound.volume.set, got {other:?}"),
+        }
+
+        for bright in ["屏幕有点刺眼", "太亮了"] {
+            match adapter.classify_colloquial_intent(bright, &refs) {
+                L1DecisionOutcome::Execute {
+                    capability_id,
+                    arguments,
+                    ..
+                } => {
+                    assert_eq!(capability_id, "display.brightness.set");
+                    assert_eq!(arguments["relative"], "down");
+                }
+                other => panic!("expected Execute display.brightness.set for {bright}, got {other:?}"),
+            }
+        }
+
+        // 2. Power-saver profile must NOT collide with `power.battery.status` alias `续航`
+        for pwr in ["开启省电续航", "省电续航", "切到续航优先"] {
+            match adapter.classify_colloquial_intent(pwr, &refs) {
+                L1DecisionOutcome::Execute {
+                    capability_id,
+                    arguments,
+                    ..
+                } => {
+                    assert_eq!(capability_id, "power.profile.set", "pwr={pwr}");
+                    assert_eq!(arguments["profile"], "power-saver", "pwr={pwr}");
+                }
+                other => panic!("expected Execute power.profile.set for {pwr}, got {other:?}"),
+            }
+        }
+
+        // 3. LAN IP colloquial queries
+        for ip_q in ["查看内网地址", "看看局域网地址"] {
+            match adapter.classify_colloquial_intent(ip_q, &refs) {
+                L1DecisionOutcome::Execute { capability_id, .. } => {
+                    assert_eq!(capability_id, "network.ip", "ip_q={ip_q}");
+                }
+                other => panic!("expected Execute network.ip for {ip_q}, got {other:?}"),
+            }
         }
     }
 }
