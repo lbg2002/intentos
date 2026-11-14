@@ -66,6 +66,16 @@ impl StateDb {
         Ok(db)
     }
 
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.execute_batch(MIGRATION_0001)?;
+        conn.execute_batch(MIGRATION_0002)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
     pub fn mark_interrupted_tasks_recovery_required(&self) -> anyhow::Result<usize> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
@@ -77,29 +87,30 @@ impl StateDb {
     }
 
     pub fn upsert_task(&self, task: &Task) -> anyhow::Result<()> {
+        let clean_task = crate::security_guard::SensitiveDataGuard::sanitize_task_for_storage(task);
         let conn = self.conn.lock().unwrap();
-        let steps_json = serde_json::to_string(&task.steps)?;
-        let cs_json = serde_json::to_string(&task.changeset_ids)?;
-        let pa_json = task
+        let steps_json = serde_json::to_string(&clean_task.steps)?;
+        let cs_json = serde_json::to_string(&clean_task.changeset_ids)?;
+        let pa_json = clean_task
             .pending_approval
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        let taint_json = serde_json::to_string(&task.taint)?;
-        let budget_json = serde_json::to_string(&task.budget)?;
-        let trigger_str = serde_json::to_value(task.trigger)?
+        let taint_json = serde_json::to_string(&clean_task.taint)?;
+        let budget_json = serde_json::to_string(&clean_task.budget)?;
+        let trigger_str = serde_json::to_value(clean_task.trigger)?
             .as_str()
             .unwrap_or("user")
             .to_string();
-        let route_str = serde_json::to_value(task.route)?
+        let route_str = serde_json::to_value(clean_task.route)?
             .as_str()
             .unwrap_or("L0")
             .to_string();
-        let status_str = serde_json::to_value(task.status)?
+        let status_str = serde_json::to_value(clean_task.status)?
             .as_str()
             .unwrap_or("created")
             .to_string();
-        let dc_str = serde_json::to_value(task.data_class)?
+        let dc_str = serde_json::to_value(clean_task.data_class)?
             .as_str()
             .unwrap_or("public")
             .to_string();
@@ -111,6 +122,7 @@ impl StateDb {
                 result_summary, taint_json, data_class, budget_json, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
+                goal = excluded.goal,
                 status = excluded.status,
                 steps_json = excluded.steps_json,
                 changeset_ids_json = excluded.changeset_ids_json,
@@ -121,22 +133,22 @@ impl StateDb {
                 data_class = excluded.data_class,
                 updated_at = excluded.updated_at",
             params![
-                task.id,
-                task.goal,
-                task.project_id,
+                clean_task.id,
+                clean_task.goal,
+                clean_task.project_id,
                 trigger_str,
                 route_str,
                 status_str,
                 steps_json,
                 cs_json,
                 pa_json,
-                task.assistant_message,
-                task.result_summary,
+                clean_task.assistant_message,
+                clean_task.result_summary,
                 taint_json,
                 dc_str,
                 budget_json,
-                task.created_at.to_rfc3339(),
-                task.updated_at.to_rfc3339(),
+                clean_task.created_at.to_rfc3339(),
+                clean_task.updated_at.to_rfc3339(),
             ],
         )?;
         Ok(())
@@ -225,9 +237,10 @@ impl StateDb {
     }
 
     pub fn save_changeset(&self, cs: &ChangeSet) -> anyhow::Result<()> {
+        let clean_cs = crate::security_guard::SensitiveDataGuard::sanitize_changeset_for_storage(cs);
         let conn = self.conn.lock().unwrap();
-        let ops_json = serde_json::to_string(&cs.operations)?;
-        let status_str = serde_json::to_value(cs.status)?
+        let ops_json = serde_json::to_string(&clean_cs.operations)?;
+        let status_str = serde_json::to_value(clean_cs.status)?
             .as_str()
             .unwrap_or("applied")
             .to_string();
@@ -241,21 +254,25 @@ impl StateDb {
                 status = excluded.status,
                 summary = excluded.summary",
             params![
-                cs.id,
-                cs.task_id,
-                cs.created_at
+                clean_cs.id,
+                clean_cs.task_id,
+                clean_cs.created_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-                cs.capability_id,
-                cs.layer,
+                clean_cs.capability_id,
+                clean_cs.layer,
                 ops_json,
-                cs.backup_bytes as i64,
+                clean_cs.backup_bytes as i64,
                 status_str,
-                cs.undo_expires_at
+                clean_cs.undo_expires_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-                cs.summary,
+                clean_cs.summary,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn insert_changeset(&self, cs: &ChangeSet) -> anyhow::Result<()> {
+        self.save_changeset(cs)
     }
 
     pub fn get_changeset(&self, cs_id: &str) -> anyhow::Result<Option<ChangeSet>> {
@@ -346,6 +363,8 @@ impl StateDb {
         details: Option<&str>,
     ) -> anyhow::Result<()> {
         let redacted = redact_json_value(args);
+        let clean_details =
+            details.map(|d| crate::security_guard::SensitiveDataGuard::redact_text(d).0);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO audit_log (timestamp, task_id, capability_id, origin, effect, decision, status, redacted_args, details)
@@ -359,7 +378,7 @@ impl StateDb {
                 decision,
                 status,
                 serde_json::to_string(&redacted).unwrap_or_default(),
-                details,
+                clean_details,
             ],
         )?;
         Ok(())
@@ -374,17 +393,25 @@ impl StateDb {
         // Never persist raw private keys, API tokens, or passwords in memory (§11.3, M-02)
         let lower_val = value.to_ascii_lowercase();
         let lower_subj = subject.to_ascii_lowercase();
-        if lower_val.contains("-----begin ")
+        if crate::security_guard::SensitiveDataGuard::contains_sensitive_secret(subject).is_some()
+            || crate::security_guard::SensitiveDataGuard::contains_sensitive_secret(value).is_some()
+            || lower_val.contains("-----begin ")
             || lower_val.contains("sk-")
             || lower_val.contains("api_key")
             || lower_val.contains("apikey")
             || lower_val.contains("password")
             || value.contains("密码")
             || value.contains("口令")
+            || value.contains("密钥")
+            || value.contains("私钥")
             || lower_subj.contains("password")
             || lower_subj.contains("secret")
             || lower_subj.contains("token")
             || lower_subj.contains("api_key")
+            || subject.contains("密码")
+            || subject.contains("口令")
+            || subject.contains("密钥")
+            || subject.contains("私钥")
         {
             anyhow::bail!("出于安全策略，禁止在记忆中心保存密钥、口令或认证凭据");
         }
@@ -511,6 +538,7 @@ impl StateDb {
         injection_risk_score: f64,
         action_taken: &str,
     ) {
+        let (clean_query, _) = crate::security_guard::SensitiveDataGuard::redact_text(query);
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "INSERT INTO decision_calibrations
@@ -518,7 +546,7 @@ impl StateDb {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     Utc::now().to_rfc3339(),
-                    query,
+                    clean_query,
                     top_option,
                     top_probability,
                     margin,
@@ -603,7 +631,7 @@ impl StateDb {
     }
 }
 
-/// Redact potential credential keys before writing to audit log (§5.6, §24.5).
+/// Redact potential credential keys and secret values before writing to audit log (§5.6, §24.5).
 pub fn redact_json_value(val: &serde_json::Value) -> serde_json::Value {
     match val {
         serde_json::Value::Object(map) => {
@@ -616,7 +644,12 @@ pub fn redact_json_value(val: &serde_json::Value) -> serde_json::Value {
                     || lower.contains("password")
                     || lower.contains("authorization")
                 {
-                    clean.insert(k.clone(), serde_json::Value::String("[REDACTED]".into()));
+                    clean.insert(
+                        k.clone(),
+                        serde_json::Value::String(
+                            crate::security_guard::REDACTED_SECRET_MARKER.into(),
+                        ),
+                    );
                 } else {
                     clean.insert(k.clone(), redact_json_value(v));
                 }
@@ -626,6 +659,9 @@ pub fn redact_json_value(val: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Array(arr) => {
             serde_json::Value::Array(arr.iter().map(redact_json_value).collect())
         }
+        serde_json::Value::String(s) => serde_json::Value::String(
+            crate::security_guard::SensitiveDataGuard::redact_text(s).0,
+        ),
         other => other.clone(),
     }
 }

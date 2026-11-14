@@ -13,6 +13,7 @@ use crate::policy::PolicyEngine;
 use crate::resource::ResourceEngine;
 use crate::router::{IntentRouter, RoutedIntent};
 use crate::runtime::{AgentCoordinator, SessionBuffer, SessionState};
+use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard, UnifiedTaskStateMachine};
 use crate::settings::SystemSettingsEngine;
 use chrono::Utc;
 use intentos_fsops::SafeFsEngine;
@@ -50,6 +51,7 @@ pub struct IntentOsCore {
     pub brain_config: BrainConfig,
     pub live_configs: Mutex<(AppConfig, BrainConfig)>,
     pub state_db: Arc<StateDb>,
+    ephemeral_state_db: Arc<StateDb>,
     pub index_db: Arc<IndexDb>,
     pub fs_engine: Arc<SafeFsEngine>,
     pub resources: Arc<ResourceEngine>,
@@ -75,6 +77,7 @@ impl IntentOsCore {
         let (app_config, brain_config) = load_or_create_configs(&paths)?;
 
         let state_db = Arc::new(StateDb::open(&paths.state_db_path())?);
+        let ephemeral_state_db = Arc::new(StateDb::open_in_memory()?);
         let index_db = Arc::new(IndexDb::open_or_rebuild(&paths.index_db_path())?);
 
         let mut auth_roots: Vec<PathBuf> = app_config
@@ -157,6 +160,7 @@ impl IntentOsCore {
             app_config,
             brain_config,
             state_db,
+            ephemeral_state_db,
             index_db,
             fs_engine,
             resources,
@@ -400,12 +404,13 @@ impl IntentOsCore {
     }
 
     pub(crate) fn persist_or_ephemeral(&self, task: &Task, incognito: bool) -> anyhow::Result<()> {
-        if incognito {
+        let privacy = PrivacySessionPolicy::from_incognito(incognito);
+        if !privacy.allows_task_persistence() {
             if task.status == TaskStatus::AwaitingApproval {
                 self.incognito_tasks
                     .lock()
                     .unwrap()
-                    .insert(task.id.clone(), task.clone());
+                    .insert(task.id.clone(), SensitiveDataGuard::sanitize_task_for_storage(task));
             }
             Ok(())
         } else {
@@ -431,13 +436,17 @@ impl IntentOsCore {
         injected_context: Vec<ContextBlock>,
         record_in_memory_hub: bool,
     ) -> anyhow::Result<Task> {
-        let is_incognito = req.incognito;
+        let privacy = PrivacySessionPolicy::from_incognito(req.incognito);
         let original_user_text = req.text.clone();
         let is_passthrough_attempt = original_user_text.trim().starts_with('$');
 
         let task = self.submit_intent_inner(req, injected_context).await?;
 
-        if record_in_memory_hub && !is_incognito && !is_passthrough_attempt {
+        if record_in_memory_hub
+            && privacy.allows_memory_write()
+            && !is_passthrough_attempt
+            && task.data_class != DataClass::Forbidden
+        {
             let assistant_text = task
                 .assistant_message
                 .as_deref()
@@ -463,12 +472,12 @@ impl IntentOsCore {
                 self,
                 &crate::memory_hub::RecordTurnInput {
                     session_id: task.session_id.clone(),
-                    user_text: original_user_text,
-                    assistant_text,
+                    user_text: SensitiveDataGuard::redact_text(&original_user_text).0,
+                    assistant_text: SensitiveDataGuard::redact_text(&assistant_text).0,
                     thinking: None,
                     tool_steps,
                     trace_dots: Vec::new(),
-                    incognito: false,
+                    incognito: !privacy.allows_memory_write(),
                 },
             );
         }
@@ -482,7 +491,15 @@ impl IntentOsCore {
         mut injected_context: Vec<ContextBlock>,
     ) -> anyhow::Result<Task> {
         let incognito = req.incognito;
-        let session = if incognito {
+        let privacy = PrivacySessionPolicy::from_incognito(incognito);
+        if !privacy.allows_memory_read() {
+            injected_context.retain(|b| {
+                b.taint != Taint::Memory
+                    && b.label != "memories"
+                    && b.label != "personal_os_memory"
+            });
+        }
+        let session = if !privacy.allows_memory_write() {
             SessionState {
                 session_id: format!(
                     "incog_{}",
@@ -564,10 +581,15 @@ impl IntentOsCore {
             req.text.clone()
         };
         if resolved_text == req.text {
+            let ctx_state_db = if privacy.allows_memory_read() {
+                Some(self.state_db.as_ref())
+            } else {
+                None
+            };
             let ctx_out = crate::intent_engine::resolve_context_references(
                 &req.text,
                 Some(&session),
-                Some(&self.state_db),
+                ctx_state_db,
                 None,
             );
             if ctx_out.is_resolved() {
@@ -575,7 +597,7 @@ impl IntentOsCore {
             }
         }
         // Wave 2 Personal Memory Hub multi-turn entity resolution ("打开我之前说的那个文件" / "把刚才提到的那个文件移到下载")
-        if !incognito
+        if privacy.allows_memory_read()
             && resolved_text == req.text
             && let Some(mem_resolved) =
                 resolve_conversational_memory_entity(self, &req.text, &session.session_id)
@@ -607,9 +629,12 @@ impl IntentOsCore {
         }
 
         let effective_force_agent = req.force_agent && self.gateway.has_usable_credentials();
+        let is_multi_clause_input =
+            crate::intent_engine::split_into_clauses(&resolved_text).len() >= 2;
         let is_aios_memory_or_adapter_query =
-            is_explicit_personal_memory_or_adapter_query(&resolved_text);
-        let is_doc_chapter_query = is_smart_document_chapter_query(&resolved_text);
+            !is_multi_clause_input && is_explicit_personal_memory_or_adapter_query(&resolved_text);
+        let is_doc_chapter_query =
+            !is_multi_clause_input && is_smart_document_chapter_query(&resolved_text);
 
         // When no cloud LLM credentials exist, answer personal-memory, document chapter-open, and software-adapter queries directly!
         if !effective_force_agent
@@ -634,8 +659,11 @@ impl IntentOsCore {
             RoutedIntent::EscalateL2 {
                 reason: "AIOS 个人记忆、文档章节大纲定位或软件指令转译查询升级至 L2 智能体".into(),
             }
-        } else {
+        } else if privacy.allows_memory_read() {
             self.router.route_text(&resolved_text, effective_force_agent)
+        } else {
+            IntentRouter::new(self.resources.clone())
+                .route_text(&resolved_text, effective_force_agent)
         };
 
         match routed {
@@ -701,11 +729,12 @@ impl IntentOsCore {
                 Ok(task)
             }
             RoutedIntent::SaveExplicitMemory { subject, value } => {
-                if incognito {
+                if !privacy.allows_memory_write() {
                     let msg = "当前处于隐私会话（Incognito）模式：不保存任何持久化记忆或历史记录".to_string();
+                    let clean_goal = SensitiveDataGuard::redact_text(&resolved_text).0;
                     return Ok(Task {
                         id: task_id,
-                        goal: resolved_text,
+                        goal: clean_goal,
                         session_id: Some(session.session_id),
                         project_id: None,
                         trigger: TaskTrigger::User,
@@ -725,10 +754,19 @@ impl IntentOsCore {
                         updated_at: Utc::now(),
                     });
                 }
-                match self
-                    .state_db
-                    .save_explicit_memory(&subject, &value, Some(&task_id))
-                {
+                let raw_secret_detected =
+                    SensitiveDataGuard::contains_sensitive_secret(&resolved_text).is_some()
+                        || SensitiveDataGuard::contains_sensitive_secret(&subject).is_some()
+                        || SensitiveDataGuard::contains_sensitive_secret(&value).is_some();
+                let save_res = if raw_secret_detected {
+                    Err(anyhow::anyhow!(
+                        "出于安全策略，禁止在记忆中心保存密钥、口令或认证凭据"
+                    ))
+                } else {
+                    self.state_db
+                        .save_explicit_memory(&subject, &value, Some(&task_id))
+                };
+                match save_res {
                     Ok(mem_id) => {
                         let msg = format!("✓ 已记住偏好 [{}]：{} = {}", mem_id, subject, value);
                         let task = Task {
@@ -758,10 +796,11 @@ impl IntentOsCore {
                         Ok(task)
                     }
                     Err(err) => {
-                        let msg = err.to_string();
-                        let task = Task {
+                        let (msg, _) = SensitiveDataGuard::redact_text(&err.to_string());
+                        let (clean_goal, _) = SensitiveDataGuard::redact_text(&resolved_text);
+                        let task = SensitiveDataGuard::sanitize_task_for_storage(&Task {
                             id: task_id,
-                            goal: resolved_text,
+                            goal: clean_goal,
                             session_id: Some(session.session_id),
                             project_id: None,
                             trigger: TaskTrigger::User,
@@ -779,7 +818,7 @@ impl IntentOsCore {
                             budget: TaskBudget::default(),
                             created_at: now,
                             updated_at: Utc::now(),
-                        };
+                        });
                         self.state_db.upsert_task(&task)?;
                         Ok(task)
                     }
@@ -875,10 +914,27 @@ impl IntentOsCore {
                     && !is_doc_chapter_query
                 {
                     let descriptors = self.broker.descriptors();
-                    match self
-                        .decision
-                        .classify_colloquial_intent(&resolved_text, &descriptors)
-                    {
+                    let l1_outcome = if is_multi_clause_input {
+                        let extra_taint =
+                            if crate::decision::score_prompt_injection_risk(&resolved_text) >= 0.65
+                            {
+                                Some(Taint::LocalUntrusted)
+                            } else {
+                                None
+                            };
+                        L1DecisionOutcome::EscalateL2 {
+                            reason: "检测到多子句复合意图，交由复合意图拆解器与 L2 智能体协同处理"
+                                .into(),
+                            extra_taint,
+                        }
+                    } else if privacy.allows_memory_write() {
+                        self.decision
+                            .classify_colloquial_intent(&resolved_text, &descriptors)
+                    } else {
+                        DecisionAdapter::new(self.gateway.clone(), self.ephemeral_state_db.clone())
+                            .classify_colloquial_intent(&resolved_text, &descriptors)
+                    };
+                    match l1_outcome {
                         L1DecisionOutcome::Execute {
                             capability_id,
                             arguments,
@@ -915,14 +971,14 @@ impl IntentOsCore {
                             {
                                 taints.push(et);
                             }
-                            let task = Task {
+                            let mut task = Task {
                                 id: task_id,
                                 goal: resolved_text,
                                 session_id: Some(session.session_id),
                                 project_id: None,
                                 trigger: TaskTrigger::User,
                                 route: RouteLayer::L1,
-                                status: TaskStatus::Paused,
+                                status: TaskStatus::Created,
                                 steps: Vec::new(),
                                 changeset_ids: Vec::new(),
                                 pending_approval: None,
@@ -936,6 +992,11 @@ impl IntentOsCore {
                                 created_at: now,
                                 updated_at: Utc::now(),
                             };
+                            UnifiedTaskStateMachine::transition_task(
+                                &mut task,
+                                TaskStatus::Paused,
+                                None,
+                            )?;
                             self.persist_or_ephemeral(&task, incognito)?;
                             return Ok(task);
                         }
@@ -946,15 +1007,14 @@ impl IntentOsCore {
                                 taints.push(et);
                             }
 
-                            // v0.3 `intent_engine` fallback: check compound deterministic steps or Pinyin/fuzzy match
-                            // before escalating to L2 (when input is untainted and not a "怎么/如何" how-to query;
-                            // offline mode also decomposes polite "帮我..." compound system intents).
+                            // v0.3 + M1 P0 `intent_engine` compound clause integrity & Pinyin/fuzzy evaluation:
+                            // 1) All-resolved compound system steps execute deterministically.
+                            // 2) Partially-resolved compound intents (`total_clauses >= 2 && has_unresolved_clauses()`)
+                            //    NEVER silently drop unresolved sub-goals: escalate to L2 with a plan ContextBlock
+                            //    when online, or report unresolved sub-goals explicitly with `PartiallyCompleted` offline.
+                            // 3) Single-clause utterances (`total_clauses <= 1`) preserve exact Pinyin/fuzzy fallback.
                             if !taints.contains(&Taint::LocalUntrusted)
                                 && !taints.contains(&Taint::RemoteUntrusted)
-                                && !resolved_text.contains("怎么")
-                                && !resolved_text.contains("如何")
-                                && (!resolved_text.contains("帮我")
-                                    || !self.gateway.has_usable_credentials())
                             {
                                 let compiler =
                                     crate::intent_engine::PatternCompiler::compile_from_descriptors(
@@ -965,8 +1025,16 @@ impl IntentOsCore {
                                     &resolved_text,
                                     &compiler,
                                 );
-                                if compound.is_compound
+
+                                if compound.total_clauses >= 2
+                                    && compound.all_clauses_resolved
+                                    && compound.is_compound
                                     && compound.steps.len() >= 2
+                                    && !resolved_text.contains("怎么")
+                                    && !resolved_text.contains("如何")
+                                    && (!resolved_text.contains("帮我")
+                                        || !self.gateway.has_usable_credentials())
+                                    && !compound.requires_confirmation
                                     && compound.steps.iter().all(|s| {
                                         s.confidence >= 0.85 && !s.depends_on_previous_output
                                     })
@@ -985,14 +1053,14 @@ impl IntentOsCore {
                                     } else {
                                         TaskStatus::Failed
                                     };
-                                    let task = Task {
+                                    let mut task = Task {
                                         id: task_id,
                                         goal: resolved_text,
                                         session_id: Some(session.session_id),
                                         project_id: None,
                                         trigger: TaskTrigger::User,
                                         route: RouteLayer::L1,
-                                        status,
+                                        status: TaskStatus::Created,
                                         steps: Vec::new(),
                                         changeset_ids: rep.changeset_ids,
                                         pending_approval: None,
@@ -1006,11 +1074,182 @@ impl IntentOsCore {
                                         created_at: now,
                                         updated_at: Utc::now(),
                                     };
+                                    UnifiedTaskStateMachine::transition_task(
+                                        &mut task,
+                                        status,
+                                        None,
+                                    )?;
                                     self.persist_or_ephemeral(&task, incognito)?;
                                     return Ok(task);
                                 }
 
-                                if !resolved_text.contains("帮我") {
+                                if compound.total_clauses >= 2
+                                    && compound.has_unresolved_clauses()
+                                    && !compound.steps.is_empty()
+                                {
+                                    if self.gateway.has_usable_credentials() {
+                                        let resolved_lines = compound
+                                            .steps
+                                            .iter()
+                                            .map(|s| {
+                                                format!(
+                                                    "- 子句#{}: `{}` -> 候选能力 `{}` (args={})",
+                                                    s.step_index,
+                                                    s.raw_segment,
+                                                    s.capability_id,
+                                                    s.arguments
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        let unresolved_lines = compound
+                                            .unresolved_clauses
+                                            .iter()
+                                            .map(|u| {
+                                                format!(
+                                                    "- 子句#{} [{}]: `{}` — {}",
+                                                    u.clause_index, u.kind, u.raw_clause, u.reason
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        injected_context.push(ContextBlock {
+                                            id: "compound_plan_hint".into(),
+                                            label: "compound_intent_plan".into(),
+                                            content: format!(
+                                                "复合意图预拆解结果（共 {} 个子目标，请完整执行所有已解析步骤与未解析子目标，禁止遗漏任何子句）：\n已识别确定性子步骤：\n{}\n需智能体继续完成的子目标：\n{}",
+                                                compound.total_clauses,
+                                                resolved_lines,
+                                                unresolved_lines
+                                            ),
+                                            taint: Taint::System,
+                                            data_class: DataClass::Public,
+                                        });
+                                    } else {
+                                        let unresolved_desc = compound
+                                            .unresolved_clauses
+                                            .iter()
+                                            .map(|u| {
+                                                format!("「{}」（{}）", u.raw_clause, u.reason)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("；");
+
+                                        if compound.requires_confirmation
+                                            || !compound.steps.iter().all(|s| {
+                                                s.confidence >= 0.75
+                                                    && !s.depends_on_previous_output
+                                            })
+                                        {
+                                            let planned_desc = compound
+                                                .steps
+                                                .iter()
+                                                .map(|s| {
+                                                    format!(
+                                                        "「{}」-> `{}`",
+                                                        s.raw_segment, s.capability_id
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("；");
+                                            let msg = format!(
+                                                "复合意图包含未解析子目标，离线模式下已生成安全预览（未自动跳过任何子句）：待确认步骤 {}；暂未执行的子目标：{}。请配置大模型凭据或分别确认执行。",
+                                                planned_desc, unresolved_desc
+                                            );
+                                            let mut task = Task {
+                                                id: task_id,
+                                                goal: resolved_text,
+                                                session_id: Some(session.session_id),
+                                                project_id: None,
+                                                trigger: TaskTrigger::User,
+                                                route: RouteLayer::L2,
+                                                status: TaskStatus::Created,
+                                                steps: Vec::new(),
+                                                changeset_ids: Vec::new(),
+                                                pending_approval: None,
+                                                candidates_for_disambiguation: Vec::new(),
+                                                assistant_message: Some(msg.clone()),
+                                                result_summary: Some(msg),
+                                                handoff_command: None,
+                                                taint: taints,
+                                                data_class,
+                                                budget: TaskBudget::default(),
+                                                created_at: now,
+                                                updated_at: Utc::now(),
+                                            };
+                                            UnifiedTaskStateMachine::transition_task(
+                                                &mut task,
+                                                TaskStatus::Paused,
+                                                None,
+                                            )?;
+                                            self.persist_or_ephemeral(&task, incognito)?;
+                                            return Ok(task);
+                                        }
+
+                                        let rep = crate::intent_engine::execute_compound(
+                                            self,
+                                            &resolved_text,
+                                            Some(compound.steps),
+                                            Some(&session.session_id),
+                                            incognito,
+                                            &compiler,
+                                        )
+                                        .await?;
+
+                                        let (target_status, full_msg) = if rep.completed_steps > 0 {
+                                            (
+                                                TaskStatus::PartiallyCompleted,
+                                                format!(
+                                                    "已完成确定性子步骤：{}；但以下子目标在离线模式下暂未完成（未静默跳过）：{}。如需开放式推理分析，请配置远程模型凭据后继续处理。",
+                                                    rep.summary_message, unresolved_desc
+                                                ),
+                                            )
+                                        } else {
+                                            (
+                                                TaskStatus::Failed,
+                                                format!(
+                                                    "复合意图子步骤执行失败：{}；另有未解析子目标：{}",
+                                                    rep.summary_message, unresolved_desc
+                                                ),
+                                            )
+                                        };
+
+                                        let mut task = Task {
+                                            id: task_id,
+                                            goal: resolved_text,
+                                            session_id: Some(session.session_id),
+                                            project_id: None,
+                                            trigger: TaskTrigger::User,
+                                            route: RouteLayer::L2,
+                                            status: TaskStatus::Created,
+                                            steps: Vec::new(),
+                                            changeset_ids: rep.changeset_ids,
+                                            pending_approval: None,
+                                            candidates_for_disambiguation: Vec::new(),
+                                            assistant_message: Some(full_msg.clone()),
+                                            result_summary: Some(full_msg),
+                                            handoff_command: None,
+                                            taint: taints,
+                                            data_class,
+                                            budget: TaskBudget::default(),
+                                            created_at: now,
+                                            updated_at: Utc::now(),
+                                        };
+                                        UnifiedTaskStateMachine::transition_task(
+                                            &mut task,
+                                            target_status,
+                                            None,
+                                        )?;
+                                        self.persist_or_ephemeral(&task, incognito)?;
+                                        return Ok(task);
+                                    }
+                                }
+
+                                if compound.total_clauses <= 1
+                                    && !resolved_text.contains("怎么")
+                                    && !resolved_text.contains("如何")
+                                    && !resolved_text.contains("帮我")
+                                {
                                     let ranked = crate::intent_engine::rank_capabilities(
                                         &resolved_text,
                                         &compiler,
@@ -1032,6 +1271,7 @@ impl IntentOsCore {
                                         // If `file.open` could not resolve a literal filename (e.g. `"打开我的硕士论文"` -> `paper_main.docx`),
                                         // consult `memory_hub` semantic document outlines before attempting an unresolved raw path!
                                         if top.capability_id == "file.open"
+                                            && privacy.allows_memory_read()
                                             && args
                                                 .get("path")
                                                 .and_then(|v| v.as_str())
@@ -1075,8 +1315,8 @@ impl IntentOsCore {
                     }
                 }
 
-                // Automatically inject Personal OS Memory RAG context before L2 LLM inference (when not incognito)
-                if !incognito
+                // Automatically inject Personal OS Memory RAG context before L2 LLM inference (when privacy policy permits)
+                if privacy.allows_memory_read()
                     && self.gateway.has_usable_credentials()
                     && !injected_context
                         .iter()
@@ -1116,7 +1356,7 @@ impl IntentOsCore {
                     project_id: None,
                     trigger: TaskTrigger::User,
                     route: RouteLayer::L2,
-                    status: TaskStatus::Running,
+                    status: TaskStatus::Created,
                     steps: Vec::new(),
                     changeset_ids: Vec::new(),
                     pending_approval: None,
@@ -1130,6 +1370,7 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: now,
                 };
+                UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Running, None)?;
                 self.persist_or_ephemeral(&task, incognito)?;
 
                 match self
@@ -1141,9 +1382,12 @@ impl IntentOsCore {
                         task.steps = run_out.steps;
                         task.changeset_ids = run_out.changeset_ids;
                         task.handoff_command = run_out.handoff_command;
-                        task.updated_at = Utc::now();
                         if let Some(pa) = run_out.pending_approval {
-                            task.status = TaskStatus::AwaitingApproval;
+                            UnifiedTaskStateMachine::transition_task(
+                                &mut task,
+                                TaskStatus::AwaitingApproval,
+                                None,
+                            )?;
                             task.assistant_message = Some(pa.summary.clone());
                             task.pending_approval = Some(pa);
                         } else {
@@ -1151,10 +1395,14 @@ impl IntentOsCore {
                                 &run_out.final_message,
                                 &task.steps,
                             );
-                            task.status = TaskStatus::Completed;
+                            UnifiedTaskStateMachine::transition_task(
+                                &mut task,
+                                TaskStatus::Completed,
+                                None,
+                            )?;
                             task.assistant_message = Some(enriched_msg.clone());
                             task.result_summary = Some(enriched_msg.clone());
-                            if !incognito {
+                            if privacy.allows_memory_write() {
                                 self.sessions.append_turn(
                                     &session.session_id,
                                     &resolved_text,
@@ -1183,10 +1431,12 @@ impl IntentOsCore {
                         {
                             return Ok(fallback_task);
                         }
-                        task.status = TaskStatus::Failed;
-                        task.assistant_message = Some(err.to_string());
-                        task.result_summary = Some(err.to_string());
-                        task.updated_at = Utc::now();
+                        let err_msg = err.to_string();
+                        UnifiedTaskStateMachine::transition_task(
+                            &mut task,
+                            TaskStatus::Failed,
+                            Some(&err_msg),
+                        )?;
                         self.persist_or_ephemeral(&task, incognito)?;
                         Ok(task)
                     }
@@ -1227,7 +1477,7 @@ impl IntentOsCore {
             project_id: None,
             trigger: TaskTrigger::User,
             route,
-            status: TaskStatus::Running,
+            status: TaskStatus::Created,
             steps: Vec::new(),
             changeset_ids: Vec::new(),
             pending_approval: None,
@@ -1241,6 +1491,7 @@ impl IntentOsCore {
             created_at: now,
             updated_at: now,
         };
+        UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Running, None)?;
 
         match self.broker.dispatch(&call).await? {
             BrokerDispatchOutcome::Executed(res) => {
@@ -1273,11 +1524,12 @@ impl IntentOsCore {
                     res.status,
                     ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
                 );
-                task.status = if ok_status {
+                let final_status = if ok_status {
                     TaskStatus::Completed
                 } else {
                     TaskStatus::Failed
                 };
+                UnifiedTaskStateMachine::transition_task(&mut task, final_status, None)?;
                 task.assistant_message = Some(res.message.clone());
                 task.result_summary = Some(res.message.clone());
                 task.steps.push(TaskStep {
@@ -1293,14 +1545,18 @@ impl IntentOsCore {
                 });
                 task.updated_at = Utc::now();
                 self.persist_or_ephemeral(&task, incognito)?;
-                if !incognito {
+                if PrivacySessionPolicy::from_incognito(incognito).allows_memory_write() {
                     self.sessions
                         .append_turn(session_id, goal, &res.message, last_res);
                 }
                 Ok(task)
             }
             BrokerDispatchOutcome::RequiresApproval(pa) => {
-                task.status = TaskStatus::AwaitingApproval;
+                UnifiedTaskStateMachine::transition_task(
+                    &mut task,
+                    TaskStatus::AwaitingApproval,
+                    None,
+                )?;
                 task.assistant_message = Some(pa.summary.clone());
                 task.pending_approval = Some(pa);
                 task.updated_at = Utc::now();
@@ -1308,7 +1564,7 @@ impl IntentOsCore {
                 Ok(task)
             }
             BrokerDispatchOutcome::Denied { reason } => {
-                task.status = TaskStatus::Failed;
+                UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Failed, None)?;
                 task.assistant_message = Some(format!("策略拒绝：{}", reason));
                 task.result_summary = Some(reason);
                 task.updated_at = Utc::now();
@@ -1458,8 +1714,7 @@ impl IntentOsCore {
         if !really_incognito && let Some(ref csid) = res.changeset_id {
             task.changeset_ids.push(csid.clone());
         }
-        task.pending_approval = None;
-        task.status = if matches!(
+        let target_status = if matches!(
             res.status,
             ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
         ) {
@@ -1467,6 +1722,12 @@ impl IntentOsCore {
         } else {
             TaskStatus::Failed
         };
+        if UnifiedTaskStateMachine::can_transition(task.status, target_status) {
+            UnifiedTaskStateMachine::transition_task(&mut task, target_status, None)?;
+        } else {
+            task.pending_approval = None;
+            task.status = target_status;
+        }
         task.assistant_message = Some(res.message.clone());
         task.result_summary = Some(res.message.clone());
         let step = TaskStep {
@@ -1611,10 +1872,14 @@ impl IntentOsCore {
                 updated_at: now,
             }
         };
-        task.pending_approval = None;
-        task.status = TaskStatus::Cancelled;
+        if UnifiedTaskStateMachine::can_transition(task.status, TaskStatus::Cancelled) {
+            UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Cancelled, None)?;
+        } else {
+            task.pending_approval = None;
+            task.status = TaskStatus::Cancelled;
+            task.updated_at = Utc::now();
+        }
         task.assistant_message = Some("用户拒绝了该操作，未产生修改".into());
-        task.updated_at = Utc::now();
         if !is_incognito {
             self.state_db.upsert_task(&task)?;
         }
@@ -1892,12 +2157,15 @@ impl IntentOsCore {
             if matches!(
                 t.status,
                 TaskStatus::Running | TaskStatus::Planning | TaskStatus::AwaitingApproval
-            ) {
+            ) && UnifiedTaskStateMachine::can_transition(t.status, TaskStatus::Cancelled)
+            {
                 self.gateway.cancel_task_leases(&t.id);
                 let mut cancelled = t;
-                cancelled.status = TaskStatus::Cancelled;
-                cancelled.pending_approval = None;
-                cancelled.updated_at = Utc::now();
+                UnifiedTaskStateMachine::transition_task(
+                    &mut cancelled,
+                    TaskStatus::Cancelled,
+                    None,
+                )?;
                 self.state_db.upsert_task(&cancelled)?;
             }
         }
@@ -1916,7 +2184,10 @@ impl IntentOsCore {
         incognito: bool,
         now: chrono::DateTime<Utc>,
     ) -> anyhow::Result<Option<Task>> {
-        if is_smart_document_chapter_query(resolved_text)
+        let privacy = PrivacySessionPolicy::from_incognito(incognito);
+
+        if privacy.allows_memory_read()
+            && is_smart_document_chapter_query(resolved_text)
             && let Some(doc_task) = self
                 .try_execute_smart_document_open(
                     task_id,
@@ -1933,69 +2204,63 @@ impl IntentOsCore {
             return Ok(Some(doc_task));
         }
 
-        if !incognito || crate::memory_hub::MemoryHubDb::path_for_core(self).exists() {
-            let sid_opt = if incognito {
-                None
-            } else {
-                Some(session.session_id.as_str())
-            };
-            if let Some((answer_md, hits)) =
+        if privacy.allows_memory_read()
+            && let Some((answer_md, hits)) =
                 crate::memory_hub::try_answer_memory_query_deterministically(
                     self,
                     resolved_text,
-                    sid_opt,
+                    Some(session.session_id.as_str()),
                 )
-            {
-                if !taints.contains(&Taint::Memory) {
-                    taints.push(Taint::Memory);
-                }
-                if DataClass::Personal > data_class {
-                    data_class = DataClass::Personal;
-                }
-                let step = TaskStep {
-                    step_id: format!("mem_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
-                    capability_id: "memory_hub.query".into(),
-                    arguments_summary: json!({ "query": resolved_text }).to_string(),
-                    status: ExecutionStatus::Exited,
-                    verification: intentos_protocol::VerificationReport {
-                        state: intentos_protocol::VerificationState::Passed,
-                        method: "memory_hub_sqlite_wal".into(),
-                        checks: vec!["personal_memory_recalled".into()],
-                        details: None,
-                    },
-                    changeset_id: None,
-                    message: format!("已从个人记忆与数据层召回 {} 项记录", hits.len()),
-                    data: json!({ "hits": hits }),
-                    duration_ms: 1,
-                };
-                let task = Task {
-                    id: task_id.to_string(),
-                    goal: resolved_text.to_string(),
-                    session_id: Some(session.session_id.clone()),
-                    project_id: None,
-                    trigger: TaskTrigger::User,
-                    route: RouteLayer::L2,
-                    status: TaskStatus::Completed,
-                    steps: vec![step],
-                    changeset_ids: Vec::new(),
-                    pending_approval: None,
-                    candidates_for_disambiguation: Vec::new(),
-                    assistant_message: Some(answer_md.clone()),
-                    result_summary: Some(answer_md.clone()),
-                    handoff_command: None,
-                    taint: taints,
-                    data_class,
-                    budget: TaskBudget::default(),
-                    created_at: now,
-                    updated_at: Utc::now(),
-                };
-                self.persist_or_ephemeral(&task, incognito)?;
-                if !incognito {
-                    self.sessions
-                        .append_turn(&session.session_id, resolved_text, &answer_md, None);
-                }
-                return Ok(Some(task));
+        {
+            if !taints.contains(&Taint::Memory) {
+                taints.push(Taint::Memory);
             }
+            if DataClass::Personal > data_class {
+                data_class = DataClass::Personal;
+            }
+            let step = TaskStep {
+                step_id: format!("mem_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+                capability_id: "memory_hub.query".into(),
+                arguments_summary: json!({ "query": resolved_text }).to_string(),
+                status: ExecutionStatus::Exited,
+                verification: intentos_protocol::VerificationReport {
+                    state: intentos_protocol::VerificationState::Passed,
+                    method: "memory_hub_sqlite_wal".into(),
+                    checks: vec!["personal_memory_recalled".into()],
+                    details: None,
+                },
+                changeset_id: None,
+                message: format!("已从个人记忆与数据层召回 {} 项记录", hits.len()),
+                data: json!({ "hits": hits }),
+                duration_ms: 1,
+            };
+            let task = Task {
+                id: task_id.to_string(),
+                goal: resolved_text.to_string(),
+                session_id: Some(session.session_id.clone()),
+                project_id: None,
+                trigger: TaskTrigger::User,
+                route: RouteLayer::L2,
+                status: TaskStatus::Completed,
+                steps: vec![step],
+                changeset_ids: Vec::new(),
+                pending_approval: None,
+                candidates_for_disambiguation: Vec::new(),
+                assistant_message: Some(answer_md.clone()),
+                result_summary: Some(answer_md.clone()),
+                handoff_command: None,
+                taint: taints,
+                data_class,
+                budget: TaskBudget::default(),
+                created_at: now,
+                updated_at: Utc::now(),
+            };
+            self.persist_or_ephemeral(&task, incognito)?;
+            if privacy.allows_memory_write() {
+                self.sessions
+                    .append_turn(&session.session_id, resolved_text, &answer_md, None);
+            }
+            return Ok(Some(task));
         }
 
         if let Some(adapter_out) =
@@ -2049,6 +2314,9 @@ impl IntentOsCore {
         now: chrono::DateTime<Utc>,
         require_chapter: bool,
     ) -> anyhow::Result<Option<Task>> {
+        if !PrivacySessionPolicy::from_incognito(incognito).allows_memory_read() {
+            return Ok(None);
+        }
         let chap_num_opt = crate::memory_hub::extract_chapter_number_hint(resolved_text);
         if require_chapter && chap_num_opt.is_none() {
             return Ok(None);

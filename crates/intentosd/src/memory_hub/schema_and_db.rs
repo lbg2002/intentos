@@ -4,7 +4,6 @@
 //! for IntentOS Memory & Personal Data Management Layer (`memory_hub`).
 
 use crate::core::IntentOsCore;
-use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -394,26 +393,7 @@ pub fn compute_entity_id(entity_kind: &str, canonical_value: &str) -> String {
 
 /// Scrub secret tokens / private keys before persisting snippets or messages to disk.
 pub fn scrub_sensitive_text(raw: &str) -> String {
-    static SECRET_RE: OnceLock<Regex> = OnceLock::new();
-    static KV_SECRET_RE: OnceLock<Regex> = OnceLock::new();
-
-    if raw.contains("-----BEGIN ") && raw.contains("PRIVATE KEY-----") {
-        return "[REDACTED_PRIVATE_KEY]".to_string();
-    }
-
-    let secret_re = SECRET_RE.get_or_init(|| {
-        Regex::new(r"\b(sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{25,})\b")
-            .expect("valid secret regex")
-    });
-    let kv_re = KV_SECRET_RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(api[_-]?key|password|secret|access[_-]?token)\s*([=:])\s*([^\s,;]+)")
-            .expect("valid kv secret regex")
-    });
-
-    let step1 = secret_re.replace_all(raw, "[REDACTED_KEY]");
-    kv_re
-        .replace_all(&step1, "${1}${2}[REDACTED]")
-        .into_owned()
+    crate::security_guard::SensitiveDataGuard::redact_text(raw).0
 }
 
 /// Check whether a filesystem path points to sensitive credential storage that must not be indexed.
