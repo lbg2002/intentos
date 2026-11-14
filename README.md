@@ -145,6 +145,19 @@ cargo test --workspace -- --test-threads=1
 
 ---
 
+## 🗺️ v0.2 Cognitive Shell 路线图
+
+IntentOS 正在从 v0.1「单点系统控制与命令路由壳层」全面升级为 **v0.2 Cognitive Shell（懂个人项目上下文、能跨软件协同、可验证且可逆的高可信桌面认知壳层）**。完整五层目标架构、北极星验收场景与「暂缓方向」工程边界请参阅 **[docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md)**，实时研发进度可在 **[GitHub Milestones](https://github.com/lbg2002/intentos/milestones)** 查看：
+
+| 里程碑 | 核心目标 | 关联 Issues |
+| :--- | :--- | :--- |
+| **[v0.2-M1: 统一智能体核心与可信底座加固](https://github.com/lbg2002/intentos/milestone/1)** | 拆分 `turn_engine.rs`、统一多后端 `CapabilityBroker` 受控执行、`TurnEffectLedger` 副作用幂等防重放、三级隐私隔离与 `SensitiveDataGuard` 全链路脱敏、重构 L1 `StructuredIntent` 目标识别与复合意图不丢步 | [#1](https://github.com/lbg2002/intentos/issues/1) · [#2](https://github.com/lbg2002/intentos/issues/2) · [#3](https://github.com/lbg2002/intentos/issues/3) · [#4](https://github.com/lbg2002/intentos/issues/4) · [#5](https://github.com/lbg2002/intentos/issues/5) |
+| **[v0.2-M2: 动态能力发现与受控系统执行](https://github.com/lbg2002/intentos/milestone/2)** | 动态能力发现元工具 (`capability.search/describe/invoke`)、C0–C4 五级受控终端 (`CommandProposal`)、系统故障自诊断 (`diag.*`) 与五级自动降级 `SoftwareCapabilityProvider` | [#6](https://github.com/lbg2002/intentos/issues/6) · [#7](https://github.com/lbg2002/intentos/issues/7) · [#8](https://github.com/lbg2002/intentos/issues/8) · [#9](https://github.com/lbg2002/intentos/issues/9) |
+| **[v0.2-M3: M0-M4 个人认知记忆与工作空间恢复](https://github.com/lbg2002/intentos/milestone/3)** | M0–M4 五层个人认知记忆与动态召回、项目工作空间一键恢复、受控技能自动沉淀 (`SKILL.md`)，以及「每日认知简报与工作接续」北极星闭环验收 | [#10](https://github.com/lbg2002/intentos/issues/10) · [#11](https://github.com/lbg2002/intentos/issues/11) · [#12](https://github.com/lbg2002/intentos/issues/12) · [#13](https://github.com/lbg2002/intentos/issues/13) |
+| **[v0.2-M4: 主动式事件总线、极简设置与 AgentBench](https://github.com/lbg2002/intentos/milestone/4)** | 真实后台 `EventBus`（`inotify` / D-Bus / 持久化定时 + `settle_seconds` 防抖）、设置中心收敛为 5 核心页 + 高级折叠区、四层环境验证型 `IntentOS AgentBench` | [#14](https://github.com/lbg2002/intentos/issues/14) · [#15](https://github.com/lbg2002/intentos/issues/15) · [#16](https://github.com/lbg2002/intentos/issues/16) |
+
+---
+
 ## 💬 参与共建与意见反馈
 
 IntentOS 目前处于快速迭代演进阶段，非常欢迎任何使用反馈与建议！
