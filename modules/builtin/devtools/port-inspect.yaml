@@ -1,0 +1,22 @@
+id: port.inspect
+version: 1
+summary: 查询指定端口或全部监听端口对应的进程信息
+category: devtools
+aliases: ["端口占用", "端口谁在用", "监听端口", "port inspect"]
+l0_patterns:
+  - "{port} 端口谁在用"
+  - "查端口 {port}"
+input_schema:
+  type: object
+  properties:
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: port.inspect
+undo: none
+feedback: "已完成端口监听检查"

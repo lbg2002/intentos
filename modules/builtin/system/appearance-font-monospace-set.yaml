@@ -1,0 +1,33 @@
+id: appearance.font.monospace.set
+version: 1
+summary: 设置终端与代码等宽字体及字号（6–24 pt，校验 fc-list 已安装字体，可撤销）
+category: system
+aliases: ["等宽字体", "代码字体", "终端字体", "monospace font"]
+l0_patterns:
+  - "等宽字体换成 {family}"
+input_schema:
+  type: object
+  properties:
+    family:
+      type: string
+      maxLength: 128
+    size:
+      type: number
+      minimum: 6
+      maximum: 24
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: font
+  schema: org.gnome.desktop.interface
+  key: monospace-font-name
+setting:
+  key_id: appearance.font.monospace
+  min: 6
+  max: 24
+  step: 1
+  unit: "pt"
+undo: restore_previous_value
+verification:
+  kind: readback

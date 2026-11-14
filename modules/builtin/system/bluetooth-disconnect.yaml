@@ -1,0 +1,24 @@
+id: bluetooth.disconnect
+version: 1
+summary: 断开当前已连接的指定蓝牙设备
+category: system
+aliases: ["断开蓝牙", "断开耳机", "disconnect bluetooth"]
+l0_patterns:
+  - "断开蓝牙(设备)? {device}"
+input_schema:
+  type: object
+  required: [device]
+  properties:
+    device:
+      type: string
+      maxLength: 128
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: bluetooth_connect
+setting:
+  key_id: bluetooth.disconnect
+undo: none
+verification:
+  kind: readback

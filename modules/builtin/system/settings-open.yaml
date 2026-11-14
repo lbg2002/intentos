@@ -1,0 +1,19 @@
+id: settings.open
+version: 1
+summary: 打开系统设置中心首页
+category: system
+aliases: ["打开设置", "系统设置", "设置中心", "open settings"]
+l0_patterns:
+  - "打开(系统)?设置"
+input_schema:
+  type: object
+  properties: {}
+effects: [ui]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: control_center
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求打开系统设置首页"

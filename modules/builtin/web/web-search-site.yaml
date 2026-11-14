@@ -1,0 +1,27 @@
+id: web.search_site
+version: 1
+summary: 使用站内搜索模板（GitHub、B站、知乎、crates.io、docs.rs、Stack Overflow 等）搜索关键词
+category: web
+aliases: ["站内搜索", "在网站搜", "site search"]
+l0_patterns:
+  - "在 {site} (上)?(搜|搜索) {query}"
+  - "{site_alias} {query}"
+input_schema:
+  type: object
+  required: [site, query]
+  properties:
+    site:
+      type: string
+      maxLength: 128
+    query:
+      type: string
+      maxLength: 512
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: web.search_site
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求在 {site} 搜索 “{query}”"

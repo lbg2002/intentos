@@ -1,0 +1,640 @@
+/* IntentOS v0.3 — Spotlight Launcher, Grouped Candidates & Contextual Action Menu */
+
+/* Top Status Bar (UI-09) */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 1.25rem;
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.82rem;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.brand-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--yaru-orange) 0%, #f97316 55%, var(--accent) 100%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.78rem;
+  box-shadow: 0 2px 8px rgba(233, 84, 32, 0.35);
+}
+
+.topbar-brand h1 {
+  margin: 0;
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 550;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.status-dot.running {
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  animation: pulse-dot 1.2s infinite ease-in-out;
+}
+
+.status-dot.approval {
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
+  animation: pulse-dot 1s infinite ease-in-out;
+}
+
+.status-dot.incognito {
+  background: var(--priv);
+  box-shadow: 0 0 10px var(--priv);
+}
+
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.28); opacity: 0.65; }
+}
+
+.mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+}
+
+.mode-switch-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.24rem 0.72rem;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 150ms var(--ease-out);
+}
+
+.mode-switch-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.transcript-warning-pill {
+  display: none;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: var(--r2-bg);
+  border: 1px solid var(--r2-border);
+  color: var(--r2-fg);
+  font-size: 0.73rem;
+  font-weight: 650;
+}
+.transcript-warning-pill.visible {
+  display: inline-flex;
+}
+
+/* Main Shell Container */
+.shell-stage {
+  max-width: 1280px;
+  margin: 1.4rem auto 3.5rem;
+  padding: 0 1.2rem;
+  transition: max-width 240ms var(--ease-out);
+}
+
+body[data-view-mode="spotlight"] .shell-stage {
+  max-width: 860px;
+}
+
+/* Spotlight / Command Bar Card */
+.launcher-shell {
+  position: relative;
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-shell);
+  overflow: visible;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.launcher-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-shell), 0 0 0 2px var(--accent-glow);
+}
+
+.launcher-shell.incog-border {
+  border-color: var(--priv);
+  box-shadow: var(--shadow-shell), 0 0 0 2px var(--priv-bg);
+}
+
+/* Context / Attachment Capsules Bar (UI-13) */
+.context-capsules-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.5rem 1.1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.24);
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+.capsules-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.context-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.16rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: var(--bg-selected);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-size: 0.74rem;
+  font-weight: 550;
+}
+
+.context-capsule .capsule-remove {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.context-capsule .capsule-remove:hover {
+  color: var(--err);
+}
+
+.capsule-add-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.capsule-chip-btn {
+  appearance: none;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.73rem;
+  padding: 0.15rem 0.52rem;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.capsule-chip-btn:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+
+/* Search / Intent Input Row */
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1.15rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.mode-indicator {
+  padding: 0.24rem 0.58rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--bg-selected);
+  color: var(--accent);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.mode-indicator.incog {
+  background: var(--priv-bg);
+  color: var(--priv);
+  border-color: var(--priv-border);
+}
+
+.mode-indicator.passthrough {
+  background: var(--yaru-orange-soft);
+  color: var(--yaru-orange);
+  border-color: rgba(233, 84, 32, 0.4);
+}
+
+#intent-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 1.14rem;
+  font-weight: 500;
+  font-family: inherit;
+  min-width: 0;
+}
+
+#intent-input::placeholder {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.latency-readout {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+/* Category Filter Bar (Tab Cycling) */
+.category-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 1.15rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.16);
+  overflow-x: auto;
+}
+
+.filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.cat-pill {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.2rem 0.62rem;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 120ms ease;
+  white-space: nowrap;
+}
+
+.cat-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.cat-pill.active {
+  background: var(--bg-selected);
+  color: var(--accent);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+/* Compound Intent Preview Banner */
+.compound-preview-bar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 1.15rem;
+  background: var(--yaru-orange-soft);
+  border-bottom: 1px solid rgba(233, 84, 32, 0.32);
+  font-size: 0.8rem;
+}
+.compound-preview-bar.visible {
+  display: flex;
+}
+
+/* Grouped Candidate List (UI-02) */
+.candidates-list {
+  max-height: 360px;
+  overflow-y: auto;
+  divide-y: 1px solid var(--border-subtle);
+}
+
+.candidate-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.36rem 1.15rem;
+  font-size: 0.71rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.28);
+  border-bottom: 1px solid var(--border-subtle);
+  user-select: none;
+}
+
+.candidate-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 0.62rem 1.15rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background 90ms ease;
+}
+
+.candidate-item:last-child {
+  border-bottom: none;
+}
+
+.candidate-item:hover,
+.candidate-item.active {
+  background: var(--bg-selected);
+}
+
+. candidate-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.cand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+
+.cand-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.cand-title {
+  font-size: 0.91rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cand-sub {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cand-right {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.cand-badge {
+  font-size: 0.71rem;
+  font-weight: 600;
+  padding: 0.14rem 0.48rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.cand-action-trigger {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  padding: 0.16rem 0.48rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.cand-action-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Contextual Action Menu Popup (Alt+Enter, UI-06) */
+.action-menu-popover {
+  position: fixed;
+  z-index: 90;
+  min-width: 260px;
+  max-width: 340px;
+  background: var(--bg-glass-strong);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  padding: 0.4rem;
+  display: none;
+  animation: pop-in 120ms var(--ease-out);
+}
+
+.action-menu-popover.open {
+  display: block;
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.action-menu-header {
+  padding: 0.4rem 0.65rem;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.action-menu-item {
+  width: 100%;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0.48rem 0.65rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  transition: background 90ms ease;
+}
+
+.action-menu-item:hover,
+.action-menu-item.active {
+  background: var(--bg-selected);
+  color: var(--accent);
+}
+
+/* Keyboard Hint Footer */
+.kbd-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.52rem 1.15rem;
+  background: rgba(15, 23, 42, 0.28);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom-left-radius: var(--radius-xl);
+  border-bottom-right-radius: var(--radius-xl);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.kbd-shortcuts-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+/* Quick Scene / Prompt Chips */
+.quick-prompts {
+  margin-top: 0.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.prompt-chip {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.32rem 0.68rem;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 130ms var(--ease-out);
+}
+
+.prompt-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+/* 30-Second Floating Undo Countdown Toast (UI-08) */
+.undo-toast-banner {
+  position: fixed;
+  bottom: 1.4rem;
+  right: 1.5rem;
+  z-index: 85;
+  display: none;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.72rem 1.1rem;
+  background: var(--bg-glass-strong);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  font-size: 0.83rem;
+}
+
+.undo-toast-banner.visible {
+  display: flex;
+  animation: pop-in 180ms var(--ease-spring);
+}
+
+.undo-countdown-ring {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: var(--bg-selected);
+  color: var(--accent);
+}

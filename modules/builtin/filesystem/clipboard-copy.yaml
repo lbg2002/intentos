@@ -1,0 +1,22 @@
+id: clipboard.copy
+version: 1
+summary: 将文本、路径或链接复制到系统剪贴板并读回验证（Wayland wl-copy / 扩展桥接）
+category: filesystem
+aliases: ["复制", "复制到剪贴板", "copy to clipboard"]
+l0_patterns:
+  - "复制 {text} 到剪贴板"
+input_schema:
+  type: object
+  required: [text]
+  properties:
+    text:
+      type: string
+      maxLength: 65536
+effects: [setting]
+idempotent: true
+execution:
+  type: builtin
+  handler: clipboard.copy
+undo: none
+verification:
+  kind: readback

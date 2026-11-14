@@ -1,0 +1,24 @@
+id: screenshot.take
+version: 1
+summary: 调用 GNOME Shell / XDG Desktop Portal 执行全屏、当前窗口或区域截图
+category: system
+aliases: ["截图", "截屏", "全屏截图", "窗口截图", "take screenshot"]
+l0_patterns:
+  - "(全屏|窗口|区域)?(截图|截屏)"
+input_schema:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: [fullscreen, window, area]
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: screenshot
+setting:
+  key_id: screenshot.take
+  enum_values: [fullscreen, window, area]
+undo: changeset
+verification:
+  kind: output_exists_or_portal

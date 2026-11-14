@@ -1,0 +1,24 @@
+id: git.status
+version: 1
+summary: 查看授权目录内 Git 仓库的分支与工作区状态
+category: devtools
+aliases: ["git状态", "仓库状态", "git status"]
+l0_patterns:
+  - "git 状态"
+input_schema:
+  type: object
+  required: [repo_dir]
+  properties:
+    repo_dir:
+      type: string
+      maxLength: 1024
+effects: [observe]
+idempotent: true
+execution:
+  type: argv_template
+  executable: git
+  arguments: ["-C", "${repo_dir}", "status", "--short", "--branch"]
+  timeout_ms: 4000
+undo: none
+dependencies: [git]
+feedback: "已获取 Git 状态"

@@ -1,0 +1,35 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!--
+  IntentOS Public Session D-Bus Contract (org.intentos.Core1, §15.3).
+  SECURITY INVARIANT:
+  High-privilege UI actions (Approve, Deny, Undo, RunPassthrough, SaveSecret)
+  are INTENTIONALLY OMITTED from D-Bus and ONLY exposed over the private
+  SO_PEERCRED-verified Unix domain socket `${XDG_RUNTIME_DIR}/intentos/ui.sock`.
+-->
+<node name="/org/intentos/Core1">
+  <interface name="org.intentos.Core1">
+    <method name="SubmitIntent">
+      <arg name="request_json" type="s" direction="in"/>
+      <arg name="task_json" type="s" direction="out"/>
+    </method>
+    <method name="QueryCandidates">
+      <arg name="query" type="s" direction="in"/>
+      <arg name="candidates_json" type="s" direction="out"/>
+    </method>
+    <method name="GetTask">
+      <arg name="task_id" type="s" direction="in"/>
+      <arg name="task_json" type="s" direction="out"/>
+    </method>
+    <method name="ListTasks">
+      <arg name="limit" type="u" direction="in"/>
+      <arg name="tasks_json" type="s" direction="out"/>
+    </method>
+    <method name="GetStatus">
+      <arg name="status_json" type="s" direction="out"/>
+    </method>
+    <signal name="TaskEvent">
+      <arg name="event_json" type="s"/>
+    </signal>
+  </interface>
+</node>

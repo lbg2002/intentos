@@ -1,0 +1,24 @@
+id: file.copy
+version: 1
+summary: 将文件安全复制到授权目录内的目标路径（原生 openat2，支持撤销）
+category: filesystem
+aliases: ["复制", "拷贝", "copy", "cp"]
+input_schema:
+  type: object
+  required: [source, target]
+  properties:
+    source:
+      type: string
+      maxLength: 1024
+    target:
+      type: string
+      maxLength: 1024
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: file.copy
+undo: changeset
+verification:
+  kind: sha256_verified
+feedback: "已复制 {source} → {target}（可撤销）"

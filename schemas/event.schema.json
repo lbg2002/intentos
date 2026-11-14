@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intentos.org/schemas/v1/event.schema.json",
+  "title": "IntentOS Core Event v1",
+  "type": "object",
+  "required": ["protocol_version", "event_id", "sequence", "type", "timestamp", "payload"],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "event_id": { "type": "string" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "type": { "type": "string" },
+    "task_id": { "type": ["string", "null"] },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  }
+}

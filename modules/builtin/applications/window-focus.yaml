@@ -1,0 +1,22 @@
+id: window.focus
+version: 1
+summary: 将已运行的指定窗口或应用置于前台聚焦（GNOME Shell 扩展桥接）
+category: applications
+aliases: ["切换到窗口", "聚焦窗口", "focus window"]
+l0_patterns:
+  - "(切换到|聚焦) {query} 窗口"
+input_schema:
+  type: object
+  required: [query]
+  properties:
+    query:
+      type: string
+      maxLength: 256
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: window.focus
+undo: none
+verification:
+  kind: requested_unverified

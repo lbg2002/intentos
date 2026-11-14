@@ -1,0 +1,21 @@
+id: terminal.open_at
+version: 1
+summary: 探测系统默认终端模拟器并在指定目录打开新窗口
+category: devtools
+aliases: ["在这里打开终端", "在目录打开终端", "open terminal at"]
+l0_patterns:
+  - "在 {path} 打开终端"
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: terminal.open_at
+undo: none
+verification:
+  kind: requested_unverified

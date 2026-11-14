@@ -1,0 +1,16 @@
+[package]
+name = "intentos-capability-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+intentos-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+regex.workspace = true

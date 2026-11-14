@@ -1,0 +1,26 @@
+id: web.search
+version: 1
+summary: 使用默认搜索引擎（Google）或指定搜索引擎检索关键词并在浏览器打开
+category: web
+aliases: ["搜索", "搜一下", "谷歌", "百度", "必应", "google", "search"]
+l0_patterns:
+  - "(搜|搜索|搜一下|查一下|谷歌|百度|必应|s) {query}"
+input_schema:
+  type: object
+  required: [query]
+  properties:
+    query:
+      type: string
+      maxLength: 512
+    engine:
+      type: string
+      enum: [google, bing, baidu, duckduckgo]
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: web.search
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求在 {engine} 搜索 “{query}”"

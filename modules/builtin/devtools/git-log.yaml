@@ -1,0 +1,25 @@
+id: git.log
+version: 1
+summary: 查看当前或指定 Git 仓库最近提交记录（固定安全参数，无 Shell 拼接）
+category: devtools
+aliases: ["git提交记录", "最近提交", "git log"]
+l0_patterns:
+  - '(查看)?最近(的)?\s*git\s*提交(记录)?'
+input_schema:
+  type: object
+  properties:
+    repo:
+      type: string
+      maxLength: 1024
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 30
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: git.log
+undo: none
+verification:
+  kind: structured_output

@@ -1,0 +1,18 @@
+id: web.resolve
+version: 1
+summary: 将站点名称、缩写或地址解析为安全的 HTTP/HTTPS URL
+category: web
+aliases: ["解析网站", "resolve url"]
+input_schema:
+  type: object
+  required: [target]
+  properties:
+    target:
+      type: string
+      maxLength: 512
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: web.resolve
+undo: none

@@ -1,0 +1,47 @@
+[package]
+name = "intentosd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "intentosd"
+path = "src/main.rs"
+
+[lib]
+name = "intentosd"
+path = "src/lib.rs"
+
+[dependencies]
+intentos-protocol.workspace = true
+intentos-fsops.workspace = true
+intentos-sandbox.workspace = true
+intentos-capability-sdk.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+libc.workspace = true
+regex.workspace = true
+pinyin.workspace = true
+clap.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+tokio-stream.workspace = true
+urlencoding.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

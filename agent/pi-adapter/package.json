@@ -1,0 +1,17 @@
+{
+  "name": "@intentos/pi-adapter",
+  "version": "0.1.0-poc",
+  "description": "Sandboxed AgentRuntime Worker for IntentOS Brain Center (Pi Agent Core 0.73.1 adapter + zero-network Unix Socket Gateway transport)",
+  "type": "module",
+  "main": "dist/worker.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --check dist/worker.js"
+  },
+  "optionalDependencies": {
+    "@mariozechner/pi-agent-core": "0.73.1"
+  },
+  "license": "Apache-2.0"
+}

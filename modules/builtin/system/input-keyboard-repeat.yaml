@@ -1,0 +1,33 @@
+id: input.keyboard.repeat
+version: 1
+summary: 设置键盘按键连发延迟与间隔（delay 150–1000 ms，interval 10–100 ms，可撤销）
+category: system
+aliases: ["键盘连发速度", "按键重复速度", "keyboard repeat"]
+l0_patterns:
+  - "键盘(重复|连发)速度(快一点|慢一点)"
+input_schema:
+  type: object
+  properties:
+    delay_ms:
+      type: integer
+      minimum: 150
+      maximum: 1000
+    interval_ms:
+      type: integer
+      minimum: 10
+      maximum: 100
+    preset:
+      type: string
+      enum: [fast, normal, slow]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: keyboard_repeat
+  schema: org.gnome.desktop.peripherals.keyboard
+  key: repeat-interval
+setting:
+  key_id: input.keyboard.repeat
+undo: restore_previous_value
+verification:
+  kind: readback

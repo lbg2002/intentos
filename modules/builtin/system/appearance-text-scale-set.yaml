@@ -1,0 +1,36 @@
+id: appearance.text_scale.set
+version: 1
+summary: 设置界面文字缩放比例（「字体大一点」「字体缩小」「文字放大到 125%」）
+category: system
+aliases: ["字体大小", "文字大小", "字体大一点", "字体小一点", "text scale"]
+l0_patterns:
+  - "(字体|文字)(调)?(大|小)(一点)?"
+  - "(字体|文字)(放大|缩小)(到)? {value}%?"
+input_schema:
+  type: object
+  properties:
+    value:
+      type: number
+    relative:
+      type: string
+      enum: [up, down]
+  oneOf:
+    - required: [value]
+    - required: [relative]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: gsettings
+  schema: org.gnome.desktop.interface
+  key: text-scaling-factor
+setting:
+  key_id: appearance.text_scale
+  min: 0.8
+  max: 2.0
+  discrete_steps: [0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
+undo: restore_previous_value
+verification:
+  kind: readback
+  tolerance: 0.01
+feedback: "文字缩放 {before} → {after}"

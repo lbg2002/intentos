@@ -1,0 +1,34 @@
+id: appearance.font.interface.set
+version: 1
+summary: 设置系统界面字体族与字号（6–24 pt，校验 fc-list 已安装字体，可撤销）
+category: system
+aliases: ["界面字体", "界面字号", "系统字体", "interface font"]
+l0_patterns:
+  - "界面字号(设为|改成)? {size}"
+  - "界面字体换成 {family}"
+input_schema:
+  type: object
+  properties:
+    family:
+      type: string
+      maxLength: 128
+    size:
+      type: number
+      minimum: 6
+      maximum: 24
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: font
+  schema: org.gnome.desktop.interface
+  key: font-name
+setting:
+  key_id: appearance.font.interface
+  min: 6
+  max: 24
+  step: 1
+  unit: "pt"
+undo: restore_previous_value
+verification:
+  kind: readback

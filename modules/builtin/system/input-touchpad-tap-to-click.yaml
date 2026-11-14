@@ -1,0 +1,27 @@
+id: input.touchpad.tap_to_click
+version: 1
+summary: 开启或关闭触控板轻触点击（tap-to-click，可撤销）
+category: system
+aliases: ["轻触点击", "触摸板轻点", "tap to click"]
+l0_patterns:
+  - "(开启|打开|关闭|关掉)(触控板)?轻触点击"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: touchpad_tap_to_click
+  schema: org.gnome.desktop.peripherals.touchpad
+  key: tap-to-click
+setting:
+  key_id: input.touchpad.tap_to_click
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

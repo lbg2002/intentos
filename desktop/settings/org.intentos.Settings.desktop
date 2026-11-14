@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=IntentOS Settings
+Name[zh_CN]=IntentOS 设置中心
+Comment=11-Domain Settings Center for Brain, Backend Bridge, Personal Memory Hub, App Translation Adapters, Capabilities, Resources, Web, Permissions, Undo, Automation, and Maintenance
+Comment[zh_CN]=IntentOS 11页全要素设置中心（多后端大脑、个人记忆与长期文件/软件画像、软件指令转译层、能力场景、资源、权限与撤销）
+Exec=intentos-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;System;
+Keywords=intentos;settings;brain;memory;adapter;ai;设置;记忆;转译;权限;撤销;

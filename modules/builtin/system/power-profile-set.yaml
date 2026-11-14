@@ -1,0 +1,25 @@
+id: power.profile.set
+version: 1
+summary: 切换系统电源性能模式（power-saver 省电 / balanced 平衡 / performance 性能，可撤销）
+category: system
+aliases: ["省电模式", "平衡模式", "性能模式", "切换电源模式"]
+l0_patterns:
+  - "(开启|切换到)?(省电|平衡|高性能|性能)模式"
+input_schema:
+  type: object
+  required: [profile]
+  properties:
+    profile:
+      type: string
+      enum: [power-saver, balanced, performance]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: power_profile
+setting:
+  key_id: power.profile
+  enum_values: [power-saver, balanced, performance]
+undo: restore_previous_value
+verification:
+  kind: readback

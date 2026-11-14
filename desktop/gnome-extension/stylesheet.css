@@ -1,0 +1,1109 @@
+/* IntentOS · 随问 — GNOME Shell 46–50 Desktop-Floating Quick-Chat Stylesheet (Wave 3 High-Contrast Dark & Light) */
+
+/* Top-Panel Tiny Indicator (`✦` + status dot) */
+.intentos-panel-box {
+  spacing: 4px;
+  padding: 0 4px;
+}
+
+.intentos-panel-star {
+  color: #fb923c;
+  font-size: 10.5pt;
+  font-weight: 800;
+}
+
+.intentos-panel-dot-idle {
+  color: rgba(148, 163, 184, 0.50);
+  font-size: 7.5pt;
+}
+
+.intentos-panel-dot-busy {
+  color: #3b82f6;
+  font-size: 8.5pt;
+  font-weight: 800;
+}
+
+.intentos-panel-dot-pending {
+  color: #f59e0b;
+  font-size: 8.5pt;
+  font-weight: 800;
+}
+
+.intentos-panel-dot-unread {
+  color: #10b981;
+  font-size: 8.5pt;
+  font-weight: 800;
+}
+
+/* Desktop-Floating Quick-Chat Dialog (`Main.layoutManager.addTopChrome`) */
+.intentos-floating-dialog {
+  width: 492px;
+  background-color: rgba(18, 22, 34, 0.97);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 20px;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.62);
+  color: #f1f5f9;
+}
+
+.intentos-floating-dialog-light {
+  background-color: rgba(255, 255, 255, 0.98);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
+  color: #0f172a;
+}
+
+/* Draggable Minimal Top Header Bar */
+.intentos-top-header {
+  padding: 10px 12px 8px 14px;
+  spacing: 5px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.intentos-floating-dialog-light .intentos-top-header {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.09);
+}
+
+.intentos-brand-title {
+  font-size: 10.5pt;
+  font-weight: 800;
+  color: #fb923c;
+  margin-right: 2px;
+}
+
+.intentos-floating-dialog-light .intentos-brand-title {
+  color: #ea580c;
+}
+
+/* Model Selector Pill (`▾`) */
+.intentos-model-pill {
+  font-size: 8.5pt;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.08);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  color: #e2e8f0;
+}
+
+.intentos-model-pill:hover,
+.intentos-model-pill-active {
+  background-color: rgba(249, 115, 22, 0.22);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(249, 115, 22, 0.60);
+  color: #ffedd5;
+}
+
+.intentos-floating-dialog-light .intentos-model-pill {
+  background-color: #f1f5f9;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+}
+
+.intentos-floating-dialog-light .intentos-model-pill:hover,
+.intentos-floating-dialog-light .intentos-model-pill-active {
+  background-color: #fff7ed;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid #ea580c;
+  color: #ea580c;
+}
+
+/* Header Trust Shield (`🛡`) */
+.intentos-shield-btn {
+  font-size: 8pt;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background-color: rgba(16, 185, 129, 0.15);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid rgba(16, 185, 129, 0.42);
+  color: #6ee7b7;
+}
+
+.intentos-shield-btn:hover,
+.intentos-shield-btn-active {
+  background-color: rgba(16, 185, 129, 0.28);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(16, 185, 129, 0.72);
+  color: #ecfdf5;
+}
+
+.intentos-shield-btn-strict {
+  background-color: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.48);
+  color: #fcd34d;
+}
+
+.intentos-shield-btn-dev {
+  background-color: rgba(59, 130, 246, 0.16);
+  border: 1px solid rgba(59, 130, 246, 0.48);
+  color: #93c5fd;
+}
+
+.intentos-floating-dialog-light .intentos-shield-btn {
+  background-color: #ecfdf5;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid #6ee7b7;
+  color: #047857;
+}
+
+.intentos-floating-dialog-light .intentos-shield-btn:hover,
+.intentos-floating-dialog-light .intentos-shield-btn-active {
+  background-color: #d1fae5;
+  border: 1px solid #059669;
+  color: #065f46;
+}
+
+.intentos-floating-dialog-light .intentos-shield-btn-strict {
+  background-color: #fffbeb;
+  border: 1px solid #fbbf24;
+  color: #b45309;
+}
+
+.intentos-floating-dialog-light .intentos-shield-btn-dev {
+  background-color: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1d4ed8;
+}
+
+/* Top Bar Icon Buttons */
+.intentos-icon-btn {
+  padding: 3px 6px;
+  border-radius: 8px;
+  font-size: 9.2pt;
+  color: #cbd5e1;
+  background-color: transparent;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid transparent;
+}
+
+.intentos-icon-btn:hover {
+  background-color: rgba(255, 255, 255, 0.10);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border-color: rgba(148, 163, 184, 0.24);
+  color: #ffffff;
+}
+
+.intentos-icon-btn-active {
+  background-color: rgba(249, 115, 22, 0.24);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(249, 115, 22, 0.58);
+  color: #fdba74;
+}
+
+.intentos-floating-dialog-light .intentos-icon-btn {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.intentos-floating-dialog-light .intentos-icon-btn:hover {
+  background-color: #e2e8f0;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+.intentos-floating-dialog-light .intentos-icon-btn-active {
+  background-color: #ffedd5;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid #fb923c;
+  color: #c2410c;
+}
+
+/* Collapsible Inline Switcher Strip, Security Strip & Memory Drawer */
+.intentos-drawer-strip {
+  background-color: rgba(12, 16, 25, 0.96);
+  background-gradient-direction: none;
+  background-image: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 9px 12px;
+  spacing: 6px;
+}
+
+.intentos-floating-dialog-light .intentos-drawer-strip {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.intentos-strip-row {
+  spacing: 5px;
+}
+
+.intentos-strip-label {
+  font-size: 8pt;
+  font-weight: 700;
+  color: #94a3b8;
+  margin-right: 4px;
+}
+
+.intentos-floating-dialog-light .intentos-strip-label {
+  color: #475569;
+}
+
+.intentos-seg-btn {
+  font-size: 8pt;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background-color: rgba(255, 255, 255, 0.06);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+.intentos-seg-btn:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+
+.intentos-seg-btn-active {
+  background-color: rgba(234, 88, 12, 0.28);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(249, 115, 22, 0.70);
+  color: #ffedd5;
+}
+
+.intentos-floating-dialog-light .intentos-seg-btn {
+  background-color: #f1f5f9;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+}
+
+.intentos-floating-dialog-light .intentos-seg-btn:hover {
+  background-color: #e2e8f0;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+.intentos-floating-dialog-light .intentos-seg-btn-active {
+  background-color: #ffedd5;
+  border: 1px solid #ea580c;
+  color: #c2410c;
+}
+
+.intentos-compact-entry {
+  font-size: 8.5pt;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background-color: rgba(255, 255, 255, 0.07);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  color: #f8fafc;
+}
+
+.intentos-floating-dialog-light .intentos-compact-entry {
+  background-color: #ffffff;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+}
+
+/* Scrollable Live `/v1/models` Container inside Switcher Strip */
+.intentos-model-scroll {
+  max-height: 176px;
+}
+
+.intentos-model-chips-box {
+  spacing: 4px;
+  padding: 2px 0;
+}
+
+/* Memory & Adapter Chips */
+.intentos-mem-chip {
+  font-size: 8pt;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background-color: rgba(168, 85, 247, 0.14);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(168, 85, 247, 0.34);
+  color: #e9d5ff;
+}
+
+.intentos-mem-chip:hover {
+  background-color: rgba(168, 85, 247, 0.28);
+}
+
+.intentos-floating-dialog-light .intentos-mem-chip {
+  background-color: #faf5ff;
+  border: 1px solid #d8b4fe;
+  color: #6b21a8;
+}
+
+.intentos-floating-dialog-light .intentos-mem-chip:hover {
+  background-color: #f3e8ff;
+  border-color: #a855f7;
+}
+
+.intentos-adapter-chip {
+  font-size: 8pt;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background-color: rgba(6, 182, 212, 0.14);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(6, 182, 212, 0.36);
+  color: #cffafe;
+}
+
+.intentos-floating-dialog-light .intentos-adapter-chip {
+  background-color: #ecfeff;
+  border: 1px solid #67e8f9;
+  color: #0e7490;
+}
+
+/* Scrollable Chat Stream */
+.intentos-chat-scroll {
+  height: 396px;
+}
+
+.intentos-chat-list {
+  padding: 12px 14px;
+  spacing: 10px;
+}
+
+/* Welcome Empty State */
+.intentos-welcome-box {
+  padding: 28px 10px 18px 10px;
+  spacing: 8px;
+}
+
+.intentos-welcome-title {
+  font-size: 13pt;
+  font-weight: 800;
+  color: #f8fafc;
+  text-align: center;
+}
+
+.intentos-floating-dialog-light .intentos-welcome-title {
+  color: #0f172a;
+}
+
+.intentos-welcome-sub {
+  font-size: 9pt;
+  color: #94a3b8;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.intentos-floating-dialog-light .intentos-welcome-sub {
+  color: #475569;
+}
+
+.intentos-starter-btn {
+  padding: 8px 12px;
+  border-radius: 11px;
+  background-color: rgba(255, 255, 255, 0.04);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #e2e8f0;
+  font-size: 9pt;
+  margin-bottom: 4px;
+}
+
+.intentos-starter-btn:hover {
+  background-color: rgba(249, 115, 22, 0.16);
+  border-color: rgba(249, 115, 22, 0.48);
+}
+
+.intentos-floating-dialog-light .intentos-starter-btn {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+}
+
+.intentos-floating-dialog-light .intentos-starter-btn:hover {
+  background-color: #fff7ed;
+  border-color: #fb923c;
+  color: #9a3412;
+}
+
+/* User & Assistant Bubbles */
+.intentos-user-bubble {
+  background-color: #ea580c;
+  background-gradient-direction: none;
+  background-image: none;
+  color: #ffffff;
+  border-radius: 15px 15px 4px 15px;
+  padding: 8px 12px;
+  font-size: 9.8pt;
+}
+
+.intentos-assistant-bubble {
+  background-color: rgba(30, 37, 54, 0.92);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 15px 15px 15px 4px;
+  padding: 10px 12px;
+  spacing: 6px;
+}
+
+.intentos-floating-dialog-light .intentos-assistant-bubble {
+  background-color: #ffffff;
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid #e2e8f0;
+  color: #0f172a;
+}
+
+.intentos-md-text {
+  font-size: 9.8pt;
+  color: #f1f5f9;
+}
+
+.intentos-floating-dialog-light .intentos-md-text {
+  color: #0f172a;
+}
+
+.intentos-code-card {
+  background-color: rgba(10, 14, 22, 0.92);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 9px;
+  padding: 6px 9px;
+  spacing: 4px;
+}
+
+.intentos-floating-dialog-light .intentos-code-card {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid #e2e8f0;
+}
+
+.intentos-code-body {
+  font-family: monospace;
+  font-size: 8.8pt;
+  color: #e2e8f0;
+}
+
+.intentos-floating-dialog-light .intentos-code-body {
+  color: #1e293b;
+}
+
+/* 20px Horizontal Colored Trace Dots (`●`) & `+N` Collapse Pill */
+.intentos-trace-bar {
+  spacing: 5px;
+}
+
+.intentos-trace-dot {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 8.5pt;
+  font-weight: 800;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+}
+
+.intentos-trace-dot-gray {
+  background-color: rgba(148, 163, 184, 0.25);
+  border: 1px solid rgba(148, 163, 184, 0.70);
+  color: #cbd5e1;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-gray {
+  background-color: #e2e8f0;
+  border: 1px solid #64748b;
+  color: #475569;
+}
+
+.intentos-trace-dot-purple {
+  background-color: rgba(168, 85, 247, 0.26);
+  border: 1px solid rgba(168, 85, 247, 0.78);
+  color: #d8b4fe;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-purple {
+  background-color: #f3e8ff;
+  border: 1px solid #9333ea;
+  color: #7e22ce;
+}
+
+.intentos-trace-dot-cyan {
+  background-color: rgba(6, 182, 212, 0.26);
+  border: 1px solid rgba(6, 182, 212, 0.78);
+  color: #67e8f9;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-cyan {
+  background-color: #cffafe;
+  border: 1px solid #0891b2;
+  color: #0e7490;
+}
+
+.intentos-trace-dot-amber {
+  background-color: rgba(245, 158, 11, 0.28);
+  border: 1px solid rgba(245, 158, 11, 0.82);
+  color: #fcd34d;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-amber {
+  background-color: #fef3c7;
+  border: 1px solid #d97706;
+  color: #b45309;
+}
+
+.intentos-trace-dot-blue {
+  background-color: rgba(56, 189, 248, 0.28);
+  border: 1px solid #38bdf8;
+  color: #38bdf8;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-blue {
+  background-color: #e0f2fe;
+  border: 1px solid #0284c7;
+  color: #0284c7;
+}
+
+.intentos-trace-dot-green {
+  background-color: rgba(16, 185, 129, 0.28);
+  border: 1px solid #10b981;
+  color: #10b981;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-green {
+  background-color: #d1fae5;
+  border: 1px solid #059669;
+  color: #047857;
+}
+
+.intentos-trace-dot-red {
+  background-color: rgba(239, 68, 68, 0.28);
+  border: 1px solid #ef4444;
+  color: #ef4444;
+}
+
+.intentos-floating-dialog-light .intentos-trace-dot-red {
+  background-color: #fee2e2;
+  border: 1px solid #dc2626;
+  color: #b91c1c;
+}
+
+.intentos-tray-card {
+  spacing: 4px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background-color: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+}
+
+.intentos-floating-dialog-light .intentos-tray-card {
+  background-color: #f8fafc;
+  border: 1px solid rgba(2, 132, 199, 0.28);
+}
+
+.intentos-tray-action-btn {
+  font-size: 7.8pt;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background-color: rgba(56, 189, 248, 0.16);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  color: #7dd3fc;
+}
+
+.intentos-tray-action-btn:hover {
+  background-color: rgba(56, 189, 248, 0.28);
+  color: #e0f2fe;
+}
+
+.intentos-floating-dialog-light .intentos-tray-action-btn {
+  background-color: #e0f2fe;
+  border: 1px solid #0284c7;
+  color: #0369a1;
+}
+
+.intentos-trace-dot-selected {
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.75);
+}
+
+.intentos-trace-more-pill {
+  font-size: 7.5pt;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background-color: rgba(148, 163, 184, 0.20);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  color: #cbd5e1;
+}
+
+.intentos-floating-dialog-light .intentos-trace-more-pill {
+  background-color: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+}
+
+.intentos-trace-summary {
+  font-size: 8pt;
+  color: #94a3b8;
+}
+
+.intentos-floating-dialog-light .intentos-trace-summary {
+  color: #475569;
+}
+
+.intentos-trace-detail {
+  background-color: rgba(11, 15, 24, 0.90);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 9px;
+  padding: 7px 9px;
+  spacing: 4px;
+  font-family: monospace;
+  font-size: 8.5pt;
+  color: #e2e8f0;
+}
+
+.intentos-floating-dialog-light .intentos-trace-detail {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid #e2e8f0;
+  color: #1e293b;
+}
+
+/* Auto-Expanded Trustworthy Inline Approval Card */
+.intentos-inline-approval {
+  background-color: rgba(68, 38, 13, 0.88);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(245, 158, 11, 0.72);
+  border-radius: 12px;
+  padding: 9px 11px;
+  spacing: 6px;
+}
+
+.intentos-floating-dialog-light .intentos-inline-approval {
+  background-color: #fffbeb;
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid #f59e0b;
+  color: #78350f;
+}
+
+.intentos-approval-title {
+  font-size: 8.8pt;
+  font-weight: 800;
+  color: #fde68a;
+}
+
+.intentos-floating-dialog-light .intentos-approval-title {
+  color: #92400e;
+}
+
+.intentos-approval-badge {
+  font-size: 7.5pt;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background-color: rgba(16, 185, 129, 0.22);
+  border: 1px solid rgba(16, 185, 129, 0.55);
+  color: #6ee7b7;
+}
+
+.intentos-floating-dialog-light .intentos-approval-badge {
+  background-color: #ecfdf5;
+  border: 1px solid #34d399;
+  color: #047857;
+}
+
+.intentos-approval-preview {
+  background-color: rgba(11, 15, 24, 0.86);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: 8.3pt;
+  color: #f1f5f9;
+}
+
+.intentos-floating-dialog-light .intentos-approval-preview {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #1e293b;
+}
+
+.intentos-btn-approve {
+  font-size: 8pt;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 7px;
+  background-color: #059669;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #10b981;
+  color: #ffffff;
+}
+
+.intentos-btn-approve:hover {
+  background-color: #10b981;
+}
+
+.intentos-btn-scope {
+  font-size: 8pt;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 7px;
+  background-color: #2563eb;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #3b82f6;
+  color: #ffffff;
+}
+
+.intentos-btn-scope:hover {
+  background-color: #3b82f6;
+}
+
+.intentos-btn-deny {
+  font-size: 8pt;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 7px;
+  background-color: #dc2626;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #ef4444;
+  color: #ffffff;
+}
+
+.intentos-btn-deny:hover {
+  background-color: #ef4444;
+}
+
+.intentos-btn-undo {
+  font-size: 7.8pt;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background-color: #ea580c;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #f97316;
+  color: #ffffff;
+}
+
+.intentos-btn-undo:hover {
+  background-color: #f97316;
+}
+
+/* Assistant Bubble Footer Buttons (`复制` & `↻`) */
+.intentos-footer-btn {
+  font-size: 8pt;
+  font-weight: 600;
+  padding: 2px 8px;
+  margin-left: 4px;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.06);
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #cbd5e1;
+}
+
+.intentos-footer-btn:hover {
+  background-color: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.intentos-floating-dialog-light .intentos-footer-btn {
+  background-color: #f1f5f9;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+}
+
+.intentos-floating-dialog-light .intentos-footer-btn:hover {
+  background-color: #e2e8f0;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+/* Bottom Context Strips & Multi-line Input Box */
+.intentos-bottom-box {
+  padding: 8px 12px 12px 12px;
+  spacing: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.intentos-floating-dialog-light .intentos-bottom-box {
+  border-top: 1px solid #e2e8f0;
+}
+
+.intentos-context-chip {
+  background-color: rgba(30, 41, 59, 0.88);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 9px;
+  padding: 4px 8px;
+  spacing: 6px;
+  font-size: 8pt;
+  color: #bfdbfe;
+}
+
+.intentos-floating-dialog-light .intentos-context-chip {
+  background-color: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1e40af;
+}
+
+.intentos-mention-strip {
+  background-color: rgba(15, 20, 32, 0.96);
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  border-radius: 9px;
+  padding: 5px 8px;
+  spacing: 5px;
+}
+
+.intentos-floating-dialog-light .intentos-mention-strip {
+  background-color: #faf5ff;
+  border: 1px solid #d8b4fe;
+}
+
+.intentos-input-shell {
+  background-color: rgba(28, 34, 49, 0.95);
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid rgba(124, 166, 255, 0.30);
+  border-radius: 13px;
+  padding: 6px 8px;
+  spacing: 6px;
+}
+
+.intentos-floating-dialog-light .intentos-input-shell {
+  background-color: #f8fafc;
+  background-gradient-direction: none;
+  background-image: none;
+  border: 1px solid #cbd5e1;
+}
+
+.intentos-chat-entry {
+  font-size: 10pt;
+  background-color: transparent;
+  background-gradient-direction: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: #f8fafc;
+  padding: 4px 4px;
+}
+
+.intentos-floating-dialog-light .intentos-chat-entry {
+  color: #0f172a;
+}
+
+.intentos-send-btn {
+  padding: 5px 11px;
+  border-radius: 9px;
+  background-color: #ea580c;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #ea580c;
+  color: #ffffff;
+  font-size: 9.5pt;
+  font-weight: 800;
+}
+
+.intentos-send-btn:hover {
+  background-color: #f97316;
+  background-gradient-direction: none;
+  background-image: none;
+  border-color: #f97316;
+  color: #ffffff;
+}
+
+.intentos-stop-btn {
+  padding: 5px 11px;
+  border-radius: 9px;
+  background-color: #dc2626;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #dc2626;
+  color: #ffffff;
+  font-size: 9.5pt;
+  font-weight: 800;
+}
+
+.intentos-meta-footer {
+  font-size: 7.8pt;
+  color: #64748b;
+}
+
+.intentos-floating-dialog-light .intentos-meta-footer {
+  color: #475569;
+}
+
+/* Wave 5: Disabled Approval Buttons, Compact Resolved Card, Mic Button & Voice Banner */
+.intentos-btn-approve:disabled,
+.intentos-btn-scope:disabled,
+.intentos-btn-deny:disabled,
+.intentos-btn-approve:insensitive,
+.intentos-btn-scope:insensitive,
+.intentos-btn-deny:insensitive {
+  opacity: 0.48;
+}
+
+.intentos-inline-approval-resolved {
+  background-color: #0b241c;
+  border: 1px solid #10b981;
+  border-radius: 10px;
+  padding: 6px 10px;
+  spacing: 4px;
+}
+
+.intentos-floating-dialog-light .intentos-inline-approval-resolved {
+  background-color: #ecfdf5;
+  border: 1px solid #6ee7b7;
+}
+
+.intentos-mic-btn {
+  padding: 5px 9px;
+  border-radius: 9px;
+  background-color: #1e293b;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  font-size: 9.5pt;
+  font-weight: 700;
+}
+
+.intentos-floating-dialog-light .intentos-mic-btn {
+  background-color: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+}
+
+.intentos-mic-btn:hover {
+  border-color: #ea580c;
+}
+
+.intentos-mic-recording {
+  padding: 5px 9px;
+  border-radius: 9px;
+  background-color: #dc2626;
+  background-gradient-direction: none;
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  border: 1px solid #ef4444;
+  color: #ffffff;
+  font-size: 8.8pt;
+  font-weight: 800;
+}
+
+.intentos-floating-dialog-light .intentos-mic-recording {
+  background-color: #dc2626;
+  border: 1px solid #b91c1c;
+  color: #ffffff;
+}
+
+.intentos-voice-banner {
+  background-color: #1e293b;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  padding: 6px 9px;
+  spacing: 5px;
+}
+
+.intentos-floating-dialog-light .intentos-voice-banner {
+  background-color: #fffbeb;
+  border: 1px solid #fcd34d;
+}

@@ -1,0 +1,25 @@
+id: bluetooth.power
+version: 1
+summary: 开启或关闭系统蓝牙适配器（bluetoothctl power on/off，可撤销）
+category: system
+aliases: ["开蓝牙", "关蓝牙", "蓝牙开关", "bluetooth power"]
+l0_patterns:
+  - "(开|打开|开启|关|关闭|关掉)蓝牙"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: bluetooth_power
+setting:
+  key_id: bluetooth.power
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

@@ -1,0 +1,25 @@
+id: scene.apply
+version: 1
+summary: 一句话应用组合设置场景（内置护眼模式、演示模式、安静模式及用户保存的自定义场景，单变更集原子撤销）
+category: system
+aliases: ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式", "场景模式"]
+l0_patterns:
+  - "(开启|打开|进入)?(护眼|演示|安静|会议)模式"
+input_schema:
+  type: object
+  required: [scene]
+  properties:
+    scene:
+      type: string
+      maxLength: 64
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: scene
+setting:
+  key_id: scene.active
+undo: restore_previous_value
+verification:
+  kind: readback
+feedback: "已应用「{scene}」组合设置（可一键全部还原）"

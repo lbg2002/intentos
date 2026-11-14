@@ -1,0 +1,21 @@
+id: git.diff
+version: 1
+summary: 查看当前或指定 Git 仓库尚未提交的改动统计（git diff --stat）
+category: devtools
+aliases: ["git改动", "未提交差异", "git diff"]
+l0_patterns:
+  - '(查看)?\s*git\s*(差异|diff|改了什么)'
+input_schema:
+  type: object
+  properties:
+    repo:
+      type: string
+      maxLength: 1024
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: git.diff
+undo: none
+verification:
+  kind: structured_output

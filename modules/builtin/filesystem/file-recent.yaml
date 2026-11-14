@@ -1,0 +1,22 @@
+id: file.recent
+version: 1
+summary: 查询最近打开或最近修改的授权目录文件（GTK recently-used + IntentOS 记录）
+category: filesystem
+aliases: ["最近文件", "最近打开的文件", "recent files"]
+l0_patterns:
+  - "(查看)?最近(打开|修改)?的文件"
+input_schema:
+  type: object
+  properties:
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 50
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.recent
+undo: none
+verification:
+  kind: files_exist

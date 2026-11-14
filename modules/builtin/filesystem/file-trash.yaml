@@ -1,0 +1,21 @@
+id: file.trash
+version: 1
+summary: 将授权目录内的文件移入系统回收站（不永久删除，支持从回收站撤销恢复）
+category: filesystem
+aliases: ["移入回收站", "删掉", "删除文件", "trash"]
+input_schema:
+  type: object
+  required: [path]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: file.trash
+undo: changeset
+verification:
+  kind: source_absent_and_trash_present
+feedback: "已移入回收站 {path}（可撤销）"

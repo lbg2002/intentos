@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intentos.org/schemas/v1/changeset.schema.json",
+  "title": "IntentOS ChangeSet v1",
+  "type": "object",
+  "required": ["id", "task_id", "created_at", "capability_id", "layer", "operations", "status", "undo_expires_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "capability_id": { "type": "string" },
+    "layer": { "type": "string" },
+    "operations": { "type": "array" },
+    "backup_bytes": { "type": "integer", "minimum": 0 },
+    "status": { "type": "string", "enum": ["applied", "undone", "expired", "conflict"] },
+    "undo_expires_at": { "type": "string", "format": "date-time" },
+    "summary": { "type": "string" }
+  }
+}

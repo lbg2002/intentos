@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.intentos" path="/org/gnome/shell/extensions/intentos/">
+    <key name="toggle-quick-chat" type="as">
+      <default>['&lt;Super&gt;&lt;Shift&gt;q', '&lt;Super&gt;&lt;Shift&gt;space']</default>
+      <summary>Toggle IntentOS Floating Quick-Chat Dialog</summary>
+      <description>Summon or hide the desktop-floating Quick-Chat AIOS window and focus input.</description>
+    </key>
+    <key name="clipboard-quick-ask" type="as">
+      <default>['&lt;Super&gt;&lt;Shift&gt;y']</default>
+      <summary>Wake Floating Quick-Chat with Primary Selection / Clipboard</summary>
+      <description>Open the floating Quick-Chat AIOS window and pre-attach selected or copied text.</description>
+    </key>
+    <key name="dialog-x" type="i">
+      <default>-1</default>
+      <summary>Last dragged X position of floating dialog</summary>
+    </key>
+    <key name="dialog-y" type="i">
+      <default>-1</default>
+      <summary>Last dragged Y position of floating dialog</summary>
+    </key>
+    <key name="pinned" type="b">
+      <default>false</default>
+      <summary>Keep floating chat dialog pinned</summary>
+    </key>
+    <key name="light-theme" type="b">
+      <default>false</default>
+      <summary>Use light glassmorphic theme</summary>
+    </key>
+  </schema>
+</schemalist>

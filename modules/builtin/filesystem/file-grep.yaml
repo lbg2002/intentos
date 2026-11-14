@@ -1,0 +1,26 @@
+id: file.grep
+version: 1
+summary: 在授权目录中使用 ripgrep 搜索包含指定文本内容的文件与行号
+category: filesystem
+aliases: ["内容搜索", "grep", "rg", "哪个文件里写了"]
+l0_patterns:
+  - "哪个文件里写了 {pattern}"
+  - "包含 {pattern} 的文件"
+input_schema:
+  type: object
+  required: [pattern]
+  properties:
+    pattern:
+      type: string
+      maxLength: 256
+    directory:
+      type: string
+      maxLength: 1024
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.grep
+undo: none
+dependencies: [rg]
+feedback: "在文件中匹配到 {count} 处结果"

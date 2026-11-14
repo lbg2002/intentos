@@ -1,0 +1,17 @@
+[Unit]
+Description=IntentOS Core Daemon (Intent Router, Capability Broker, Model Gateway & Web Shell)
+Documentation=https://intentos.local/docs
+After=graphical-session.target pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/intentosd --listen 127.0.0.1:8787
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+MemoryMax=512M
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

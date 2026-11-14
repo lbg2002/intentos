@@ -1,0 +1,24 @@
+id: sound.output.set
+version: 1
+summary: 按设备名模糊匹配切换默认音频输出设备（如切到耳机/外放，可撤销）
+category: system
+aliases: ["切到耳机", "切到扬声器", "切换音频输出", "switch audio output"]
+l0_patterns:
+  - "(声音|音频)?切(换)?到{device}"
+input_schema:
+  type: object
+  required: [device]
+  properties:
+    device:
+      type: string
+      maxLength: 128
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: audio_output
+setting:
+  key_id: sound.output
+undo: restore_previous_value
+verification:
+  kind: readback

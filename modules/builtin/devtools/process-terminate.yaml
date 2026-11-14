@@ -1,0 +1,22 @@
+id: process.terminate
+version: 1
+summary: 请求结束指定 PID 的用户态进程（先发 SIGTERM 并核实退出，强制人工确认，保护核心守护进程）
+category: devtools
+aliases: ["结束进程", "杀掉进程", "terminate process"]
+l0_patterns:
+  - "结束进程 {pid}"
+input_schema:
+  type: object
+  required: [pid]
+  properties:
+    pid:
+      type: integer
+      minimum: 2
+effects: [process.control]
+idempotent: false
+execution:
+  type: builtin
+  handler: process.terminate
+undo: none
+verification:
+  kind: process_exited

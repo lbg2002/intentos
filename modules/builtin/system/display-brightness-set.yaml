@@ -1,0 +1,35 @@
+id: display.brightness.set
+version: 1
+summary: 设置或相对调整屏幕亮度（1–100%，禁止设为 0 防止黑屏，步长 10%，连续调整合并撤销）
+category: system
+aliases: ["亮度", "调亮一点", "调暗一点", "暗一点", "亮一点", "set brightness"]
+l0_patterns:
+  - "亮度(调到|设为)? {value}%?"
+  - "(屏幕|亮度)?(调)?(亮|暗|高|低)(一点)?"
+input_schema:
+  type: object
+  properties:
+    value:
+      type: number
+    relative:
+      type: string
+      enum: [up, down]
+  oneOf:
+    - required: [value]
+    - required: [relative]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: backlight
+setting:
+  key_id: display.brightness
+  min: 1
+  max: 100
+  step: 10
+  unit: "%"
+undo: restore_previous_value
+verification:
+  kind: readback
+  tolerance: 2.0
+feedback: "屏幕亮度 {before}% → {after}%"

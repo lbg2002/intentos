@@ -1,0 +1,25 @@
+id: network.airplane.set
+version: 1
+summary: 开启或关闭飞行模式（会断开全部无线连接，强制人工确认 confirm_each）
+category: system
+aliases: ["飞行模式", "airplane mode"]
+l0_patterns:
+  - "(开启|打开|关闭|退出)飞行模式"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off"]
+effects: [process.control]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: airplane_mode
+setting:
+  key_id: network.airplane
+  enum_values: ["on", "off"]
+undo: restore_previous_value
+verification:
+  kind: readback

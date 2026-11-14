@@ -1,0 +1,20 @@
+id: disk.free
+version: 1
+summary: 查看本机文件系统磁盘空间剩余与使用率（df -h）
+category: devtools
+aliases: ["磁盘空间", "磁盘还剩多少", "硬盘容量", "disk free"]
+l0_patterns:
+  - "磁盘(空间)?(还剩多少|剩余|使用率)?"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: argv_template
+  executable: df
+  arguments: ["-h", "-x", "tmpfs", "-x", "devtmpfs"]
+  timeout_ms: 3000
+undo: none
+dependencies: [df]
+feedback: "已读取磁盘剩余空间"

@@ -1,0 +1,26 @@
+id: web.open
+version: 1
+summary: 在默认浏览器中打开安全的 HTTP/HTTPS 网站或本地开发端口
+category: web
+aliases: ["打开网站", "访问", "去网站", "open url"]
+l0_patterns:
+  - "(打开|去|上|访问) {site}"
+input_schema:
+  type: object
+  required: [url]
+  properties:
+    url:
+      type: string
+      maxLength: 2048
+    title:
+      type: string
+      maxLength: 256
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: web.open
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求在浏览器打开 {url}"

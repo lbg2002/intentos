@@ -1,0 +1,27 @@
+id: notify.dnd.set
+version: 1
+summary: 开启或关闭系统勿扰模式（控制通知横幅弹出，支持读回与撤销）
+category: system
+aliases: ["勿扰", "勿扰模式", "免打扰", "开启勿扰", "关闭勿扰", "do not disturb"]
+l0_patterns:
+  - "(开启|打开)?勿扰(模式)?"
+  - "(关闭|取消)勿扰(模式)?"
+input_schema:
+  type: object
+  required: [enabled]
+  properties:
+    enabled:
+      type: boolean
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: dnd
+  schema: org.gnome.desktop.notifications
+  key: show-banners
+setting:
+  key_id: notify.dnd
+undo: restore_previous_value
+verification:
+  kind: readback
+feedback: "勿扰模式 {before} → {after}"

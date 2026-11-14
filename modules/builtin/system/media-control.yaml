@@ -1,0 +1,28 @@
+id: media.control
+version: 1
+summary: 控制系统媒体播放（播放、暂停、下一首、上一首、查询当前曲目，MPRIS2 / StatusNotifierItem 托盘菜单）
+category: system
+aliases: ["暂停播放", "暂停音乐", "继续播放", "下一首", "下一首歌", "上一首", "上一首歌", "当前播放什么歌"]
+l0_patterns:
+  - "(播放|暂停|继续播放|下一首歌|下一首|上一首歌|上一首|切歌)"
+input_schema:
+  type: object
+  required: [action]
+  properties:
+    action:
+      type: string
+      enum: [play, pause, play-pause, next, previous, status]
+    app:
+      type: string
+      maxLength: 128
+effects: [ui]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: media_control
+setting:
+  key_id: media.control
+  enum_values: [play, pause, play-pause, next, previous, status]
+undo: none
+verification:
+  kind: requested_unverified

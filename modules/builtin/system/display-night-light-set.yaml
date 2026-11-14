@@ -1,0 +1,27 @@
+id: display.night_light.set
+version: 1
+summary: 开启或关闭屏幕夜灯护眼色温过滤（gsettings night-light-enabled，可撤销）
+category: system
+aliases: ["夜灯", "夜间模式", "护眼色温", "night light"]
+l0_patterns:
+  - "(打开|开启|关闭|关掉)夜灯"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: night_light
+  schema: org.gnome.settings-daemon.plugins.color
+  key: night-light-enabled
+setting:
+  key_id: display.night_light
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

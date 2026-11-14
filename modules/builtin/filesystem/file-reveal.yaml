@@ -1,0 +1,22 @@
+id: file.reveal
+version: 1
+summary: 在系统文件管理器中打开文件所在目录并高亮选中（D-Bus FileManager1 / gio）
+category: filesystem
+aliases: ["打开所在文件夹", "在文件管理器中显示", "reveal in folder"]
+l0_patterns:
+  - "打开 {path} 所在(文件夹|目录)"
+input_schema:
+  type: object
+  required: [path]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.reveal
+undo: none
+verification:
+  kind: requested_unverified

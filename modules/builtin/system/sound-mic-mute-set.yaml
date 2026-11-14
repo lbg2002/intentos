@@ -1,0 +1,25 @@
+id: sound.mic.mute.set
+version: 1
+summary: 开启、关闭或切换麦克风静音状态（闭麦/开麦，读回验证并可撤销）
+category: system
+aliases: ["闭麦", "开麦", "麦克风静音", "mute mic"]
+l0_patterns:
+  - "(闭麦|开麦|麦克风静音|取消麦克风静音)"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wpctl_mic_mute
+setting:
+  key_id: sound.mic.mute
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

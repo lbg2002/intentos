@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=IntentOS Quick Chat
+Name[zh_CN]=IntentOS · 随问 (悬浮对话窗)
+Comment=Desktop-floating Quick-Chat AIOS dialog with personal memory hub and software translation layer
+Comment[zh_CN]=桌面悬浮极简 AIOS 对话窗（内联模型切换、彩色圆点轨迹、记忆快照与软件指令转译）
+Exec=intentos-launcher
+Icon=system-search
+Terminal=false
+Categories=Utility;System;
+Keywords=intent;chat;quick-chat;ai;aios;memory;意图;随问;悬浮窗;

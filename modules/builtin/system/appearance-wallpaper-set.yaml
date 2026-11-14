@@ -1,0 +1,26 @@
+id: appearance.wallpaper.set
+version: 1
+summary: 将授权目录内的图片文件设为桌面壁纸（同步浅色/深色 picture-uri，可撤销）
+category: system
+aliases: ["换壁纸", "设置壁纸", "桌面背景", "set wallpaper"]
+l0_patterns:
+  - "把 {path} 设为壁纸"
+input_schema:
+  type: object
+  required: [path]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wallpaper
+  schema: org.gnome.desktop.background
+  key: picture-uri
+setting:
+  key_id: appearance.wallpaper
+undo: restore_previous_value
+verification:
+  kind: readback

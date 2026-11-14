@@ -1,0 +1,22 @@
+id: package.search
+version: 1
+summary: 查询已安装或软件源中的软件包信息（dpkg-query / apt-cache，只读零修改）
+category: devtools
+aliases: ["搜索软件包", "查一下装没装", "package search"]
+l0_patterns:
+  - "(查一下|搜索)软件包 {query}"
+input_schema:
+  type: object
+  required: [query]
+  properties:
+    query:
+      type: string
+      maxLength: 128
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: package.search
+undo: none
+verification:
+  kind: structured_output

@@ -1,0 +1,2996 @@
+[
+  {
+    "id": "D1-01",
+    "domain": "D1_app",
+    "intent": "打开 Visual Studio Code",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-02",
+    "domain": "D1_app",
+    "intent": "打开 vsc",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-03",
+    "domain": "D1_app",
+    "intent": "打开 vscode",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-04",
+    "domain": "D1_app",
+    "intent": "打开代码编辑器",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-05",
+    "domain": "D1_app",
+    "intent": "vsc",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-06",
+    "domain": "D1_app",
+    "intent": "打开火狐",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "firefox.desktop"
+    }
+  },
+  {
+    "id": "D1-07",
+    "domain": "D1_app",
+    "intent": "打开 Firefox",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "firefox.desktop"
+    }
+  },
+  {
+    "id": "D1-08",
+    "domain": "D1_app",
+    "intent": "打开 ff",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "firefox.desktop"
+    }
+  },
+  {
+    "id": "D1-09",
+    "domain": "D1_app",
+    "intent": "打开浏览器",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "firefox.desktop"
+    }
+  },
+  {
+    "id": "D1-10",
+    "domain": "D1_app",
+    "intent": "打开文本编辑器",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.TextEditor.desktop"
+    }
+  },
+  {
+    "id": "D1-11",
+    "domain": "D1_app",
+    "intent": "wbbjq",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.TextEditor.desktop"
+    }
+  },
+  {
+    "id": "D1-12",
+    "domain": "D1_app",
+    "intent": "打开记事本",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.TextEditor.desktop"
+    }
+  },
+  {
+    "id": "D1-13",
+    "domain": "D1_app",
+    "intent": "打开终端",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Terminal.desktop"
+    }
+  },
+  {
+    "id": "D1-14",
+    "domain": "D1_app",
+    "intent": "zd",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Terminal.desktop"
+    }
+  },
+  {
+    "id": "D1-15",
+    "domain": "D1_app",
+    "intent": "打开命令行",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Terminal.desktop"
+    }
+  },
+  {
+    "id": "D1-16",
+    "domain": "D1_app",
+    "intent": "打开文件管理器",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Nautilus.desktop"
+    }
+  },
+  {
+    "id": "D1-17",
+    "domain": "D1_app",
+    "intent": "wjglq",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Nautilus.desktop"
+    }
+  },
+  {
+    "id": "D1-18",
+    "domain": "D1_app",
+    "intent": "打开计算器",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Calculator.desktop"
+    }
+  },
+  {
+    "id": "D1-19",
+    "domain": "D1_app",
+    "intent": "jsq",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.gnome.Calculator.desktop"
+    }
+  },
+  {
+    "id": "D1-20",
+    "domain": "D1_app",
+    "intent": "打开 WPS",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "wps-office-prometheus.desktop"
+    }
+  },
+  {
+    "id": "D1-21",
+    "domain": "D1_app",
+    "intent": "打开 LibreOffice",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "libreoffice-writer.desktop"
+    }
+  },
+  {
+    "id": "D1-22",
+    "domain": "D1_app",
+    "intent": "打开 Telegram",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "org.telegram.desktop.desktop"
+    }
+  },
+  {
+    "id": "D1-23",
+    "domain": "D1_app",
+    "intent": "打开微信",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "wechat.desktop"
+    }
+  },
+  {
+    "id": "D1-24",
+    "domain": "D1_app",
+    "intent": "启动 Firefox",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "firefox.desktop"
+    }
+  },
+  {
+    "id": "D1-25",
+    "domain": "D1_app",
+    "intent": "启动 VS Code",
+    "expected_route": "L0",
+    "expected_capability": "app.launch",
+    "expected_arg_contains": {
+      "app_id": "code.desktop"
+    }
+  },
+  {
+    "id": "D1-26",
+    "domain": "D1_app",
+    "intent": "列出窗口",
+    "expected_route": "L0",
+    "expected_capability": "window.list"
+  },
+  {
+    "id": "D1-27",
+    "domain": "D1_app",
+    "intent": "当前有哪些窗口",
+    "expected_route": "L0",
+    "expected_capability": "window.list"
+  },
+  {
+    "id": "D1-28",
+    "domain": "D1_app",
+    "intent": "窗口列表",
+    "expected_route": "L0",
+    "expected_capability": "window.list"
+  },
+  {
+    "id": "D1-29",
+    "domain": "D1_app",
+    "intent": "切到 Firefox 窗口",
+    "expected_route": "L0",
+    "expected_capability": "window.focus",
+    "expected_arg_contains": {
+      "query": "firefox"
+    }
+  },
+  {
+    "id": "D1-30",
+    "domain": "D1_app",
+    "intent": "聚焦 VS Code 窗口",
+    "expected_route": "L0",
+    "expected_capability": "window.focus",
+    "expected_arg_contains": {
+      "query": "vs code"
+    }
+  },
+  {
+    "id": "D1-31",
+    "domain": "D1_app",
+    "intent": "切换到 终端 窗口",
+    "expected_route": "L0",
+    "expected_capability": "window.focus",
+    "expected_arg_contains": {
+      "query": "终端"
+    }
+  },
+  {
+    "id": "D1-32",
+    "domain": "D1_app",
+    "intent": "关闭应用 Firefox",
+    "expected_route": "L0",
+    "expected_capability": "app.quit",
+    "expected_arg_contains": {
+      "app": "firefox"
+    }
+  },
+  {
+    "id": "D1-33",
+    "domain": "D1_app",
+    "intent": "退出应用 Telegram",
+    "expected_route": "L0",
+    "expected_capability": "app.quit",
+    "expected_arg_contains": {
+      "app": "telegram"
+    }
+  },
+  {
+    "id": "D1-34",
+    "domain": "D1_app",
+    "intent": "关闭软件 WPS",
+    "expected_route": "L0",
+    "expected_capability": "app.quit",
+    "expected_arg_contains": {
+      "app": "wps"
+    }
+  },
+  {
+    "id": "D1-35",
+    "domain": "D1_app",
+    "intent": "退出 LibreOffice",
+    "expected_route": "L0",
+    "expected_capability": "app.quit",
+    "expected_arg_contains": {
+      "app": "libreoffice"
+    }
+  },
+  {
+    "id": "D2-01",
+    "domain": "D2_file_open",
+    "intent": "打开周报_第46周.docx",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "周报_第46周.docx"
+    }
+  },
+  {
+    "id": "D2-02",
+    "domain": "D2_file_open",
+    "intent": "打开周报模板.docx",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "周报模板.docx"
+    }
+  },
+  {
+    "id": "D2-03",
+    "domain": "D2_file_open",
+    "intent": "打开航天器意图识别论文.pdf",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "航天器意图识别论文.pdf"
+    }
+  },
+  {
+    "id": "D2-04",
+    "domain": "D2_file_open",
+    "intent": "打开预算表_2026.xlsx",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "预算表_2026.xlsx"
+    }
+  },
+  {
+    "id": "D2-05",
+    "domain": "D2_file_open",
+    "intent": "打开架构草图.png",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "架构草图.png"
+    }
+  },
+  {
+    "id": "D2-06",
+    "domain": "D2_file_open",
+    "intent": "打开 notes.md",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "notes.md"
+    }
+  },
+  {
+    "id": "D2-07",
+    "domain": "D2_file_open",
+    "intent": "打开 docker-compose.yml",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "docker-compose.yml"
+    }
+  },
+  {
+    "id": "D2-08",
+    "domain": "D2_file_open",
+    "intent": "打开安装脚本备份.tar.gz",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "安装脚本备份.tar.gz"
+    }
+  },
+  {
+    "id": "D2-09",
+    "domain": "D2_file_open",
+    "intent": "打开下载目录",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "downloads"
+    }
+  },
+  {
+    "id": "D2-10",
+    "domain": "D2_file_open",
+    "intent": "打开文档目录",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "documents"
+    }
+  },
+  {
+    "id": "D2-11",
+    "domain": "D2_file_open",
+    "intent": "打开桌面",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "desktop"
+    }
+  },
+  {
+    "id": "D2-12",
+    "domain": "D2_file_open",
+    "intent": "打开代码目录",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "code"
+    }
+  },
+  {
+    "id": "D2-13",
+    "domain": "D2_file_open",
+    "intent": "用 vsc 打开 docker-compose.yml",
+    "expected_route": "L0",
+    "expected_capability": "file.open_with",
+    "expected_arg_contains": {
+      "app": "code.desktop",
+      "path": "docker-compose.yml"
+    }
+  },
+  {
+    "id": "D2-14",
+    "domain": "D2_file_open",
+    "intent": "用文本编辑器打开 notes.md",
+    "expected_route": "L0",
+    "expected_capability": "file.open_with",
+    "expected_arg_contains": {
+      "app": "org.gnome.TextEditor.desktop",
+      "path": "notes.md"
+    }
+  },
+  {
+    "id": "D2-15",
+    "domain": "D2_file_open",
+    "intent": "用 WPS 打开 周报模板.docx",
+    "expected_route": "L0",
+    "expected_capability": "file.open_with",
+    "expected_arg_contains": {
+      "app": "wps-office-prometheus.desktop",
+      "path": "周报模板.docx"
+    }
+  },
+  {
+    "id": "D2-16",
+    "domain": "D2_file_open",
+    "intent": "用 LibreOffice 打开 预算表_2026.xlsx",
+    "expected_route": "L0",
+    "expected_capability": "file.open_with",
+    "expected_arg_contains": {
+      "app": "libreoffice-writer.desktop",
+      "path": "预算表_2026.xlsx"
+    }
+  },
+  {
+    "id": "D2-17",
+    "domain": "D2_file_open",
+    "intent": "打开航天器意图识别论文",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "航天器意图识别论文.pdf"
+    }
+  },
+  {
+    "id": "D2-18",
+    "domain": "D2_file_open",
+    "intent": "打开预算表_2026",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "预算表_2026.xlsx"
+    }
+  },
+  {
+    "id": "D2-19",
+    "domain": "D2_file_open",
+    "intent": "打开架构草图",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "架构草图.png"
+    }
+  },
+  {
+    "id": "D2-20",
+    "domain": "D2_file_open",
+    "intent": "打开会议纪要_Q4.txt",
+    "expected_route": "L0",
+    "expected_capability": "file.open",
+    "expected_arg_contains": {
+      "path": "会议纪要_Q4.txt"
+    }
+  },
+  {
+    "id": "D2-21",
+    "domain": "D2_file_open",
+    "intent": "用文本编辑器打开 会议纪要_Q4.txt",
+    "expected_route": "L0",
+    "expected_capability": "file.open_with",
+    "expected_arg_contains": {
+      "path": "会议纪要_Q4.txt"
+    }
+  },
+  {
+    "id": "D2-22",
+    "domain": "D2_file_open",
+    "intent": "打开 notes.md 所在文件夹",
+    "expected_route": "L0",
+    "expected_capability": "file.reveal",
+    "expected_arg_contains": {
+      "path": "notes.md"
+    }
+  },
+  {
+    "id": "D2-23",
+    "domain": "D2_file_open",
+    "intent": "定位 航天器意图识别论文.pdf 所在目录",
+    "expected_route": "L0",
+    "expected_capability": "file.reveal",
+    "expected_arg_contains": {
+      "path": "航天器意图识别论文.pdf"
+    }
+  },
+  {
+    "id": "D2-24",
+    "domain": "D2_file_open",
+    "intent": "查看 预算表_2026.xlsx 所在的文件夹",
+    "expected_route": "L0",
+    "expected_capability": "file.reveal",
+    "expected_arg_contains": {
+      "path": "预算表_2026.xlsx"
+    }
+  },
+  {
+    "id": "D2-25",
+    "domain": "D2_file_open",
+    "intent": "定位 docker-compose.yml 所在文件夹",
+    "expected_route": "L0",
+    "expected_capability": "file.reveal",
+    "expected_arg_contains": {
+      "path": "docker-compose.yml"
+    }
+  },
+  {
+    "id": "D2-26",
+    "domain": "D2_file_open",
+    "intent": "最近改过的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.recent"
+  },
+  {
+    "id": "D2-27",
+    "domain": "D2_file_open",
+    "intent": "最近修改的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.recent"
+  },
+  {
+    "id": "D2-28",
+    "domain": "D2_file_open",
+    "intent": "查看最近文件",
+    "expected_route": "L0",
+    "expected_capability": "file.recent"
+  },
+  {
+    "id": "D2-29",
+    "domain": "D2_file_open",
+    "intent": "最近文档",
+    "expected_route": "L0",
+    "expected_capability": "file.recent"
+  },
+  {
+    "id": "D2-30",
+    "domain": "D2_file_open",
+    "intent": "recent files",
+    "expected_route": "L0",
+    "expected_capability": "file.recent"
+  },
+  {
+    "id": "D3-01",
+    "domain": "D3_file_search",
+    "intent": "找一下 pdf 文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "pdf"
+    }
+  },
+  {
+    "id": "D3-02",
+    "domain": "D3_file_search",
+    "intent": "查找 docx 文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "docx"
+    }
+  },
+  {
+    "id": "D3-03",
+    "domain": "D3_file_search",
+    "intent": "找一下 md 文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "md"
+    }
+  },
+  {
+    "id": "D3-04",
+    "domain": "D3_file_search",
+    "intent": "找一下 xlsx 文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "xlsx"
+    }
+  },
+  {
+    "id": "D3-05",
+    "domain": "D3_file_search",
+    "intent": "找一下 png 文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "png"
+    }
+  },
+  {
+    "id": "D3-06",
+    "domain": "D3_file_search",
+    "intent": "找一下图片",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "category": "image"
+    }
+  },
+  {
+    "id": "D3-07",
+    "domain": "D3_file_search",
+    "intent": "找一下压缩包",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "category": "archive"
+    }
+  },
+  {
+    "id": "D3-08",
+    "domain": "D3_file_search",
+    "intent": "找一下表格文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "category": "spreadsheet"
+    }
+  },
+  {
+    "id": "D3-09",
+    "domain": "D3_file_search",
+    "intent": "找下载里的论文",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "directory": "downloads"
+    }
+  },
+  {
+    "id": "D3-10",
+    "domain": "D3_file_search",
+    "intent": "找文档里的预算",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "directory": "documents"
+    }
+  },
+  {
+    "id": "D3-11",
+    "domain": "D3_file_search",
+    "intent": "下载目录里大于 1K 的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "min_size_bytes": "1024"
+    }
+  },
+  {
+    "id": "D3-12",
+    "domain": "D3_file_search",
+    "intent": "找一下大于 2KB 的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "min_size_bytes": "2048"
+    }
+  },
+  {
+    "id": "D3-13",
+    "domain": "D3_file_search",
+    "intent": "找一下今天改过的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.search"
+  },
+  {
+    "id": "D3-14",
+    "domain": "D3_file_search",
+    "intent": "查找最近修改的 pdf",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "extensions": "pdf"
+    }
+  },
+  {
+    "id": "D3-15",
+    "domain": "D3_file_search",
+    "intent": "搜文件 docker-compose",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "docker-compose"
+    }
+  },
+  {
+    "id": "D3-16",
+    "domain": "D3_file_search",
+    "intent": "f 周报",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "周报"
+    }
+  },
+  {
+    "id": "D3-17",
+    "domain": "D3_file_search",
+    "intent": "find 架构草图",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "架构草图"
+    }
+  },
+  {
+    "id": "D3-18",
+    "domain": "D3_file_search",
+    "intent": "找 会议纪要",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "会议纪要"
+    }
+  },
+  {
+    "id": "D3-19",
+    "domain": "D3_file_search",
+    "intent": "查找文件 预算表",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "预算表"
+    }
+  },
+  {
+    "id": "D3-20",
+    "domain": "D3_file_search",
+    "intent": "哪里有 安装脚本备份",
+    "expected_route": "L0",
+    "expected_capability": "file.search",
+    "expected_arg_contains": {
+      "query": "安装脚本备份"
+    }
+  },
+  {
+    "id": "D3-21",
+    "domain": "D3_file_search",
+    "intent": "哪个文件里写了 8080",
+    "expected_route": "L0",
+    "expected_capability": "file.grep",
+    "expected_arg_contains": {
+      "pattern": "8080"
+    }
+  },
+  {
+    "id": "D3-22",
+    "domain": "D3_file_search",
+    "intent": "哪些文件包含 TODO",
+    "expected_route": "L0",
+    "expected_capability": "file.grep",
+    "expected_arg_contains": {
+      "pattern": "todo"
+    }
+  },
+  {
+    "id": "D3-23",
+    "domain": "D3_file_search",
+    "intent": "查找包含 services 的文件",
+    "expected_route": "L0",
+    "expected_capability": "file.grep",
+    "expected_arg_contains": {
+      "pattern": "services"
+    }
+  },
+  {
+    "id": "D3-24",
+    "domain": "D3_file_search",
+    "intent": "哪个文件里包含 项目纪要",
+    "expected_route": "L0",
+    "expected_capability": "file.grep",
+    "expected_arg_contains": {
+      "pattern": "项目纪要"
+    }
+  },
+  {
+    "id": "D3-25",
+    "domain": "D3_file_search",
+    "intent": "哪些文件里写了 ports",
+    "expected_route": "L0",
+    "expected_capability": "file.grep",
+    "expected_arg_contains": {
+      "pattern": "ports"
+    }
+  },
+  {
+    "id": "D3-26",
+    "domain": "D3_file_search",
+    "intent": "把 周报_第46周.docx 移动到 文档",
+    "expected_route": "L0",
+    "expected_capability": "file.move",
+    "expected_arg_contains": {
+      "target": "documents"
+    }
+  },
+  {
+    "id": "D3-27",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-28",
+    "domain": "D3_file_search",
+    "intent": "把 架构草图.png 复制到 文档",
+    "expected_route": "L0",
+    "expected_capability": "file.copy",
+    "expected_arg_contains": {
+      "target": "documents"
+    }
+  },
+  {
+    "id": "D3-29",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-30",
+    "domain": "D3_file_search",
+    "intent": "把 会议纪要_Q4.txt 拷贝到 下载",
+    "expected_route": "L0",
+    "expected_capability": "file.copy",
+    "expected_arg_contains": {
+      "target": "downloads"
+    }
+  },
+  {
+    "id": "D3-31",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-32",
+    "domain": "D3_file_search",
+    "intent": "把 会议纪要_Q4.txt 重命名为 会议纪要_终稿.txt",
+    "expected_route": "L0",
+    "expected_capability": "file.rename",
+    "expected_arg_contains": {
+      "new_name": "会议纪要_终稿.txt"
+    }
+  },
+  {
+    "id": "D3-33",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-34",
+    "domain": "D3_file_search",
+    "intent": "把 会议纪要_Q4.txt 移到回收站",
+    "expected_route": "L0",
+    "expected_capability": "file.trash",
+    "expected_arg_contains": {
+      "path": "会议纪要_q4.txt"
+    }
+  },
+  {
+    "id": "D3-35",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-36",
+    "domain": "D3_file_search",
+    "intent": "删除文件 会议纪要_Q4.txt",
+    "expected_route": "L0",
+    "expected_capability": "file.trash",
+    "expected_arg_contains": {
+      "path": "会议纪要_q4.txt"
+    }
+  },
+  {
+    "id": "D3-37",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-38",
+    "domain": "D3_file_search",
+    "intent": "把 notes.md 打包成 notes_backup.tar.gz",
+    "expected_route": "L0",
+    "expected_capability": "archive.create",
+    "expected_arg_contains": {
+      "output": "notes_backup.tar.gz"
+    }
+  },
+  {
+    "id": "D3-39",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-40",
+    "domain": "D3_file_search",
+    "intent": "把 预算表_2026.xlsx 压缩成 budget_archive.zip",
+    "expected_route": "L0",
+    "expected_capability": "archive.create",
+    "expected_arg_contains": {
+      "output": "budget_archive.zip"
+    }
+  },
+  {
+    "id": "D3-41",
+    "domain": "D3_file_search",
+    "intent": "撤销",
+    "expected_route": "L0"
+  },
+  {
+    "id": "D3-42",
+    "domain": "D3_file_search",
+    "intent": "把 安装脚本备份.tar.gz 解压到 桌面",
+    "expected_route": "L0",
+    "expected_capability": "archive.extract",
+    "expected_arg_contains": {
+      "destination": "desktop"
+    }
+  },
+  {
+    "id": "D3-43",
+    "domain": "D3_file_search",
+    "intent": "解压 安装脚本备份.tar.gz",
+    "expected_route": "L0",
+    "expected_capability": "archive.extract",
+    "expected_arg_contains": {
+      "archive": "安装脚本备份.tar.gz"
+    }
+  },
+  {
+    "id": "D3-44",
+    "domain": "D3_file_search",
+    "intent": "复制文本 IntentOS-v0.1-ready",
+    "expected_route": "L0",
+    "expected_capability": "clipboard.copy",
+    "expected_arg_contains": {
+      "text": "intentos-v0.1-ready"
+    }
+  },
+  {
+    "id": "D3-45",
+    "domain": "D3_file_search",
+    "intent": "把 hello-wayland 复制到剪贴板",
+    "expected_route": "L0",
+    "expected_capability": "clipboard.copy",
+    "expected_arg_contains": {
+      "text": "hello-wayland"
+    }
+  },
+  {
+    "id": "D4-01",
+    "domain": "D4_web",
+    "intent": "打开 GitHub",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://github.com"
+    }
+  },
+  {
+    "id": "D4-02",
+    "domain": "D4_web",
+    "intent": "打开 B站",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://www.bilibili.com"
+    }
+  },
+  {
+    "id": "D4-03",
+    "domain": "D4_web",
+    "intent": "打开知乎",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://www.zhihu.com"
+    }
+  },
+  {
+    "id": "D4-04",
+    "domain": "D4_web",
+    "intent": "打开 crates.io",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://crates.io"
+    }
+  },
+  {
+    "id": "D4-05",
+    "domain": "D4_web",
+    "intent": "打开 docs.rs",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://docs.rs"
+    }
+  },
+  {
+    "id": "D4-06",
+    "domain": "D4_web",
+    "intent": "打开 Stack Overflow",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://stackoverflow.com"
+    }
+  },
+  {
+    "id": "D4-07",
+    "domain": "D4_web",
+    "intent": "打开 MDN",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://developer.mozilla.org"
+    }
+  },
+  {
+    "id": "D4-08",
+    "domain": "D4_web",
+    "intent": "打开 arXiv",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://arxiv.org"
+    }
+  },
+  {
+    "id": "D4-09",
+    "domain": "D4_web",
+    "intent": "打开 Hacker News",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://news.ycombinator.com"
+    }
+  },
+  {
+    "id": "D4-10",
+    "domain": "D4_web",
+    "intent": "打开 localhost:3000",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "http://localhost:3000"
+    }
+  },
+  {
+    "id": "D4-11",
+    "domain": "D4_web",
+    "intent": "打开 127.0.0.1:8080",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "http://127.0.0.1:8080"
+    }
+  },
+  {
+    "id": "D4-12",
+    "domain": "D4_web",
+    "intent": "打开 https://example.com/docs",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://example.com/docs"
+    }
+  },
+  {
+    "id": "D4-13",
+    "domain": "D4_web",
+    "intent": "访问 GitHub",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://github.com"
+    }
+  },
+  {
+    "id": "D4-14",
+    "domain": "D4_web",
+    "intent": "去 B站",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://www.bilibili.com"
+    }
+  },
+  {
+    "id": "D4-15",
+    "domain": "D4_web",
+    "intent": "打开 Rust 异步圣经书签",
+    "expected_route": "L0",
+    "expected_capability": "web.open",
+    "expected_arg_contains": {
+      "url": "https://course.rs"
+    }
+  },
+  {
+    "id": "D4-16",
+    "domain": "D4_web",
+    "intent": "搜索 Rust openat2 用法",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google",
+      "query": "rust openat2"
+    }
+  },
+  {
+    "id": "D4-17",
+    "domain": "D4_web",
+    "intent": "搜一下 Ubuntu 26.04 新特性",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-18",
+    "domain": "D4_web",
+    "intent": "谷歌搜索 tokio unix socket",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-19",
+    "domain": "D4_web",
+    "intent": "谷歌一下 zbus rust",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-20",
+    "domain": "D4_web",
+    "intent": "google wayland layer shell",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-21",
+    "domain": "D4_web",
+    "intent": "百度搜索 Linux 桌面快捷键",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "baidu"
+    }
+  },
+  {
+    "id": "D4-22",
+    "domain": "D4_web",
+    "intent": "百度一下 Ubuntu 输入法配置",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "baidu"
+    }
+  },
+  {
+    "id": "D4-23",
+    "domain": "D4_web",
+    "intent": "必应搜索 Wayland GNOME Shell",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "bing"
+    }
+  },
+  {
+    "id": "D4-24",
+    "domain": "D4_web",
+    "intent": "bing PipeWire wireplumber",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "bing"
+    }
+  },
+  {
+    "id": "D4-25",
+    "domain": "D4_web",
+    "intent": "s landlock abi v4",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-26",
+    "domain": "D4_web",
+    "intent": "查一下 Bubblewrap 沙箱参数",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-27",
+    "domain": "D4_web",
+    "intent": "上网搜 SQLite FTS5 分词",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-28",
+    "domain": "D4_web",
+    "intent": "搜 Linux 字体渲染调优",
+    "expected_route": "L0",
+    "expected_capability": "web.search",
+    "expected_arg_contains": {
+      "engine": "google"
+    }
+  },
+  {
+    "id": "D4-29",
+    "domain": "D4_web",
+    "intent": "在 GitHub 搜索 ripgrep",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "github",
+      "query": "ripgrep"
+    }
+  },
+  {
+    "id": "D4-30",
+    "domain": "D4_web",
+    "intent": "gh tokio select",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "gh",
+      "query": "tokio select"
+    }
+  },
+  {
+    "id": "D4-31",
+    "domain": "D4_web",
+    "intent": "gh serde yaml",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "gh",
+      "query": "serde yaml"
+    }
+  },
+  {
+    "id": "D4-32",
+    "domain": "D4_web",
+    "intent": "在 B站搜 Rust 异步编程",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "query": "rust 异步编程"
+    }
+  },
+  {
+    "id": "D4-33",
+    "domain": "D4_web",
+    "intent": "bili Linux 桌面美化",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "bili",
+      "query": "linux 桌面美化"
+    }
+  },
+  {
+    "id": "D4-34",
+    "domain": "D4_web",
+    "intent": "crates serde_json",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "crates",
+      "query": "serde_json"
+    }
+  },
+  {
+    "id": "D4-35",
+    "domain": "D4_web",
+    "intent": "crates rusqlite",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "crates",
+      "query": "rusqlite"
+    }
+  },
+  {
+    "id": "D4-36",
+    "domain": "D4_web",
+    "intent": "docsrs axum",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "docsrs",
+      "query": "axum"
+    }
+  },
+  {
+    "id": "D4-37",
+    "domain": "D4_web",
+    "intent": "docsrs zbus",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "docsrs",
+      "query": "zbus"
+    }
+  },
+  {
+    "id": "D4-38",
+    "domain": "D4_web",
+    "intent": "so rust lifetimes",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "so",
+      "query": "rust lifetimes"
+    }
+  },
+  {
+    "id": "D4-39",
+    "domain": "D4_web",
+    "intent": "mdn fetch api",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "mdn",
+      "query": "fetch api"
+    }
+  },
+  {
+    "id": "D4-40",
+    "domain": "D4_web",
+    "intent": "npm vite",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "npm",
+      "query": "vite"
+    }
+  },
+  {
+    "id": "D4-41",
+    "domain": "D4_web",
+    "intent": "arxiv speculative decoding",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "arxiv",
+      "query": "speculative decoding"
+    }
+  },
+  {
+    "id": "D4-42",
+    "domain": "D4_web",
+    "intent": "在知乎搜索 Linux 内核沙箱",
+    "expected_route": "L0",
+    "expected_capability": "web.search_site",
+    "expected_arg_contains": {
+      "site": "知乎"
+    }
+  },
+  {
+    "id": "D5-01",
+    "domain": "D5_settings",
+    "intent": "打开设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open"
+  },
+  {
+    "id": "D5-02",
+    "domain": "D5_settings",
+    "intent": "系统设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open"
+  },
+  {
+    "id": "D5-03",
+    "domain": "D5_settings",
+    "intent": "打开蓝牙设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "bluetooth"
+    }
+  },
+  {
+    "id": "D5-04",
+    "domain": "D5_settings",
+    "intent": "蓝牙设置在哪",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "bluetooth"
+    }
+  },
+  {
+    "id": "D5-05",
+    "domain": "D5_settings",
+    "intent": "打开 wifi 设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "wifi"
+    }
+  },
+  {
+    "id": "D5-06",
+    "domain": "D5_settings",
+    "intent": "显示设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "display"
+    }
+  },
+  {
+    "id": "D5-07",
+    "domain": "D5_settings",
+    "intent": "打开声音设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "sound"
+    }
+  },
+  {
+    "id": "D5-08",
+    "domain": "D5_settings",
+    "intent": "打开电源设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "power"
+    }
+  },
+  {
+    "id": "D5-09",
+    "domain": "D5_settings",
+    "intent": "打开网络设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "network"
+    }
+  },
+  {
+    "id": "D5-10",
+    "domain": "D5_settings",
+    "intent": "打开键盘设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "keyboard"
+    }
+  },
+  {
+    "id": "D5-11",
+    "domain": "D5_settings",
+    "intent": "打开鼠标设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "mouse"
+    }
+  },
+  {
+    "id": "D5-12",
+    "domain": "D5_settings",
+    "intent": "打开通知设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "notifications"
+    }
+  },
+  {
+    "id": "D5-13",
+    "domain": "D5_settings",
+    "intent": "打开隐私设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "privacy"
+    }
+  },
+  {
+    "id": "D5-14",
+    "domain": "D5_settings",
+    "intent": "打开壁纸设置",
+    "expected_route": "L0",
+    "expected_capability": "settings.open_panel",
+    "expected_arg_contains": {
+      "panel": "background"
+    }
+  },
+  {
+    "id": "D5-15",
+    "domain": "D5_settings",
+    "intent": "深色模式",
+    "expected_route": "L0",
+    "expected_capability": "appearance.color_scheme.set",
+    "expected_arg_contains": {
+      "scheme": "prefer-dark"
+    }
+  },
+  {
+    "id": "D5-16",
+    "domain": "D5_settings",
+    "intent": "切换到深色模式",
+    "expected_route": "L0",
+    "expected_capability": "appearance.color_scheme.set",
+    "expected_arg_contains": {
+      "scheme": "prefer-dark"
+    }
+  },
+  {
+    "id": "D5-17",
+    "domain": "D5_settings",
+    "intent": "暗黑模式",
+    "expected_route": "L0",
+    "expected_capability": "appearance.color_scheme.set",
+    "expected_arg_contains": {
+      "scheme": "prefer-dark"
+    }
+  },
+  {
+    "id": "D5-18",
+    "domain": "D5_settings",
+    "intent": "浅色模式",
+    "expected_route": "L0",
+    "expected_capability": "appearance.color_scheme.set",
+    "expected_arg_contains": {
+      "scheme": "prefer-light"
+    }
+  },
+  {
+    "id": "D5-19",
+    "domain": "D5_settings",
+    "intent": "切换到浅色模式",
+    "expected_route": "L0",
+    "expected_capability": "appearance.color_scheme.set",
+    "expected_arg_contains": {
+      "scheme": "prefer-light"
+    }
+  },
+  {
+    "id": "D5-20",
+    "domain": "D5_settings",
+    "intent": "强调色改成蓝色",
+    "expected_route": "L0",
+    "expected_capability": "appearance.accent_color.set",
+    "expected_arg_contains": {
+      "color": "blue"
+    }
+  },
+  {
+    "id": "D5-21",
+    "domain": "D5_settings",
+    "intent": "强调色改成绿色",
+    "expected_route": "L0",
+    "expected_capability": "appearance.accent_color.set",
+    "expected_arg_contains": {
+      "color": "green"
+    }
+  },
+  {
+    "id": "D5-22",
+    "domain": "D5_settings",
+    "intent": "强调色改成橙色",
+    "expected_route": "L0",
+    "expected_capability": "appearance.accent_color.set",
+    "expected_arg_contains": {
+      "color": "orange"
+    }
+  },
+  {
+    "id": "D5-23",
+    "domain": "D5_settings",
+    "intent": "强调色 purple",
+    "expected_route": "L0",
+    "expected_capability": "appearance.accent_color.set",
+    "expected_arg_contains": {
+      "color": "purple"
+    }
+  },
+  {
+    "id": "D5-24",
+    "domain": "D5_settings",
+    "intent": "列出字体",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.list"
+  },
+  {
+    "id": "D5-25",
+    "domain": "D5_settings",
+    "intent": "有哪些等宽字体",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.list",
+    "expected_arg_contains": {
+      "query": "mono"
+    }
+  },
+  {
+    "id": "D5-26",
+    "domain": "D5_settings",
+    "intent": "把等宽字体换成 DejaVu Sans Mono",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.monospace.set",
+    "expected_arg_contains": {
+      "family": "dejavu sans mono"
+    }
+  },
+  {
+    "id": "D5-27",
+    "domain": "D5_settings",
+    "intent": "把等宽字号调成 13pt",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.monospace.set",
+    "expected_arg_contains": {
+      "size": "13"
+    }
+  },
+  {
+    "id": "D5-28",
+    "domain": "D5_settings",
+    "intent": "把界面字体换成 Roboto",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.interface.set",
+    "expected_arg_contains": {
+      "family": "roboto"
+    }
+  },
+  {
+    "id": "D5-29",
+    "domain": "D5_settings",
+    "intent": "把界面字号改成 11pt",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.interface.set",
+    "expected_arg_contains": {
+      "size": "11"
+    }
+  },
+  {
+    "id": "D5-30",
+    "domain": "D5_settings",
+    "intent": "把文档字体换成 Nimbus Roman",
+    "expected_route": "L0",
+    "expected_capability": "appearance.font.document.set",
+    "expected_arg_contains": {
+      "family": "nimbus roman"
+    }
+  },
+  {
+    "id": "D5-31",
+    "domain": "D5_settings",
+    "intent": "把字体调大一点",
+    "expected_route": "L0",
+    "expected_capability": "appearance.text_scale.set",
+    "expected_arg_contains": {
+      "relative": "up"
+    }
+  },
+  {
+    "id": "D5-32",
+    "domain": "D5_settings",
+    "intent": "把文字调小一点",
+    "expected_route": "L0",
+    "expected_capability": "appearance.text_scale.set",
+    "expected_arg_contains": {
+      "relative": "down"
+    }
+  },
+  {
+    "id": "D5-33",
+    "domain": "D5_settings",
+    "intent": "字体缩放 1.25",
+    "expected_route": "L0",
+    "expected_capability": "appearance.text_scale.set",
+    "expected_arg_contains": {
+      "value": "1.25"
+    }
+  },
+  {
+    "id": "D5-34",
+    "domain": "D5_settings",
+    "intent": "鼠标指针调大",
+    "expected_route": "L0",
+    "expected_capability": "appearance.cursor_size.set",
+    "expected_arg_contains": {
+      "relative": "up"
+    }
+  },
+  {
+    "id": "D5-35",
+    "domain": "D5_settings",
+    "intent": "光标大小设为 32",
+    "expected_route": "L0",
+    "expected_capability": "appearance.cursor_size.set",
+    "expected_arg_contains": {
+      "size": "32"
+    }
+  },
+  {
+    "id": "D5-36",
+    "domain": "D5_settings",
+    "intent": "关闭桌面动画",
+    "expected_route": "L0",
+    "expected_capability": "appearance.animations.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-37",
+    "domain": "D5_settings",
+    "intent": "开启桌面动画",
+    "expected_route": "L0",
+    "expected_capability": "appearance.animations.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-38",
+    "domain": "D5_settings",
+    "intent": "把 架构草图.png 设为壁纸",
+    "expected_route": "L0",
+    "expected_capability": "appearance.wallpaper.set",
+    "expected_arg_contains": {
+      "path": "架构草图.png"
+    }
+  },
+  {
+    "id": "D5-39",
+    "domain": "D5_settings",
+    "intent": "改为24小时制",
+    "expected_route": "L0",
+    "expected_capability": "appearance.clock.set",
+    "expected_arg_contains": {
+      "format": "24h"
+    }
+  },
+  {
+    "id": "D5-40",
+    "domain": "D5_settings",
+    "intent": "改为12小时制",
+    "expected_route": "L0",
+    "expected_capability": "appearance.clock.set",
+    "expected_arg_contains": {
+      "format": "12h"
+    }
+  },
+  {
+    "id": "D5-41",
+    "domain": "D5_settings",
+    "intent": "顶栏显示秒数",
+    "expected_route": "L0",
+    "expected_capability": "appearance.clock.set",
+    "expected_arg_contains": {
+      "show_seconds": "true"
+    }
+  },
+  {
+    "id": "D5-42",
+    "domain": "D5_settings",
+    "intent": "隐藏时钟秒数",
+    "expected_route": "L0",
+    "expected_capability": "appearance.clock.set",
+    "expected_arg_contains": {
+      "show_seconds": "false"
+    }
+  },
+  {
+    "id": "D5-43",
+    "domain": "D5_settings",
+    "intent": "开启勿扰",
+    "expected_route": "L0",
+    "expected_capability": "notify.dnd.set",
+    "expected_arg_contains": {
+      "enabled": "true"
+    }
+  },
+  {
+    "id": "D5-44",
+    "domain": "D5_settings",
+    "intent": "勿扰模式",
+    "expected_route": "L0",
+    "expected_capability": "notify.dnd.set",
+    "expected_arg_contains": {
+      "enabled": "true"
+    }
+  },
+  {
+    "id": "D5-45",
+    "domain": "D5_settings",
+    "intent": "关闭勿扰模式",
+    "expected_route": "L0",
+    "expected_capability": "notify.dnd.set",
+    "expected_arg_contains": {
+      "enabled": "false"
+    }
+  },
+  {
+    "id": "D5-46",
+    "domain": "D5_settings",
+    "intent": "锁屏",
+    "expected_route": "L0",
+    "expected_capability": "screen.lock"
+  },
+  {
+    "id": "D5-47",
+    "domain": "D5_settings",
+    "intent": "关闭自动锁屏",
+    "expected_route": "L0",
+    "expected_capability": "screen.autolock.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-48",
+    "domain": "D5_settings",
+    "intent": "开启自动锁屏",
+    "expected_route": "L0",
+    "expected_capability": "screen.autolock.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-49",
+    "domain": "D5_settings",
+    "intent": "静音",
+    "expected_route": "L0",
+    "expected_capability": "sound.mute.set",
+    "expected_arg_contains": {
+      "mode": "on"
+    }
+  },
+  {
+    "id": "D5-50",
+    "domain": "D5_settings",
+    "intent": "取消静音",
+    "expected_route": "L0",
+    "expected_capability": "sound.mute.set",
+    "expected_arg_contains": {
+      "mode": "off"
+    }
+  },
+  {
+    "id": "D5-51",
+    "domain": "D5_settings",
+    "intent": "当前音量",
+    "expected_route": "L0",
+    "expected_capability": "sound.volume.get"
+  },
+  {
+    "id": "D5-52",
+    "domain": "D5_settings",
+    "intent": "把音量调到 30%",
+    "expected_route": "L0",
+    "expected_capability": "sound.volume.set",
+    "expected_arg_contains": {
+      "value": "30"
+    }
+  },
+  {
+    "id": "D5-53",
+    "domain": "D5_settings",
+    "intent": "音量 65",
+    "expected_route": "L0",
+    "expected_capability": "sound.volume.set",
+    "expected_arg_contains": {
+      "value": "65"
+    }
+  },
+  {
+    "id": "D5-54",
+    "domain": "D5_settings",
+    "intent": "音量调大一点",
+    "expected_route": "L0",
+    "expected_capability": "sound.volume.set",
+    "expected_arg_contains": {
+      "relative": "up"
+    }
+  },
+  {
+    "id": "D5-55",
+    "domain": "D5_settings",
+    "intent": "小声点",
+    "expected_route": "L0",
+    "expected_capability": "sound.volume.set",
+    "expected_arg_contains": {
+      "relative": "down"
+    }
+  },
+  {
+    "id": "D5-56",
+    "domain": "D5_settings",
+    "intent": "闭麦",
+    "expected_route": "L0",
+    "expected_capability": "sound.mic.mute.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-57",
+    "domain": "D5_settings",
+    "intent": "开麦",
+    "expected_route": "L0",
+    "expected_capability": "sound.mic.mute.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-58",
+    "domain": "D5_settings",
+    "intent": "把麦克风音量调到 80%",
+    "expected_route": "L0",
+    "expected_capability": "sound.mic.volume.set",
+    "expected_arg_contains": {
+      "value": "80"
+    }
+  },
+  {
+    "id": "D5-59",
+    "domain": "D5_settings",
+    "intent": "麦克风声音调小一点",
+    "expected_route": "L0",
+    "expected_capability": "sound.mic.volume.set",
+    "expected_arg_contains": {
+      "relative": "down"
+    }
+  },
+  {
+    "id": "D5-60",
+    "domain": "D5_settings",
+    "intent": "音频输出设备",
+    "expected_route": "L0",
+    "expected_capability": "sound.output.list"
+  },
+  {
+    "id": "D5-61",
+    "domain": "D5_settings",
+    "intent": "把声音切到耳机",
+    "expected_route": "L0",
+    "expected_capability": "sound.output.set",
+    "expected_arg_contains": {
+      "device": "耳机"
+    }
+  },
+  {
+    "id": "D5-62",
+    "domain": "D5_settings",
+    "intent": "切换到扬声器",
+    "expected_route": "L0",
+    "expected_capability": "sound.output.set",
+    "expected_arg_contains": {
+      "device": "扬声器"
+    }
+  },
+  {
+    "id": "D5-63",
+    "domain": "D5_settings",
+    "intent": "当前亮度",
+    "expected_route": "L0",
+    "expected_capability": "display.brightness.get"
+  },
+  {
+    "id": "D5-64",
+    "domain": "D5_settings",
+    "intent": "把亮度调到 50%",
+    "expected_route": "L0",
+    "expected_capability": "display.brightness.set",
+    "expected_arg_contains": {
+      "value": "50"
+    }
+  },
+  {
+    "id": "D5-65",
+    "domain": "D5_settings",
+    "intent": "屏幕亮一点",
+    "expected_route": "L0",
+    "expected_capability": "display.brightness.set",
+    "expected_arg_contains": {
+      "relative": "up"
+    }
+  },
+  {
+    "id": "D5-66",
+    "domain": "D5_settings",
+    "intent": "暗一点",
+    "expected_route": "L0",
+    "expected_capability": "display.brightness.set",
+    "expected_arg_contains": {
+      "relative": "down"
+    }
+  },
+  {
+    "id": "D5-67",
+    "domain": "D5_settings",
+    "intent": "打开夜灯",
+    "expected_route": "L0",
+    "expected_capability": "display.night_light.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-68",
+    "domain": "D5_settings",
+    "intent": "关闭夜灯",
+    "expected_route": "L0",
+    "expected_capability": "display.night_light.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-69",
+    "domain": "D5_settings",
+    "intent": "屏幕暖一点",
+    "expected_route": "L0",
+    "expected_capability": "display.night_light.temperature",
+    "expected_arg_contains": {
+      "relative": "warmer"
+    }
+  },
+  {
+    "id": "D5-70",
+    "domain": "D5_settings",
+    "intent": "色温调到 4200K",
+    "expected_route": "L0",
+    "expected_capability": "display.night_light.temperature",
+    "expected_arg_contains": {
+      "value": "4200"
+    }
+  },
+  {
+    "id": "D5-71",
+    "domain": "D5_settings",
+    "intent": "不熄屏",
+    "expected_route": "L0",
+    "expected_capability": "display.idle_delay.set",
+    "expected_arg_contains": {
+      "seconds": "0"
+    }
+  },
+  {
+    "id": "D5-72",
+    "domain": "D5_settings",
+    "intent": "10分钟后自动熄屏",
+    "expected_route": "L0",
+    "expected_capability": "display.idle_delay.set",
+    "expected_arg_contains": {
+      "seconds": "600"
+    }
+  },
+  {
+    "id": "D5-73",
+    "domain": "D5_settings",
+    "intent": "打开 Wi-Fi",
+    "expected_route": "L0",
+    "expected_capability": "network.wifi.power",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-74",
+    "domain": "D5_settings",
+    "intent": "关闭 Wi-Fi",
+    "expected_route": "L0",
+    "expected_capability": "network.wifi.power",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-75",
+    "domain": "D5_settings",
+    "intent": "扫描 Wi-Fi",
+    "expected_route": "L0",
+    "expected_capability": "network.wifi.list"
+  },
+  {
+    "id": "D5-76",
+    "domain": "D5_settings",
+    "intent": "连接 Wi-Fi Office_5G",
+    "expected_route": "L0",
+    "expected_capability": "network.wifi.connect",
+    "expected_arg_contains": {
+      "ssid": "office_5g"
+    }
+  },
+  {
+    "id": "D5-77",
+    "domain": "D5_settings",
+    "intent": "网络状态",
+    "expected_route": "L0",
+    "expected_capability": "network.status"
+  },
+  {
+    "id": "D5-78",
+    "domain": "D5_settings",
+    "intent": "打开蓝牙",
+    "expected_route": "L0",
+    "expected_capability": "bluetooth.power",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-79",
+    "domain": "D5_settings",
+    "intent": "关闭蓝牙",
+    "expected_route": "L0",
+    "expected_capability": "bluetooth.power",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-80",
+    "domain": "D5_settings",
+    "intent": "连接蓝牙 AirPods",
+    "expected_route": "L0",
+    "expected_capability": "bluetooth.connect",
+    "expected_arg_contains": {
+      "device": "airpods"
+    }
+  },
+  {
+    "id": "D5-81",
+    "domain": "D5_settings",
+    "intent": "断开蓝牙 AirPods",
+    "expected_route": "L0",
+    "expected_capability": "bluetooth.disconnect",
+    "expected_arg_contains": {
+      "device": "airpods"
+    }
+  },
+  {
+    "id": "D5-82",
+    "domain": "D5_settings",
+    "intent": "开启飞行模式",
+    "expected_route": "L0",
+    "expected_capability": "network.airplane.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-83",
+    "domain": "D5_settings",
+    "intent": "关闭飞行模式",
+    "expected_route": "L0",
+    "expected_capability": "network.airplane.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "D5-84",
+    "domain": "D5_settings",
+    "intent": "电池电量",
+    "expected_route": "L0",
+    "expected_capability": "power.battery.status"
+  },
+  {
+    "id": "D5-85",
+    "domain": "D5_settings",
+    "intent": "当前电源模式",
+    "expected_route": "L0",
+    "expected_capability": "power.profile.get"
+  },
+  {
+    "id": "D5-86",
+    "domain": "D5_settings",
+    "intent": "省电模式",
+    "expected_route": "L0",
+    "expected_capability": "power.profile.set",
+    "expected_arg_contains": {
+      "profile": "power-saver"
+    }
+  },
+  {
+    "id": "D5-87",
+    "domain": "D5_settings",
+    "intent": "开启性能模式",
+    "expected_route": "L0",
+    "expected_capability": "power.profile.set",
+    "expected_arg_contains": {
+      "profile": "performance"
+    }
+  },
+  {
+    "id": "D5-88",
+    "domain": "D5_settings",
+    "intent": "切回平衡模式",
+    "expected_route": "L0",
+    "expected_capability": "power.profile.set",
+    "expected_arg_contains": {
+      "profile": "balanced"
+    }
+  },
+  {
+    "id": "D5-89",
+    "domain": "D5_settings",
+    "intent": "挂起电脑",
+    "expected_route": "L0",
+    "expected_capability": "power.session",
+    "expected_arg_contains": {
+      "action": "suspend"
+    }
+  },
+  {
+    "id": "D5-90",
+    "domain": "D5_settings",
+    "intent": "重启电脑",
+    "expected_route": "L0",
+    "expected_capability": "power.session",
+    "expected_arg_contains": {
+      "action": "reboot"
+    }
+  },
+  {
+    "id": "D5-91",
+    "domain": "D5_settings",
+    "intent": "鼠标快一点",
+    "expected_route": "L0",
+    "expected_capability": "input.mouse.speed",
+    "expected_arg_contains": {
+      "relative": "up"
+    }
+  },
+  {
+    "id": "D5-92",
+    "domain": "D5_settings",
+    "intent": "触控板慢一点",
+    "expected_route": "L0",
+    "expected_capability": "input.touchpad.speed",
+    "expected_arg_contains": {
+      "relative": "down"
+    }
+  },
+  {
+    "id": "D5-93",
+    "domain": "D5_settings",
+    "intent": "开启自然滚动",
+    "expected_route": "L0",
+    "expected_capability": "input.touchpad.natural_scroll",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-94",
+    "domain": "D5_settings",
+    "intent": "开启轻触点击",
+    "expected_route": "L0",
+    "expected_capability": "input.touchpad.tap_to_click",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "D5-95",
+    "domain": "D5_settings",
+    "intent": "按键重复快一点",
+    "expected_route": "L0",
+    "expected_capability": "input.keyboard.repeat",
+    "expected_arg_contains": {
+      "preset": "fast"
+    }
+  },
+  {
+    "id": "D5-96",
+    "domain": "D5_settings",
+    "intent": "切到中文输入法",
+    "expected_route": "L0",
+    "expected_capability": "input.source.switch",
+    "expected_arg_contains": {
+      "source": "zh"
+    }
+  },
+  {
+    "id": "D5-97",
+    "domain": "D5_settings",
+    "intent": "暂停播放",
+    "expected_route": "L0",
+    "expected_capability": "media.control",
+    "expected_arg_contains": {
+      "action": "pause"
+    }
+  },
+  {
+    "id": "D5-98",
+    "domain": "D5_settings",
+    "intent": "下一首",
+    "expected_route": "L0",
+    "expected_capability": "media.control",
+    "expected_arg_contains": {
+      "action": "next"
+    }
+  },
+  {
+    "id": "D5-99",
+    "domain": "D5_settings",
+    "intent": "全屏截图",
+    "expected_route": "L0",
+    "expected_capability": "screenshot.take",
+    "expected_arg_contains": {
+      "mode": "fullscreen"
+    }
+  },
+  {
+    "id": "D5-100",
+    "domain": "D5_settings",
+    "intent": "开启护眼模式",
+    "expected_route": "L0",
+    "expected_capability": "scene.apply",
+    "expected_arg_contains": {
+      "scene": "护眼模式"
+    }
+  },
+  {
+    "id": "L1-01",
+    "domain": "D5b_L1",
+    "intent": "让电脑闭嘴",
+    "expected_route": "L1",
+    "expected_capability": "sound.mute.set",
+    "expected_arg_contains": {
+      "mode": "on"
+    }
+  },
+  {
+    "id": "L1-02",
+    "domain": "D5b_L1",
+    "intent": "电脑别响了",
+    "expected_route": "L1",
+    "expected_capability": "sound.mute.set",
+    "expected_arg_contains": {
+      "mode": "on"
+    }
+  },
+  {
+    "id": "L1-03",
+    "domain": "D5b_L1",
+    "intent": "让电脑出声",
+    "expected_route": "L1",
+    "expected_capability": "sound.mute.set",
+    "expected_arg_contains": {
+      "mode": "off"
+    }
+  },
+  {
+    "id": "L1-04",
+    "domain": "D5b_L1",
+    "intent": "开防蓝光",
+    "expected_route": "L1",
+    "expected_capability": "display.night_light.set",
+    "expected_arg_contains": {
+      "state": "on"
+    }
+  },
+  {
+    "id": "L1-05",
+    "domain": "D5b_L1",
+    "intent": "关闭防蓝光",
+    "expected_route": "L1",
+    "expected_capability": "display.night_light.set",
+    "expected_arg_contains": {
+      "state": "off"
+    }
+  },
+  {
+    "id": "L1-06",
+    "domain": "D5b_L1",
+    "intent": "看看局域网地址",
+    "expected_route": "L1",
+    "expected_capability": "network.ip"
+  },
+  {
+    "id": "L1-07",
+    "domain": "D5b_L1",
+    "intent": "查看内网地址",
+    "expected_route": "L1",
+    "expected_capability": "network.ip"
+  },
+  {
+    "id": "L1-08",
+    "domain": "D5b_L1",
+    "intent": "看看空间够不够",
+    "expected_route": "L1",
+    "expected_capability": "disk.free"
+  },
+  {
+    "id": "L1-09",
+    "domain": "D5b_L1",
+    "intent": "硬盘容量还剩多少",
+    "expected_route": "L1",
+    "expected_capability": "disk.free"
+  },
+  {
+    "id": "L1-10",
+    "domain": "D5b_L1",
+    "intent": "锁一下电脑",
+    "expected_route": "L1",
+    "expected_capability": "screen.lock"
+  },
+  {
+    "id": "L1-11",
+    "domain": "D5b_L1",
+    "intent": "离开锁屏",
+    "expected_route": "L1",
+    "expected_capability": "screen.lock"
+  },
+  {
+    "id": "L1-12",
+    "domain": "D5b_L1",
+    "intent": "查查电池百分比",
+    "expected_route": "L1",
+    "expected_capability": "power.battery.status"
+  },
+  {
+    "id": "L1-13",
+    "domain": "D5b_L1",
+    "intent": "切到续航优先",
+    "expected_route": "L1",
+    "expected_capability": "power.profile.set",
+    "expected_arg_contains": {
+      "profile": "power-saver"
+    }
+  },
+  {
+    "id": "L1-14",
+    "domain": "D5b_L1",
+    "intent": "开启满血性能",
+    "expected_route": "L1",
+    "expected_capability": "power.profile.set",
+    "expected_arg_contains": {
+      "profile": "performance"
+    }
+  },
+  {
+    "id": "D6-01",
+    "domain": "D6_devtools",
+    "intent": "看看磁盘还剩多少",
+    "expected_route": "L0",
+    "expected_capability": "disk.free"
+  },
+  {
+    "id": "D6-02",
+    "domain": "D6_devtools",
+    "intent": "硬盘空间",
+    "expected_route": "L0",
+    "expected_capability": "disk.free"
+  },
+  {
+    "id": "D6-03",
+    "domain": "D6_devtools",
+    "intent": "disk free",
+    "expected_route": "L0",
+    "expected_capability": "disk.free"
+  },
+  {
+    "id": "D6-04",
+    "domain": "D6_devtools",
+    "intent": "下载目录占了多少空间",
+    "expected_route": "L0",
+    "expected_capability": "disk.usage",
+    "expected_arg_contains": {
+      "path": "downloads"
+    }
+  },
+  {
+    "id": "D6-05",
+    "domain": "D6_devtools",
+    "intent": "文档目录大小",
+    "expected_route": "L0",
+    "expected_capability": "disk.usage",
+    "expected_arg_contains": {
+      "path": "documents"
+    }
+  },
+  {
+    "id": "D6-06",
+    "domain": "D6_devtools",
+    "intent": "我的 IP",
+    "expected_route": "L0",
+    "expected_capability": "network.ip"
+  },
+  {
+    "id": "D6-07",
+    "domain": "D6_devtools",
+    "intent": "查看ip地址",
+    "expected_route": "L0",
+    "expected_capability": "network.ip"
+  },
+  {
+    "id": "D6-08",
+    "domain": "D6_devtools",
+    "intent": "my ip",
+    "expected_route": "L0",
+    "expected_capability": "network.ip"
+  },
+  {
+    "id": "D6-09",
+    "domain": "D6_devtools",
+    "intent": "占内存最多的进程",
+    "expected_route": "L0",
+    "expected_capability": "process.list"
+  },
+  {
+    "id": "D6-10",
+    "domain": "D6_devtools",
+    "intent": "查看高占用进程",
+    "expected_route": "L0",
+    "expected_capability": "process.list"
+  },
+  {
+    "id": "D6-11",
+    "domain": "D6_devtools",
+    "intent": "进程列表",
+    "expected_route": "L0",
+    "expected_capability": "process.list"
+  },
+  {
+    "id": "D6-12",
+    "domain": "D6_devtools",
+    "intent": "结束进程 PID 99999",
+    "expected_route": "L0",
+    "expected_capability": "process.terminate",
+    "expected_arg_contains": {
+      "pid": "99999"
+    }
+  },
+  {
+    "id": "D6-13",
+    "domain": "D6_devtools",
+    "intent": "在下载目录打开终端",
+    "expected_route": "L0",
+    "expected_capability": "terminal.open_at",
+    "expected_arg_contains": {
+      "path": "downloads"
+    }
+  },
+  {
+    "id": "D6-14",
+    "domain": "D6_devtools",
+    "intent": "在代码目录打开终端",
+    "expected_route": "L0",
+    "expected_capability": "terminal.open_at",
+    "expected_arg_contains": {
+      "path": "code"
+    }
+  },
+  {
+    "id": "D6-15",
+    "domain": "D6_devtools",
+    "intent": "搜索软件包 ripgrep",
+    "expected_route": "L0",
+    "expected_capability": "package.search",
+    "expected_arg_contains": {
+      "query": "ripgrep"
+    }
+  },
+  {
+    "id": "D6-16",
+    "domain": "D6_devtools",
+    "intent": "apt 搜索 bubblewrap",
+    "expected_route": "L0",
+    "expected_capability": "package.search",
+    "expected_arg_contains": {
+      "query": "bubblewrap"
+    }
+  },
+  {
+    "id": "D6-17",
+    "domain": "D6_devtools",
+    "intent": "查找软件包 zbus",
+    "expected_route": "L0",
+    "expected_capability": "package.search",
+    "expected_arg_contains": {
+      "query": "zbus"
+    }
+  },
+  {
+    "id": "D6-18",
+    "domain": "D6_devtools",
+    "intent": "8080 端口被谁占了",
+    "expected_route": "L0",
+    "expected_capability": "port.inspect",
+    "expected_arg_contains": {
+      "port": "8080"
+    }
+  },
+  {
+    "id": "D6-19",
+    "domain": "D6_devtools",
+    "intent": "3000 端口",
+    "expected_route": "L0",
+    "expected_capability": "port.inspect",
+    "expected_arg_contains": {
+      "port": "3000"
+    }
+  },
+  {
+    "id": "D6-20",
+    "domain": "D6_devtools",
+    "intent": "查看端口占用",
+    "expected_route": "L0",
+    "expected_capability": "port.inspect"
+  },
+  {
+    "id": "D6-21",
+    "domain": "D6_devtools",
+    "intent": "哪些端口在监听",
+    "expected_route": "L0",
+    "expected_capability": "port.inspect"
+  },
+  {
+    "id": "D6-22",
+    "domain": "D6_devtools",
+    "intent": "查看系统状态",
+    "expected_route": "L0",
+    "expected_capability": "system.inspect"
+  },
+  {
+    "id": "D6-23",
+    "domain": "D6_devtools",
+    "intent": "系统负载",
+    "expected_route": "L0",
+    "expected_capability": "system.inspect"
+  },
+  {
+    "id": "D6-24",
+    "domain": "D6_devtools",
+    "intent": "内存使用情况",
+    "expected_route": "L0",
+    "expected_capability": "system.inspect"
+  },
+  {
+    "id": "D6-25",
+    "domain": "D6_devtools",
+    "intent": "git 状态",
+    "expected_route": "L0",
+    "expected_capability": "git.status"
+  },
+  {
+    "id": "D6-26",
+    "domain": "D6_devtools",
+    "intent": "看看仓库状态",
+    "expected_route": "L0",
+    "expected_capability": "git.status"
+  },
+  {
+    "id": "D6-27",
+    "domain": "D6_devtools",
+    "intent": "最近 git 提交",
+    "expected_route": "L0",
+    "expected_capability": "git.log"
+  },
+  {
+    "id": "D6-28",
+    "domain": "D6_devtools",
+    "intent": "git log",
+    "expected_route": "L0",
+    "expected_capability": "git.log"
+  },
+  {
+    "id": "D6-29",
+    "domain": "D6_devtools",
+    "intent": "查看 git diff",
+    "expected_route": "L0",
+    "expected_capability": "git.diff"
+  },
+  {
+    "id": "D6-30",
+    "domain": "D6_devtools",
+    "intent": "未提交差异",
+    "expected_route": "L0",
+    "expected_capability": "git.diff"
+  },
+  {
+    "id": "D6-31",
+    "domain": "D6_devtools",
+    "intent": "打开项目 代码",
+    "expected_route": "L0",
+    "expected_capability": "project.open",
+    "expected_arg_contains": {
+      "path": "code"
+    }
+  },
+  {
+    "id": "D6-32",
+    "domain": "D6_devtools",
+    "intent": "记住：我默认喜欢把报告放在文档目录",
+    "expected_route": "L0"
+  },
+  {
+    "id": "XB-01",
+    "domain": "X_boundary",
+    "intent": "修改系统代理",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-02",
+    "domain": "X_boundary",
+    "intent": "把代理改成 127.0.0.1:7890",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-03",
+    "domain": "X_boundary",
+    "intent": "gsettings set org.gnome.system.proxy mode manual",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-04",
+    "domain": "X_boundary",
+    "intent": "改全局快捷键",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-05",
+    "domain": "X_boundary",
+    "intent": "打开 javascript:alert(1)",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-06",
+    "domain": "X_boundary",
+    "intent": "打开 file:///etc/passwd",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-07",
+    "domain": "X_boundary",
+    "intent": "打开 data:text/html,<h1>x</h1>",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-08",
+    "domain": "X_boundary",
+    "intent": "$ touch /tmp/untrusted_inject",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-09",
+    "domain": "X_boundary",
+    "intent": "$ rm -rf /tmp/test",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-10",
+    "domain": "X_boundary",
+    "intent": "记住 api_key 是 sk-1234567890abcdef1234567890",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-11",
+    "domain": "X_boundary",
+    "intent": "记住密码是 12345678",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "XB-12",
+    "domain": "X_boundary",
+    "intent": "用 不存在的超级软件 打开 notes.md",
+    "expected_route": "L0",
+    "expected_status": "failed"
+  },
+  {
+    "id": "L2-01",
+    "domain": "L2_complex",
+    "intent": "怎么查看占内存最多的前十个进程",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-02",
+    "domain": "L2_complex",
+    "intent": "如何查看当前目录大小谁占得最多",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-03",
+    "domain": "L2_complex",
+    "intent": "怎么撤销上一次 git commit 但保留改动",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-04",
+    "domain": "L2_complex",
+    "intent": "如何查看某个 systemd 服务的最新报错日志",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-05",
+    "domain": "L2_complex",
+    "intent": "怎么批量查找最近7天修改过的日志",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-06",
+    "domain": "L2_complex",
+    "intent": "如何测试到网关的网络连通性与延迟",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-07",
+    "domain": "L2_complex",
+    "intent": "怎么查看当前 git 分支关系图",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-08",
+    "domain": "L2_complex",
+    "intent": "如何只暂存部分修改的 git hunk",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-09",
+    "domain": "L2_complex",
+    "intent": "把下载里的周报整理归档到文档目录并且生成一份摘要对比后再提醒我检查",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-10",
+    "domain": "L2_complex",
+    "intent": "先检查磁盘空间，接着把大于 10MB 的旧归档列出来并整理成清单",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-11",
+    "domain": "L2_complex",
+    "intent": "对比本周和上周的预算表差异，然后再生成一份汇报提纲",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-12",
+    "domain": "L2_complex",
+    "intent": "扫描代码目录里的 TODO 注释，并且按模块汇总写进文档目录",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-13",
+    "domain": "L2_complex",
+    "intent": "查看当前占内存最高的进程，然后把分析报告保存到桌面",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-14",
+    "domain": "L2_complex",
+    "intent": "整理下载目录中的所有论文 PDF，接着按年份分类归档",
+    "expected_route": "L2"
+  },
+  {
+    "id": "L2-15",
+    "domain": "L2_complex",
+    "intent": "把会议纪要总结成三条行动项，同时把备份放到文档目录",
+    "expected_route": "L2"
+  }
+]

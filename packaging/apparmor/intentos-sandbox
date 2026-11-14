@@ -1,0 +1,11 @@
+# AppArmor profile for IntentOS Bubblewrap Sandbox Wrapper on Ubuntu 24.04 / 26.04 LTS (§10.6, Spike S1)
+# Install to: /etc/apparmor.d/intentos-sandbox
+# Reload via: sudo apparmor_parser -r /etc/apparmor.d/intentos-sandbox
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile intentos-sandbox /usr/lib/intentos/intentos-sandbox flags=(unconfined) {
+  userns,
+  include if exists <local/intentos-sandbox>
+}

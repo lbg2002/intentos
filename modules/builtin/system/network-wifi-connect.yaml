@@ -1,0 +1,24 @@
+id: network.wifi.connect
+version: 1
+summary: 连接已保存的 Wi-Fi 网络；若为未保存新网络则绝不索要密码，自动打开系统 Wi-Fi 设置页
+category: system
+aliases: ["连接Wi-Fi", "连Wi-Fi", "connect wifi"]
+l0_patterns:
+  - "连(接)? {ssid}( Wi-Fi)?"
+input_schema:
+  type: object
+  required: [ssid]
+  properties:
+    ssid:
+      type: string
+      maxLength: 128
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wifi_connect
+setting:
+  key_id: network.wifi.connect
+undo: none
+verification:
+  kind: readback

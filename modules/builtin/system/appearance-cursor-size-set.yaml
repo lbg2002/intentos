@@ -1,0 +1,28 @@
+id: appearance.cursor_size.set
+version: 1
+summary: 设置鼠标指针大小（24 / 32 / 48 / 64 / 96，可撤销）
+category: system
+aliases: ["光标大小", "鼠标指针大小", "cursor size"]
+l0_patterns:
+  - "(光标|鼠标指针)(调大|调小|设为) {size}?"
+input_schema:
+  type: object
+  properties:
+    size:
+      type: integer
+    relative:
+      type: string
+      enum: [up, down]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: cursor_size
+  schema: org.gnome.desktop.interface
+  key: cursor-size
+setting:
+  key_id: appearance.cursor_size
+  discrete_steps: [24, 32, 48, 64, 96]
+undo: restore_previous_value
+verification:
+  kind: readback

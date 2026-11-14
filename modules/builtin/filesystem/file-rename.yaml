@@ -1,0 +1,26 @@
+id: file.rename
+version: 1
+summary: 在同一授权目录内安全重命名文件（原生 openat2 + RENAME_NOREPLACE，支持一键撤销）
+category: filesystem
+aliases: ["重命名", "改名", "rename"]
+l0_patterns:
+  - "把 {source} (重命名|改名)为 {new_name}"
+input_schema:
+  type: object
+  required: [source, new_name]
+  properties:
+    source:
+      type: string
+      maxLength: 1024
+    new_name:
+      type: string
+      maxLength: 255
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: file.rename
+undo: changeset
+verification:
+  kind: targets_exist_and_sources_absent
+feedback: "已重命名 {source} → {new_name}（可撤销）"

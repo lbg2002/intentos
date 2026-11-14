@@ -1,0 +1,24 @@
+id: terminal.handoff
+version: 1
+summary: 将建议的终端命令安全交接至用户输入框（变为 `$ ...`，必须由用户亲自回车才执行）
+category: devtools
+aliases: ["命令交接", "command handoff"]
+l0_patterns: []
+input_schema:
+  type: object
+  required: [command]
+  properties:
+    command:
+      type: string
+      maxLength: 2048
+    explanation:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: terminal.handoff
+undo: none
+verification:
+  kind: structured_output

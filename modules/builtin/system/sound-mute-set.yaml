@@ -1,0 +1,27 @@
+id: sound.mute.set
+version: 1
+summary: 开启、关闭或切换系统静音状态（读回验证并支持撤销）
+category: system
+aliases: ["静音", "取消静音", "开声音", "mute", "unmute"]
+l0_patterns:
+  - "(开启)?静音"
+  - "(取消|关闭)静音"
+input_schema:
+  type: object
+  required: [mode]
+  properties:
+    mode:
+      type: string
+      enum: [on, off, toggle]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wpctl_mute
+setting:
+  key_id: sound.mute
+  enum_values: [on, off, toggle]
+undo: restore_previous_value
+verification:
+  kind: readback
+feedback: "静音状态 {before} → {after}"

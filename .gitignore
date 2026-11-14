@@ -1,0 +1,15 @@
+/target
+/bin/
+.cargo/config.toml
+node_modules/
+__pycache__/
+*.py[cod]
+*.db
+*.db-wal
+*.db-shm
+*.sock
+*.onnx
+*.part
+.DS_Store
+.env
+.env.*

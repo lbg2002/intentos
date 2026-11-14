@@ -1,0 +1,25 @@
+id: power.session
+version: 1
+summary: 执行休眠/挂起、重启、关机或注销会话（不可逆高影响操作，强制人工确认并提示保存工作）
+category: system
+aliases: ["关机", "重启", "休眠", "睡眠", "注销"]
+l0_patterns:
+  - "(关机|重启电脑|系统休眠|注销登录)"
+input_schema:
+  type: object
+  required: [action]
+  properties:
+    action:
+      type: string
+      enum: [suspend, reboot, poweroff, logout]
+effects: [system.admin]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: power_session
+setting:
+  key_id: power.session
+  enum_values: [suspend, reboot, poweroff, logout]
+undo: none
+verification:
+  kind: requested_unverified

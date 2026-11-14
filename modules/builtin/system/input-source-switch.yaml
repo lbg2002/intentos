@@ -1,0 +1,23 @@
+id: input.source.switch
+version: 1
+summary: 切换当前键盘输入源/中英文输入法（GNOME 扩展桥接）
+category: system
+aliases: ["切换输入法", "切中文输入法", "切英文输入法", "switch input source"]
+l0_patterns:
+  - "切换(到)?{source}?输入法"
+input_schema:
+  type: object
+  properties:
+    source:
+      type: string
+      maxLength: 64
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: input_source
+setting:
+  key_id: input.source
+undo: restore_previous_value
+verification:
+  kind: readback

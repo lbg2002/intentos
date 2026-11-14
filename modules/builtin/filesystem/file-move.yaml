@@ -1,0 +1,26 @@
+id: file.move
+version: 2
+summary: 将文件或目录安全移动到授权目录内的另一位置（原生 openat2，支持一键撤销）
+category: filesystem
+aliases: ["移动", "挪到", "归档到", "move", "mv"]
+l0_patterns:
+  - "把 {source} 移动到 {target}"
+input_schema:
+  type: object
+  required: [source, target]
+  properties:
+    source:
+      type: string
+      maxLength: 1024
+    target:
+      type: string
+      maxLength: 1024
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: file.move
+undo: changeset
+verification:
+  kind: targets_exist_and_sources_absent
+feedback: "已移动 {source} → {target}（可撤销）"

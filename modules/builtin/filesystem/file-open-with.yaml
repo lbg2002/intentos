@@ -1,0 +1,26 @@
+id: file.open_with
+version: 1
+summary: 使用指定应用程序打开授权目录内的文件（「用 WPS 打开周报」）
+category: filesystem
+aliases: ["用…打开", "open with"]
+l0_patterns:
+  - "用 {app} 打开 {file}"
+input_schema:
+  type: object
+  required: [app, path]
+  properties:
+    app:
+      type: string
+      maxLength: 256
+    path:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.open_with
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求用 {app} 打开 {path}"

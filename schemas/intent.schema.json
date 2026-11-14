@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intentos.org/schemas/v1/intent.schema.json",
+  "title": "IntentOS Intent Request v1",
+  "type": "object",
+  "required": ["text"],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "text": { "type": "string", "minLength": 1 },
+    "session_id": { "type": ["string", "null"] },
+    "force_agent": { "type": "boolean", "default": false },
+    "selected_candidate_id": { "type": ["string", "null"] },
+    "cwd": { "type": ["string", "null"] }
+  }
+}

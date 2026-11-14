@@ -1,0 +1,24 @@
+id: file.write
+version: 1
+summary: 在授权目录内新建或受备份保护地覆盖文本文件（超出备份配额时自动升级为不可撤销审批）
+category: filesystem
+aliases: ["写文件", "保存文件", "write file"]
+input_schema:
+  type: object
+  required: [path, content]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+    content:
+      type: string
+      maxLength: 1048576
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: file.write
+undo: changeset
+verification:
+  kind: sha256_verified
+feedback: "已写入 {path}（可撤销）"

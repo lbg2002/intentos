@@ -1,0 +1,33 @@
+id: input.touchpad.speed
+version: 1
+summary: 设置或相对调整触控板指针速度（-1.0 至 1.0，步长 0.2，可撤销）
+category: system
+aliases: ["触控板速度", "触摸板快一点", "touchpad speed"]
+l0_patterns:
+  - "(触控板|触摸板)(快一点|慢一点)"
+input_schema:
+  type: object
+  properties:
+    value:
+      type: number
+    relative:
+      type: string
+      enum: [up, down]
+  oneOf:
+    - required: [value]
+    - required: [relative]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: touchpad_speed
+  schema: org.gnome.desktop.peripherals.touchpad
+  key: speed
+setting:
+  key_id: input.touchpad.speed
+  min: -1.0
+  max: 1.0
+  step: 0.2
+undo: restore_previous_value
+verification:
+  kind: readback

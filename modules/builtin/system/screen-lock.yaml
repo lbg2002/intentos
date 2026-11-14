@@ -1,0 +1,20 @@
+id: screen.lock
+version: 1
+summary: 立即锁定当前桌面会话屏幕（loginctl lock-session）
+category: system
+aliases: ["锁屏", "锁定屏幕", "lock screen"]
+l0_patterns:
+  - "(立即)?锁屏"
+input_schema:
+  type: object
+  properties: {}
+effects: [ui]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: screen_lock
+setting:
+  key_id: screen.lock
+undo: none
+verification:
+  kind: requested_unverified

@@ -1,0 +1,33 @@
+id: appearance.font.document.set
+version: 1
+summary: 设置文档阅读字体族与字号（6–24 pt，校验 fc-list 已安装字体，可撤销）
+category: system
+aliases: ["文档字体", "阅读字体", "document font"]
+l0_patterns:
+  - "文档字体换成 {family}"
+input_schema:
+  type: object
+  properties:
+    family:
+      type: string
+      maxLength: 128
+    size:
+      type: number
+      minimum: 6
+      maximum: 24
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: font
+  schema: org.gnome.desktop.interface
+  key: document-font-name
+setting:
+  key_id: appearance.font.document
+  min: 6
+  max: 24
+  step: 1
+  unit: "pt"
+undo: restore_previous_value
+verification:
+  kind: readback

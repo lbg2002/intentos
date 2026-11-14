@@ -1,0 +1,39 @@
+id: file.search
+version: 1
+summary: 在授权目录中按名称、拼音、扩展名/类型、修改时间、文件大小检索文件
+category: filesystem
+aliases: ["找文件", "查找", "哪里", "find", "search file"]
+l0_patterns:
+  - "(找|查找|找一下|搜文件|find|f) {query}"
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      maxLength: 256
+    extensions:
+      type: array
+      maxItems: 20
+    directory:
+      type: string
+      maxLength: 512
+    min_size_bytes:
+      type: integer
+      minimum: 0
+    max_size_bytes:
+      type: integer
+      minimum: 0
+    modified_since_secs:
+      type: integer
+      minimum: 0
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 100
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.search
+undo: none
+feedback: "检索到 {count} 个文件"

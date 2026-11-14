@@ -1,0 +1,18 @@
+id: sound.output.list
+version: 1
+summary: 列出当前可用的音频输出设备（耳机、扬声器、HDMI/蓝牙音箱）
+category: system
+aliases: ["音频输出设备", "声音输出列表", "list audio outputs"]
+l0_patterns:
+  - "(查看|列出)?(音频|声音)输出设备"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: sound.output.list
+undo: none
+verification:
+  kind: structured_output

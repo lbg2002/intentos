@@ -1,0 +1,18 @@
+id: network.ip
+version: 1
+summary: 查询本机局域网 IPv4/IPv6 地址与网卡列表（ip -j addr 结构化输出）
+category: devtools
+aliases: ["我的IP", "本机IP", "查看IP地址", "my ip"]
+l0_patterns:
+  - '(查看)?(我的|本机)\s*IP(地址)?'
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: network.ip
+undo: none
+verification:
+  kind: structured_output

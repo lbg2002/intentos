@@ -1,0 +1,23 @@
+id: settings.open_panel
+version: 1
+summary: 打开指定的系统设置面板（蓝牙、显示、声音、网络/Wi-Fi、电源、外观、通知、鼠标、键盘、关于等）
+category: system
+aliases: ["蓝牙设置", "显示设置", "声音设置", "网络设置", "电源设置", "外观设置"]
+l0_patterns:
+  - "(打开)?{panel}设置(在哪)?"
+input_schema:
+  type: object
+  required: [panel]
+  properties:
+    panel:
+      type: string
+      maxLength: 64
+effects: [ui]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: control_center
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求打开系统设置面板：{panel}"

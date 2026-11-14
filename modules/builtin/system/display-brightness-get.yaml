@@ -1,0 +1,23 @@
+id: display.brightness.get
+version: 1
+summary: 查询当前屏幕背光亮度百分比
+category: system
+aliases: ["当前亮度", "查亮度", "亮度多少", "get brightness"]
+l0_patterns:
+  - "(当前)?亮度(是多少|多少)?"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: backlight
+setting:
+  key_id: display.brightness
+  min: 1
+  max: 100
+  step: 10
+  unit: "%"
+undo: none
+feedback: "当前屏幕亮度 {value}%"

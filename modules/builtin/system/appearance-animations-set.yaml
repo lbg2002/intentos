@@ -1,0 +1,27 @@
+id: appearance.animations.set
+version: 1
+summary: 开启或关闭桌面窗口动画效果（enable-animations，可撤销）
+category: system
+aliases: ["窗口动画", "界面动画", "关闭动画", "animations"]
+l0_patterns:
+  - "(开启|打开|关闭|关掉)(桌面|窗口|界面)?动画"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: animations
+  schema: org.gnome.desktop.interface
+  key: enable-animations
+setting:
+  key_id: appearance.animations
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

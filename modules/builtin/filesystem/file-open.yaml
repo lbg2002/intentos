@@ -1,0 +1,23 @@
+id: file.open
+version: 1
+summary: 使用系统默认关联程序打开授权目录内的文件或文件夹
+category: filesystem
+aliases: ["打开文件", "查看文件", "open file"]
+l0_patterns:
+  - "(打开|看|open) {file}"
+input_schema:
+  type: object
+  required: [path]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: file.open
+undo: none
+verification:
+  kind: requested_unverified
+feedback: "已请求打开 {path}"

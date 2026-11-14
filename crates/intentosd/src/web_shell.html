@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IntentOS Shell v0.1 — 意图驱动智能桌面入口</title>
+  <meta name="description" content="IntentOS v0.1 Intent Shell：支持 87 项结构化能力、L0/L1/L2 三层路由、组合场景单变更集撤销、隐私会话、命令交接与四页设置中心。" />
+  <style>
+    :root,
+    [data-theme="light"] {
+      --bg-page: hsl(210, 20%, 96%);
+      --bg-surface: hsl(0, 0%, 100%);
+      --bg-elevated: hsl(210, 18%, 98%);
+      --bg-hover: hsl(210, 22%, 93%);
+      --bg-selected: hsl(208, 82%, 94%);
+      --bg-code: hsl(215, 22%, 94%);
+      --border-subtle: hsl(214, 18%, 87%);
+      --border-strong: hsl(212, 20%, 76%);
+      --text-primary: hsl(216, 28%, 14%);
+      --text-secondary: hsl(215, 16%, 38%);
+      --text-muted: hsl(215, 13%, 52%);
+      --accent: hsl(208, 78%, 43%);
+      --accent-fg: hsl(0, 0%, 100%);
+      --priv: hsl(268, 62%, 46%);
+      --priv-bg: hsl(268, 68%, 94%);
+      --ok: hsl(152, 62%, 32%);
+      --ok-bg: hsl(152, 52%, 93%);
+      --warn: hsl(34, 84%, 36%);
+      --warn-bg: hsl(38, 88%, 93%);
+      --err: hsl(4, 72%, 44%);
+      --err-bg: hsl(4, 76%, 94%);
+      --shadow-shell: 0 18px 42px -12px hsla(216, 32%, 12%, 0.14), 0 2px 6px hsla(216, 28%, 12%, 0.06);
+      --ui-scale: 1;
+    }
+
+    [data-theme="dark"] {
+      --bg-page: hsl(216, 18%, 10%);
+      --bg-surface: hsl(216, 16%, 14%);
+      --bg-elevated: hsl(216, 15%, 18%);
+      --bg-hover: hsl(215, 15%, 21%);
+      --bg-selected: hsl(207, 46%, 23%);
+      --bg-code: hsl(218, 20%, 11%);
+      --border-subtle: hsl(215, 14%, 23%);
+      --border-strong: hsl(214, 14%, 32%);
+      --text-primary: hsl(210, 22%, 94%);
+      --text-secondary: hsl(213, 14%, 70%);
+      --text-muted: hsl(214, 11%, 52%);
+      --accent: hsl(204, 80%, 54%);
+      --accent-fg: hsl(216, 24%, 10%);
+      --priv: hsl(270, 82%, 74%);
+      --priv-bg: hsla(268, 52%, 28%, 0.45);
+      --ok: hsl(152, 58%, 54%);
+      --ok-bg: hsla(152, 54%, 24%, 0.35);
+      --warn: hsl(38, 88%, 62%);
+      --warn-bg: hsla(38, 76%, 25%, 0.35);
+      --err: hsl(4, 78%, 64%);
+      --err-bg: hsla(4, 66%, 26%, 0.35);
+      --shadow-shell: 0 24px 56px -14px hsla(220, 45%, 4%, 0.62), 0 2px 8px hsla(220, 40%, 4%, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+    html { font-size: calc(15px * var(--ui-scale)); }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background-color: var(--bg-page);
+      color: var(--text-primary);
+      font-family: "Ubuntu Sans", "Inter", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
+      line-height: 1.5;
+      transition: background-color 160ms ease, color 160ms ease;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.65rem 1.25rem;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 0.84rem;
+    }
+
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+    }
+
+    .topbar-brand h1 {
+      margin: 0;
+      font-size: 0.95rem;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+
+    .status-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.18rem 0.55rem;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      font-size: 0.78rem;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--ok);
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .btn-ghost {
+      appearance: none;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      padding: 0.3rem 0.65rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+
+    .btn-ghost:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-strong);
+    }
+
+    .btn-ghost.incog-active {
+      background: var(--priv-bg);
+      color: var(--priv);
+      border-color: var(--priv);
+      font-weight: 600;
+    }
+
+    .workspace-wrap {
+      max-width: 860px;
+      margin: 1.8rem auto 3rem;
+      padding: 0 1rem;
+    }
+
+    .launcher-shell {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: var(--shadow-shell);
+      overflow: hidden;
+    }
+
+    .launcher-shell.incog-border {
+      border-color: var(--priv);
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.95rem 1.15rem;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .mode-indicator {
+      padding: 0.22rem 0.5rem;
+      border-radius: 5px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: var(--bg-selected);
+      color: var(--accent);
+      white-space: nowrap;
+      user-select: none;
+    }
+
+    .mode-indicator.incog {
+      background: var(--priv-bg);
+      color: var(--priv);
+    }
+
+    #intent-input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 1.12rem;
+      font-family: inherit;
+      min-width: 0;
+    }
+
+    #intent-input::placeholder { color: var(--text-muted); }
+
+    .latency-readout {
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      appearance: none;
+      border: none;
+      background: var(--accent);
+      color: var(--accent-fg);
+      font-weight: 600;
+      font-size: 0.84rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: opacity 120ms ease, transform 80ms ease;
+      white-space: nowrap;
+    }
+
+    .btn-primary:hover { opacity: 0.92; }
+    .btn-primary:active { transform: scale(0.98); }
+
+    .candidates-list {
+      max-height: 310px;
+      overflow-y: auto;
+    }
+
+    .candidate-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+      padding: 0.62rem 1.15rem;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border-subtle);
+      transition: background 90ms ease;
+    }
+
+    .candidate-item:last-child { border-bottom: none; }
+    .candidate-item:hover,
+    .candidate-item.active { background: var(--bg-selected); }
+
+    .cand-main { min-width: 0; flex: 1; }
+    .cand-title {
+      font-size: 0.93rem;
+      font-weight: 550;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .cand-sub {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .cand-badge {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.15rem 0.48rem;
+      border-radius: 5px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .kbd-footer {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.52rem 1.15rem;
+      background: var(--bg-elevated);
+      border-top: 1px solid var(--border-subtle);
+      font-size: 0.76rem;
+      color: var(--text-muted);
+    }
+
+    kbd {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.72rem;
+      padding: 0.1rem 0.36rem;
+      border-radius: 4px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+
+    .quick-prompts {
+      margin-top: 0.95rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.42rem;
+    }
+
+    .prompt-chip {
+      appearance: none;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      font-size: 0.79rem;
+      padding: 0.3rem 0.64rem;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+
+    .prompt-chip:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-strong);
+    }
+
+    .feedback-panel {
+      margin-top: 1.1rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 1rem 1.15rem;
+      display: none;
+    }
+
+    .feedback-panel.visible { display: block; }
+
+    .feedback-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .verify-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.76rem;
+      font-weight: 600;
+      padding: 0.2rem 0.55rem;
+      border-radius: 5px;
+    }
+
+    .verify-passed { background: var(--ok-bg); color: var(--ok); }
+    .verify-unverified { background: var(--warn-bg); color: var(--warn); }
+    .verify-failed { background: var(--err-bg); color: var(--err); }
+
+    .feedback-msg {
+      font-size: 0.95rem;
+      font-weight: 500;
+      margin: 0.35rem 0;
+    }
+
+    .code-output {
+      margin-top: 0.65rem;
+      padding: 0.75rem 0.9rem;
+      border-radius: 8px;
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.8rem;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .approval-box {
+      margin-top: 0.75rem;
+      padding: 0.85rem;
+      border-radius: 8px;
+      background: var(--warn-bg);
+      border: 1px solid var(--warn);
+    }
+
+    .approval-actions {
+      display: flex;
+      gap: 0.6rem;
+      margin-top: 0.65rem;
+    }
+
+    .inspector-section {
+      margin-top: 1.35rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .tabs-nav {
+      display: flex;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+    }
+
+    .tab-btn {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      padding: 0.62rem 0.95rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: var(--bg-surface);
+    }
+
+    .tab-body {
+      padding: 0.9rem 1.15rem;
+      font-size: 0.84rem;
+    }
+
+    .row-record {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .row-record:last-child { border-bottom: none; }
+
+    .mono-id {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+    }
+
+    /* 4-Page Settings Center Modal (§14.2) */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: hsla(220, 35%, 6%, 0.68);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      z-index: 50;
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal-card {
+      width: 100%;
+      max-width: 740px;
+      max-height: 86vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: var(--shadow-shell);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 1.15rem;
+      border-bottom: 1px solid var(--border-subtle);
+      font-weight: 650;
+    }
+
+    .modal-body {
+      padding: 1rem 1.15rem;
+      overflow-y: auto;
+      font-size: 0.85rem;
+    }
+
+    .form-field {
+      margin-bottom: 0.85rem;
+    }
+    .form-field label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 0.3rem;
+    }
+    .form-input, .form-select, .form-textarea {
+      width: 100%;
+      padding: 0.45rem 0.65rem;
+      border-radius: 7px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.85rem;
+    }
+    .form-textarea {
+      min-height: 110px;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.8rem;
+    }
+
+    @media (max-width: 600px) {
+      .topbar { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+      .input-row { padding: 0.75rem 0.85rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <h1>IntentOS Shell <span class="mono-id">v0.1</span></h1>
+      <span id="daemon-health-badge" class="status-tag">
+        <span class="status-dot"></span>
+        <span id="daemon-summary-text">连接核心服务中…</span>
+      </span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-incognito" class="btn-ghost" type="button" title="临时隐私会话：不保存任务历史、命令直通历史或持久化记忆 (M-01)">隐私会话: 关</button>
+      <button id="btn-quick-undo" class="btn-ghost" type="button" title="撤销最近一次修改 (Ctrl+Z)">↶ 撤销上一步</button>
+      <button id="btn-open-settings" class="btn-ghost" type="button">⚙ 设置中心</button>
+      <button id="btn-reindex" class="btn-ghost" type="button">刷新索引</button>
+      <button id="btn-theme-toggle" class="btn-ghost" type="button">浅色/深色</button>
+    </div>
+  </header>
+
+  <main class="workspace-wrap">
+    <section id="launcher-box" class="launcher-shell" aria-label="意图输入框与即时候选">
+      <div class="input-row">
+        <span id="route-mode-pill" class="mode-indicator">自动路由</span>
+        <input
+          id="intent-input"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="输入意图，如：进入护眼模式 / 记住 docx 用 WPS 打开 / 本机 IP / 怎么查看内存最高进程 / $ git status"
+          autofocus
+        />
+        <span id="l0-latency" class="latency-readout">L0 Ready</span>
+        <button id="btn-submit-intent" class="btn-primary" type="button">执行</button>
+      </div>
+
+      <div id="candidates-container" class="candidates-list" role="listbox" aria-label="即时匹配候选"></div>
+
+      <div class="kbd-footer">
+        <span><kbd>Enter</kbd> 执行首选　<kbd>↑</kbd><kbd>↓</kbd> 选择候选　<kbd>Ctrl+Enter</kbd> L2 智能体　<kbd>Ctrl+Z</kbd> 撤销</span>
+        <span id="search-engine-label">默认搜索：Google</span>
+      </div>
+    </section>
+
+    <div class="quick-prompts" aria-label="v0.1 高频场景与意图示例">
+      <button class="prompt-chip" data-intent="进入护眼模式" type="button">进入护眼模式 (场景)</button>
+      <button class="prompt-chip" data-intent="进入演示模式" type="button">进入演示模式</button>
+      <button class="prompt-chip" data-intent="把等宽字体换成 JetBrains Mono" type="button">等宽字体 JetBrains Mono</button>
+      <button class="prompt-chip" data-intent="闭麦" type="button">闭麦 (L1 决策)</button>
+      <button class="prompt-chip" data-intent="本机 IP 是多少" type="button">本机 IP</button>
+      <button class="prompt-chip" data-intent="电池还剩多少" type="button">电池状态</button>
+      <button class="prompt-chip" data-intent="哪些进程占内存最高" type="button">高内存进程</button>
+      <button class="prompt-chip" data-intent="怎么撤回最近一次 git 提交" type="button">命令交接: Git 撤回</button>
+      <button class="prompt-chip" data-intent="记住 docx 用 WPS 打开" type="button">记住 docx 偏好</button>
+      <button class="prompt-chip" data-intent="连接 Wi-Fi Guest_Unsaved" type="button">未保存 Wi-Fi 交接</button>
+      <button class="prompt-chip" data-intent="打开 GitHub" type="button">打开 GitHub</button>
+      <button class="prompt-chip" data-intent="$ pwd && ls -la" type="button">$ pwd && ls -la</button>
+    </div>
+
+    <section id="feedback-card" class="feedback-panel" aria-live="polite">
+      <div class="feedback-head">
+        <span id="feedback-verify-badge" class="verify-pill verify-passed">✓ 已验证完成</span>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <span id="feedback-route-tag" class="mono-id"></span>
+          <button id="btn-card-undo" class="btn-ghost" type="button" style="display:none;">↶ 撤销本次修改 (Ctrl+Z)</button>
+        </div>
+      </div>
+      <p id="feedback-message" class="feedback-msg"></p>
+      <div id="feedback-disambiguate"></div>
+      <div id="feedback-approval" class="approval-box" style="display:none;"></div>
+      <pre id="feedback-output" class="code-output" style="display:none;"></pre>
+    </section>
+
+    <section class="inspector-section" aria-label="系统状态、场景、记忆与变更历史">
+      <nav class="tabs-nav">
+        <button class="tab-btn active" data-tab="changesets" type="button">可撤销变更集 (Undo)</button>
+        <button class="tab-btn" data-tab="scenes" type="button">组合场景模式</button>
+        <button class="tab-btn" data-tab="memories" type="button">显式偏好记忆</button>
+        <button class="tab-btn" data-tab="tasks" type="button">最近任务记录</button>
+        <button class="tab-btn" data-tab="probe" type="button">87 项能力与沙箱探测</button>
+      </nav>
+      <div id="inspector-content" class="tab-body">加载中…</div>
+    </section>
+  </main>
+
+  <!-- 4-Page Settings Center Modal (§14.2: 大脑 / 资源 / 网站 / 权限与撤销) -->
+  <div id="settings-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span id="settings-modal-title">IntentOS 设置中心（四页极简设计 · 不重复系统控制中心）</span>
+        <button id="btn-close-settings" class="btn-ghost" type="button">关闭 ✕</button>
+      </div>
+      <nav class="tabs-nav">
+        <button class="tab-btn cfg-tab active" data-cfg="brain" type="button">1. 大脑</button>
+        <button class="tab-btn cfg-tab" data-cfg="resources" type="button">2. 资源</button>
+        <button class="tab-btn cfg-tab" data-cfg="web" type="button">3. 网站</button>
+        <button class="tab-btn cfg-tab" data-cfg="permissions" type="button">4. 权限与撤销</button>
+      </nav>
+      <div id="settings-modal-body" class="modal-body">加载中…</div>
+    </div>
+  </div>
+
+  <script>
+    const inputEl = document.getElementById('intent-input');
+    const launcherBox = document.getElementById('launcher-box');
+    const candsEl = document.getElementById('candidates-container');
+    const latencyEl = document.getElementById('l0-latency');
+    const modePillEl = document.getElementById('route-mode-pill');
+    const btnIncognito = document.getElementById('btn-incognito');
+    const feedbackCard = document.getElementById('feedback-card');
+    const verifyBadge = document.getElementById('feedback-verify-badge');
+    const routeTag = document.getElementById('feedback-route-tag');
+    const feedbackMsg = document.getElementById('feedback-message');
+    const feedbackOut = document.getElementById('feedback-output');
+    const feedbackApproval = document.getElementById('feedback-approval');
+    const feedbackDisamb = document.getElementById('feedback-disambiguate');
+    const btnCardUndo = document.getElementById('btn-card-undo');
+    const inspectorContent = document.getElementById('inspector-content');
+    const settingsModal = document.getElementById('settings-modal');
+    const settingsBody = document.getElementById('settings-modal-body');
+
+    let isImeComposing = false;
+    let incognitoMode = false;
+    let currentCandidates = [];
+    let activeIdx = 0;
+    let currentSessionId = null;
+    let activeTab = 'changesets';
+    let activeCfgPage = 'brain';
+    let settingsData = null;
+    let queryTimer = null;
+
+    async function rpc(method, params = undefined) {
+      const body = params === undefined
+        ? { id: String(Date.now()), method }
+        : { id: String(Date.now()), method, params };
+      const resp = await fetch('/api/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      return resp.json();
+    }
+
+    function updateModeBadge(q = '') {
+      if (q.trim().startsWith('$')) {
+        modePillEl.textContent = incognitoMode ? '$ 隐私直通' : '$ 命令直通';
+      } else if (incognitoMode) {
+        modePillEl.textContent = '隐私会话';
+      } else {
+        modePillEl.textContent = '自动路由';
+      }
+      modePillEl.classList.toggle('incog', incognitoMode);
+    }
+
+    function syncVisualEffectsFromResult(task) {
+      if (!task || !task.steps) return;
+      for (const st of task.steps) {
+        if (st.capability_id === 'appearance.color_scheme.set' || st.capability_id === 'scene.apply') {
+          if (st.message.includes('深色模式')) {
+            document.documentElement.setAttribute('data-theme', 'dark');
+          } else if (st.message.includes('浅色模式')) {
+            document.documentElement.setAttribute('data-theme', 'light');
+          }
+        }
+        if (st.capability_id === 'appearance.text_scale.set' || st.capability_id === 'scene.apply') {
+          const m = st.message.match(/→\s*(\d+)%/);
+          if (m) {
+            const pct = Math.min(135, Math.max(85, Number(m[1])));
+            document.documentElement.style.setProperty('--ui-scale', String(pct / 100));
+          }
+        }
+      }
+    }
+
+    async function refreshStatus() {
+      const res = await rpc('get_status');
+      if (res.ok && res.result) {
+        const s = res.result;
+        document.getElementById('daemon-summary-text').textContent =
+          `v${s.version} · ${s.registered_capabilities} 能力 · ${s.indexed_apps} 应用 · ${s.indexed_files} 文件 · ${s.undo_changesets_available} 可撤销`;
+        document.getElementById('search-engine-label').textContent =
+          `默认搜索：${s.default_search_engine.toUpperCase()} · Runtime: ${s.runtime_mode}`;
+      }
+      await refreshInspector();
+    }
+
+    async function fetchCandidates(q) {
+      updateModeBadge(q);
+      if (!q.trim()) {
+        currentCandidates = [];
+        candsEl.innerHTML = '';
+        latencyEl.textContent = 'L0 Ready';
+        return;
+      }
+      const res = await rpc('query_candidates', { query: q });
+      if (!res.ok || !res.result) return;
+      const data = res.result;
+      const ms = (data.elapsed_us / 1000).toFixed(2);
+      latencyEl.textContent = `${ms} ms`;
+      currentCandidates = data.items || [];
+      activeIdx = 0;
+      renderCandidates();
+    }
+
+    function renderCandidates() {
+      candsEl.innerHTML = '';
+      currentCandidates.forEach((item, idx) => {
+        const row = document.createElement('div');
+        row.className = 'candidate-item' + (idx === activeIdx ? ' active' : '');
+        row.setAttribute('role', 'option');
+        row.innerHTML = `
+          <div class="cand-main">
+            <div class="cand-title"></div>
+            <div class="cand-sub"></div>
+          </div>
+          <span class="cand-badge"></span>
+        `;
+        row.querySelector('.cand-title').textContent = item.title;
+        row.querySelector('.cand-sub').textContent = item.subtitle;
+        row.querySelector('.cand-badge').textContent = item.badge;
+        row.addEventListener('mouseenter', () => {
+          activeIdx = idx;
+          Array.from(candsEl.children).forEach((el, i) => el.classList.toggle('active', i === idx));
+        });
+        row.addEventListener('click', () => {
+          if (item.kind === 'passthrough' && item.arguments && item.arguments.command) {
+            inputEl.value = `$ ${item.arguments.command}`;
+          }
+          submitIntent(inputEl.value, false, item.id);
+        });
+        candsEl.appendChild(row);
+      });
+    }
+
+    async function submitIntent(text, forceAgent = false, selectedCandidateId = null) {
+      const q = (text ?? inputEl.value).trim();
+      if (!q) return;
+      latencyEl.textContent = '执行中…';
+      const res = await rpc('submit_intent', {
+        protocol_version: 1,
+        text: q,
+        session_id: incognitoMode ? null : currentSessionId,
+        force_agent: forceAgent,
+        selected_candidate_id: selectedCandidateId,
+        incognito: incognitoMode
+      });
+      candsEl.innerHTML = '';
+      currentCandidates = [];
+
+      if (!res.ok) {
+        showErrorCard(res.error || '请求失败');
+        return;
+      }
+      if (res.result && res.result.kind === 'passthrough') {
+        renderPassthroughResult(res.result.passthrough);
+      } else {
+        renderTaskResult(res.result);
+      }
+      await refreshStatus();
+    }
+
+    function renderPassthroughResult(pt) {
+      feedbackCard.classList.add('visible');
+      btnCardUndo.style.display = 'none';
+      feedbackApproval.style.display = 'none';
+      feedbackDisamb.innerHTML = '';
+      routeTag.textContent = `直通 · cwd: ${pt.cwd}`;
+
+      if (pt.requires_confirmation) {
+        verifyBadge.className = 'verify-pill verify-unverified';
+        verifyBadge.textContent = '⚠ 高危直通确认';
+        feedbackMsg.textContent = pt.message;
+        feedbackApproval.style.display = 'block';
+        feedbackApproval.innerHTML = `
+          <div>命令：<code></code>（不可撤销）</div>
+          <div class="approval-actions">
+            <button id="btn-confirm-pt" class="btn-primary" type="button">确认本人执行</button>
+          </div>
+        `;
+        feedbackApproval.querySelector('code').textContent = pt.command;
+        document.getElementById('btn-confirm-pt').onclick = async () => {
+          const r2 = await rpc('run_passthrough', { command: pt.command, cwd: pt.cwd, confirmed_risky: true });
+          if (r2.ok) renderPassthroughResult(r2.result);
+        };
+        feedbackOut.style.display = 'none';
+        return;
+      }
+
+      if (pt.suggest_external_terminal) {
+        verifyBadge.className = 'verify-pill verify-unverified';
+        verifyBadge.textContent = '↗ 建议在终端运行';
+      } else if (pt.status === 'ok') {
+        verifyBadge.className = 'verify-pill verify-passed';
+        verifyBadge.textContent = '✓ 直通完成（不可撤销）';
+      } else {
+        verifyBadge.className = 'verify-pill verify-failed';
+        verifyBadge.textContent = '✗ 命令非零退出';
+      }
+      feedbackMsg.textContent = pt.message;
+      const combined = [pt.stdout, pt.stderr].filter(Boolean).join('\n');
+      if (combined) {
+        feedbackOut.style.display = 'block';
+        feedbackOut.textContent = combined;
+      } else {
+        feedbackOut.style.display = 'none';
+      }
+    }
+
+    function appendHandoffButton(cmdText) {
+      const normalized = cmdText.trim().startsWith('$') ? cmdText.trim() : `$ ${cmdText.trim()}`;
+      const handoffBtn = document.createElement('button');
+      handoffBtn.className = 'btn-primary';
+      handoffBtn.style.marginTop = '0.5rem';
+      handoffBtn.textContent = `填入命令框审阅：${normalized}`;
+      handoffBtn.onclick = () => {
+        inputEl.value = normalized;
+        inputEl.focus();
+        fetchCandidates(inputEl.value);
+      };
+      feedbackDisamb.appendChild(handoffBtn);
+    }
+
+    function renderTaskResult(task) {
+      if (!task) return;
+      if (!incognitoMode) {
+        currentSessionId = task.session_id || currentSessionId;
+      }
+      syncVisualEffectsFromResult(task);
+
+      feedbackCard.classList.add('visible');
+      feedbackApproval.style.display = 'none';
+      feedbackDisamb.innerHTML = '';
+      routeTag.textContent = `${task.route}${incognitoMode ? ' · 隐私' : ''} · ${task.id}`;
+
+      const lastStep = task.steps && task.steps.length ? task.steps[task.steps.length - 1] : null;
+      const vState = lastStep ? lastStep.verification.state : null;
+
+      if (task.status === 'awaiting_approval' && task.pending_approval) {
+        const pa = task.pending_approval;
+        verifyBadge.className = 'verify-pill verify-unverified';
+        verifyBadge.textContent = '⏳ 等待可信审批';
+        feedbackMsg.textContent = pa.summary;
+        feedbackApproval.style.display = 'block';
+        feedbackApproval.innerHTML = `
+          <pre class="code-output" style="margin-top:0;"></pre>
+          <div class="approval-actions">
+            <button id="btn-approve-now" class="btn-primary" type="button">允许本次执行</button>
+            <button id="btn-deny-now" class="btn-ghost" type="button">拒绝</button>
+          </div>
+        `;
+        feedbackApproval.querySelector('pre').textContent = pa.diff_preview;
+        document.getElementById('btn-approve-now').onclick = async () => {
+          const r = await rpc('approve', { approval_id: pa.approval_id, nonce: pa.nonce, digest: pa.digest });
+          if (r.ok) renderTaskResult(r.result);
+          await refreshStatus();
+        };
+        document.getElementById('btn-deny-now').onclick = async () => {
+          const r = await rpc('deny', { approval_id: pa.approval_id });
+          if (r.ok) renderTaskResult(r.result);
+          await refreshStatus();
+        };
+        feedbackOut.style.display = 'none';
+        btnCardUndo.style.display = 'none';
+        return;
+      }
+
+      if (task.status === 'paused' && task.candidates_for_disambiguation && task.candidates_for_disambiguation.length) {
+        verifyBadge.className = 'verify-pill verify-unverified';
+        verifyBadge.textContent = '需要候选消歧';
+        feedbackMsg.textContent = task.assistant_message || '请选择目标对象：';
+        task.candidates_for_disambiguation.forEach(c => {
+          const b = document.createElement('button');
+          b.className = 'prompt-chip';
+          b.style.marginRight = '0.4rem';
+          b.style.marginTop = '0.4rem';
+          b.textContent = `${c.title} (${c.subtitle})`;
+          b.onclick = () => submitIntent(task.goal, false, c.id);
+          feedbackDisamb.appendChild(b);
+        });
+        feedbackOut.style.display = 'none';
+        btnCardUndo.style.display = 'none';
+        return;
+      }
+
+      if (task.status === 'failed') {
+        verifyBadge.className = 'verify-pill verify-failed';
+        verifyBadge.textContent = '✗ 未执行 / 已拦截';
+      } else if (vState === 'requested_unverified') {
+        verifyBadge.className = 'verify-pill verify-unverified';
+        verifyBadge.textContent = '↗ 已发出请求 (requested_unverified)';
+      } else {
+        verifyBadge.className = 'verify-pill verify-passed';
+        verifyBadge.textContent = '✓ 已验证完成';
+      }
+
+      feedbackMsg.textContent = task.assistant_message || task.goal;
+
+      if (task.changeset_ids && task.changeset_ids.length > 0) {
+        const csId = task.changeset_ids[task.changeset_ids.length - 1];
+        btnCardUndo.style.display = 'inline-flex';
+        btnCardUndo.onclick = () => triggerUndo(csId);
+      } else {
+        btnCardUndo.style.display = 'none';
+      }
+
+      // Structured Command Handoff button (§8.8)
+      const explicitHandoff = task.handoff_command || (lastStep && lastStep.data && lastStep.data.handoff_command);
+      if (explicitHandoff) {
+        appendHandoffButton(explicitHandoff);
+      } else if (task.assistant_message && task.assistant_message.includes('$ ')) {
+        const m = task.assistant_message.match(/\$\s+([^\n`]+)/);
+        if (m) appendHandoffButton(`$ ${m[1]}`);
+      }
+
+      feedbackOut.style.display = 'none';
+      if (lastStep && lastStep.arguments_summary) {
+        feedbackOut.style.display = 'block';
+        feedbackOut.textContent =
+          `Capability: ${lastStep.capability_id}\nVerification: ${lastStep.verification.state} (${lastStep.verification.method})\nArgs: ${lastStep.arguments_summary}`;
+      }
+    }
+
+    function showErrorCard(msg) {
+      feedbackCard.classList.add('visible');
+      verifyBadge.className = 'verify-pill verify-failed';
+      verifyBadge.textContent = '✗ 错误';
+      feedbackMsg.textContent = msg;
+      feedbackOut.style.display = 'none';
+      btnCardUndo.style.display = 'none';
+    }
+
+    async function triggerUndo(targetId = null) {
+      const res = await rpc('undo', { target_id: targetId });
+      if (!res.ok) {
+        showErrorCard(res.error || '当前无可撤销项');
+        return;
+      }
+      const msg = res.result.message;
+      if (msg.includes('系统默认') || msg.includes('深色模式')) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      } else if (msg.includes('浅色模式')) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+      feedbackCard.classList.add('visible');
+      verifyBadge.className = 'verify-pill verify-passed';
+      verifyBadge.textContent = '↶ 撤销成功';
+      feedbackMsg.textContent = msg;
+      btnCardUndo.style.display = 'none';
+      feedbackOut.style.display = 'none';
+      await refreshStatus();
+    }
+
+    async function refreshInspector() {
+      if (activeTab === 'changesets') {
+        const res = await rpc('list_changesets', { limit: 12 });
+        const list = (res.ok && res.result) ? res.result : [];
+        if (!list.length) {
+          inspectorContent.innerHTML = '<div style="color:var(--text-muted)">暂无变更集记录。尝试点击上方「进入护眼模式」体验多设置单变更集一键撤销！</div>';
+          return;
+        }
+        inspectorContent.innerHTML = '';
+        list.forEach(cs => {
+          const row = document.createElement('div');
+          row.className = 'row-record';
+          row.innerHTML = `
+            <div>
+              <div><strong></strong> <span class="mono-id"></span></div>
+              <div class="mono-id"></div>
+            </div>
+            <div class="cs-action"></div>
+          `;
+          row.querySelector('strong').textContent = cs.summary;
+          row.querySelectorAll('.mono-id')[0].textContent = `[${cs.id} · ${cs.operations.length} 项变更]`;
+          row.querySelectorAll('.mono-id')[1].textContent = `${cs.capability_id} · 状态: ${cs.status}`;
+          if (cs.status === 'applied') {
+            const b = document.createElement('button');
+            b.className = 'btn-ghost';
+            b.textContent = '一键撤销';
+            b.onclick = () => triggerUndo(cs.id);
+            row.querySelector('.cs-action').appendChild(b);
+          }
+          inspectorContent.appendChild(row);
+        });
+      } else if (activeTab === 'scenes') {
+        const res = await rpc('list_scenes');
+        const scenes = (res.ok && res.result) ? res.result : [];
+        inspectorContent.innerHTML = `
+          <div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+            <input id="new-scene-name" class="form-input" style="max-width:260px;" placeholder="保存当前设置为新场景（如：写作模式）" />
+            <button id="btn-save-scene" class="btn-primary" type="button">保存当前设置快照</button>
+          </div>
+          <div id="scenes-rows"></div>
+        `;
+        document.getElementById('btn-save-scene').onclick = async () => {
+          const nm = document.getElementById('new-scene-name').value.trim();
+          if (!nm) return;
+          const r = await rpc('save_scene', { name: nm });
+          if (r.ok) await refreshInspector();
+        };
+        const rowsBox = document.getElementById('scenes-rows');
+        scenes.forEach(sc => {
+          const row = document.createElement('div');
+          row.className = 'row-record';
+          row.innerHTML = `
+            <div>
+              <div><strong></strong> <span class="mono-id"></span></div>
+              <div class="mono-id"></div>
+            </div>
+            <button class="btn-ghost" type="button">应用此场景</button>
+          `;
+          row.querySelector('strong').textContent = sc.name;
+          row.querySelectorAll('.mono-id')[0].textContent = sc.builtin ? '[内置场景]' : '[自定义快照]';
+          row.querySelectorAll('.mono-id')[1].textContent = sc.description;
+          row.querySelector('button').onclick = () => submitIntent(`进入${sc.name}`, false, null);
+          rowsBox.appendChild(row);
+        });
+      } else if (activeTab === 'memories') {
+        const res = await rpc('list_memories');
+        const mems = (res.ok && res.result) ? res.result : [];
+        inspectorContent.innerHTML = `
+          <div style="display:flex; gap:0.5rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+            <input id="mem-subj" class="form-input" style="max-width:200px;" placeholder="键（如 open_with.docx）" />
+            <input id="mem-val" class="form-input" style="max-width:240px;" placeholder="值（如 WPS Office）" />
+            <button id="btn-add-mem" class="btn-primary" type="button">写入偏好记忆</button>
+          </div>
+          <div id="mem-rows"></div>
+        `;
+        document.getElementById('btn-add-mem').onclick = async () => {
+          const subject = document.getElementById('mem-subj').value.trim();
+          const value = document.getElementById('mem-val').value.trim();
+          if (!subject || !value) return;
+          const r = await rpc('upsert_memory', { subject, value });
+          if (!r.ok) showErrorCard(r.error);
+          await refreshInspector();
+        };
+        const memRows = document.getElementById('mem-rows');
+        if (!mems.length) {
+          memRows.innerHTML = '<div style="color:var(--text-muted)">暂无已保存的显式记忆。可输入「记住 docx 用 WPS 打开」体验自动偏好绑定。</div>';
+          return;
+        }
+        mems.forEach(m => {
+          const row = document.createElement('div');
+          row.className = 'row-record';
+          row.innerHTML = `
+            <div>
+              <div><strong></strong> = <span></span></div>
+              <div class="mono-id"></div>
+            </div>
+            <button class="btn-ghost" type="button">删除并拒写 (M-03)</button>
+          `;
+          row.querySelector('strong').textContent = m.subject;
+          row.querySelectorAll('span')[0].textContent = m.value;
+          row.querySelector('.mono-id').textContent = `${m.id} · ${m.scope} · 更新于 ${m.updated_at}`;
+          row.querySelector('button').onclick = async () => {
+            await rpc('delete_memory', { id: m.id });
+            await refreshInspector();
+          };
+          memRows.appendChild(row);
+        });
+      } else if (activeTab === 'tasks') {
+        const res = await rpc('list_tasks', { limit: 12 });
+        const list = (res.ok && res.result) ? res.result : [];
+        if (!list.length) {
+          inspectorContent.innerHTML = '<div style="color:var(--text-muted)">暂无持久化任务记录（注：隐私会话任务不会写入此处）。</div>';
+          return;
+        }
+        inspectorContent.innerHTML = '';
+        list.forEach(t => {
+          const row = document.createElement('div');
+          row.className = 'row-record';
+          row.innerHTML = `
+            <div>
+              <div><strong></strong> <span class="mono-id"></span></div>
+              <div class="mono-id"></div>
+            </div>
+            <span class="cand-badge"></span>
+          `;
+          row.querySelector('strong').textContent = t.goal;
+          row.querySelectorAll('.mono-id')[0].textContent = `(${t.route})`;
+          row.querySelectorAll('.mono-id')[1].textContent = t.assistant_message || '';
+          row.querySelector('.cand-badge').textContent = t.status;
+          inspectorContent.appendChild(row);
+        });
+      } else {
+        const res = await rpc('probe_capabilities');
+        inspectorContent.innerHTML = '<pre class="code-output" style="margin-top:0;"></pre>';
+        inspectorContent.querySelector('pre').textContent = JSON.stringify(res.result, null, 2);
+      }
+    }
+
+    async function openSettingsModal() {
+      settingsModal.classList.add('open');
+      const res = await rpc('get_settings_overview');
+      if (res.ok) {
+        settingsData = res.result;
+        renderSettingsPage();
+      }
+    }
+
+    async function renderSettingsPage() {
+      if (!settingsData) return;
+      if (activeCfgPage === 'brain') {
+        const b = settingsData.brain || {};
+        const mainProf = (b.profiles && b.profiles.main) || { provider: 'default-openai', model: 'gpt-4o-mini' };
+        settingsBody.innerHTML = `
+          <div class="form-field">
+            <label>智能体运行时 (Runtime)</label>
+            <select id="cfg-runtime" class="form-select">
+              <option value="pi" ${b.runtime === 'pi' ? 'selected' : ''}>pi-adapter（无外网沙箱 Node Worker）</option>
+              <option value="native" ${b.runtime === 'native' ? 'selected' : ''}>native（内置 Rust 循环）</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label>主推理提供商 ID (Provider)</label>
+            <input id="cfg-provider" class="form-input" value="${mainProf.provider || 'default-openai'}" />
+          </div>
+          <div class="form-field">
+            <label>主模型名称 (Main Profile Model)</label>
+            <input id="cfg-model" class="form-input" value="${mainProf.model || 'gpt-4o-mini'}" />
+          </div>
+          <div class="mono-id" style="margin-bottom:0.75rem;">
+            当前激活: ${b.active_runtime} · 凭据状态: ${b.main_model_configured ? '已配置' : '离线确定性模式'} · 累计网关请求: ${b.gateway_metrics ? b.gateway_metrics.total_requests : 0}
+          </div>
+          <button id="btn-save-brain" class="btn-primary" type="button">保存大脑配置 (brain.toml)</button>
+          <span id="cfg-brain-msg" class="mono-id" style="margin-left:0.6rem;"></span>
+        `;
+        document.getElementById('btn-save-brain').onclick = async () => {
+          const r = await rpc('update_brain_settings', {
+            runtime: document.getElementById('cfg-runtime').value,
+            main_provider: document.getElementById('cfg-provider').value,
+            main_model: document.getElementById('cfg-model').value
+          });
+          document.getElementById('cfg-brain-msg').textContent = r.ok ? '✓ 已写入 brain.toml' : r.error;
+        };
+      } else if (activeCfgPage === 'resources') {
+        const rc = settingsData.resources || {};
+        settingsBody.innerHTML = `
+          <div class="mono-id" style="margin-bottom:0.75rem;">
+            全局热键: <strong>${rc.hotkey}</strong> · 已索引 ${rc.indexed_apps} 应用 / ${rc.indexed_files} 文件 / ${rc.indexed_sites} 站点 / ${rc.indexed_fonts} 字体
+          </div>
+          <div class="form-field">
+            <label>授权文件操作目录（每行一个路径，由 openat2 RESOLVE_BENEATH 内核级强制边界保护）</label>
+            <textarea id="cfg-dirs" class="form-textarea"></textarea>
+          </div>
+          <button id="btn-save-dirs" class="btn-primary" type="button">保存授权目录并重建索引</button>
+          <span id="cfg-dirs-msg" class="mono-id" style="margin-left:0.6rem;"></span>
+        `;
+        document.getElementById('cfg-dirs').value = (rc.authorized_directories || []).join('\n');
+        document.getElementById('btn-save-dirs').onclick = async () => {
+          const directories = document.getElementById('cfg-dirs').value.split('\n').map(s => s.trim()).filter(Boolean);
+          const r = await rpc('update_authorized_directories', { directories });
+          await rpc('reindex_resources');
+          document.getElementById('cfg-dirs-msg').textContent = r.ok ? '✓ 已保存并触发重建' : r.error;
+          await refreshStatus();
+        };
+      } else if (activeCfgPage === 'web') {
+        const w = settingsData.web || {};
+        settingsBody.innerHTML = `
+          <div class="form-field">
+            <label>默认搜索引擎（§4.7 / D21 默认为 Google）</label>
+            <select id="cfg-search" class="form-select">
+              <option value="google" ${w.default_search === 'google' ? 'selected' : ''}>Google</option>
+              <option value="bing" ${w.default_search === 'bing' ? 'selected' : ''}>Bing</option>
+              <option value="baidu" ${w.default_search === 'baidu' ? 'selected' : ''}>百度</option>
+              <option value="duckduckgo" ${w.default_search === 'duckduckgo' ? 'selected' : ''}>DuckDuckGo</option>
+            </select>
+          </div>
+          <button id="btn-save-web" class="btn-primary" type="button">保存网站与搜索设置</button>
+          <span id="cfg-web-msg" class="mono-id" style="margin-left:0.6rem;"></span>
+          <div class="mono-id" style="margin-top:0.85rem;">内置直达与站内搜站点：${(w.sites || []).map(s => s.names[0]).join(' · ')}</div>
+        `;
+        document.getElementById('btn-save-web').onclick = async () => {
+          const r = await rpc('update_web_settings', { default_search: document.getElementById('cfg-search').value });
+          document.getElementById('cfg-web-msg').textContent = r.ok ? '✓ 已更新默认搜索引擎' : r.error;
+          await refreshStatus();
+        };
+      } else {
+        const p = settingsData.permissions_and_undo || {};
+        const histRes = await rpc('list_passthrough_history', { limit: 10 });
+        const hist = (histRes.ok && histRes.result) ? histRes.result : [];
+        settingsBody.innerHTML = `
+          <div class="mono-id" style="margin-bottom:0.75rem;">
+            撤销配额上限: ${p.undo_quota_gb} GB (${p.undo_retention_days} 天保留) · 当前备份占用: ${p.undo_backup_bytes} B · 可撤销变更集: ${p.undo_changesets_available}
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            <strong><code>$ </code> 命令直通历史 (${hist.length} 条)</strong>
+            <button id="btn-clear-hist" class="btn-ghost" type="button">清空直通历史</button>
+          </div>
+          <pre id="cfg-pt-hist" class="code-output" style="margin-top:0; max-height:110px;"></pre>
+          <div style="margin-top:0.85rem;"><strong>最近安全审计日志 (${(p.recent_audit || []).length} 条)</strong></div>
+          <pre id="cfg-audit" class="code-output" style="max-height:160px;"></pre>
+        `;
+        document.getElementById('cfg-pt-hist').textContent = hist.length
+          ? hist.map(h => `$ ${h.command}   (cwd: ${h.cwd})`).join('\n')
+          : '暂无直通命令历史';
+        document.getElementById('cfg-audit').textContent = JSON.stringify(p.recent_audit || [], null, 2);
+        document.getElementById('btn-clear-hist').onclick = async () => {
+          await rpc('clear_passthrough_history');
+          await renderSettingsPage();
+        };
+      }
+    }
+
+    btnIncognito.onclick = () => {
+      incognitoMode = !incognitoMode;
+      btnIncognito.textContent = incognitoMode ? '隐私会话: 开' : '隐私会话: 关';
+      btnIncognito.classList.toggle('incog-active', incognitoMode);
+      launcherBox.classList.toggle('incog-border', incognitoMode);
+      updateModeBadge(inputEl.value);
+    };
+
+    document.getElementById('btn-open-settings').onclick = openSettingsModal;
+    document.getElementById('btn-close-settings').onclick = () => settingsModal.classList.remove('open');
+    settingsModal.addEventListener('click', (e) => {
+      if (e.target === settingsModal) settingsModal.classList.remove('open');
+    });
+
+    document.querySelectorAll('.cfg-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.cfg-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeCfgPage = btn.getAttribute('data-cfg');
+        renderSettingsPage();
+      });
+    });
+
+    inputEl.addEventListener('compositionstart', () => { isImeComposing = true; });
+    inputEl.addEventListener('compositionend', () => {
+      isImeComposing = false;
+      fetchCandidates(inputEl.value);
+    });
+    inputEl.addEventListener('input', () => {
+      if (isImeComposing) return;
+      clearTimeout(queryTimer);
+      queryTimer = setTimeout(() => fetchCandidates(inputEl.value), 10);
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (isImeComposing) return;
+      if (e.key === 'ArrowDown' && currentCandidates.length) {
+        e.preventDefault();
+        activeIdx = (activeIdx + 1) % currentCandidates.length;
+        renderCandidates();
+      } else if (e.key === 'ArrowUp' && currentCandidates.length) {
+        e.preventDefault();
+        activeIdx = (activeIdx - 1 + currentCandidates.length) % currentCandidates.length;
+        renderCandidates();
+      } else if (e.key === 'Enter' && e.ctrlKey) {
+        e.preventDefault();
+        submitIntent(inputEl.value, true, null);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const picked = currentCandidates[activeIdx];
+        if (picked && picked.kind === 'agent_fallback') {
+          submitIntent(inputEl.value, true, null);
+        } else if (picked && picked.capability_id) {
+          submitIntent(inputEl.value, false, picked.id);
+        } else {
+          submitIntent(inputEl.value, false, null);
+        }
+      } else if (e.key === 'Escape') {
+        currentCandidates = [];
+        candsEl.innerHTML = '';
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && document.activeElement !== inputEl) {
+        e.preventDefault();
+        triggerUndo(null);
+      }
+    });
+
+    document.getElementById('btn-submit-intent').onclick = () => submitIntent(inputEl.value, false, null);
+    document.getElementById('btn-quick-undo').onclick = () => triggerUndo(null);
+    document.getElementById('btn-reindex').onclick = async () => {
+      await rpc('reindex_resources');
+      await refreshStatus();
+    };
+    document.getElementById('btn-theme-toggle').onclick = () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      document.documentElement.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    };
+
+    document.querySelectorAll('.prompt-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const intent = btn.getAttribute('data-intent');
+        inputEl.value = intent;
+        submitIntent(intent, false, null);
+      });
+    });
+
+    document.querySelectorAll('.tab-btn:not(.cfg-tab)').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn:not(.cfg-tab)').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeTab = btn.getAttribute('data-tab');
+        refreshInspector();
+      });
+    });
+
+    refreshStatus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+id: display.idle_delay.set
+version: 1
+summary: 设置屏幕空闲自动熄屏时间（0 表示从不熄屏，或 60–3600 秒，可撤销）
+category: system
+aliases: ["熄屏时间", "不熄屏", "自动息屏", "idle delay"]
+l0_patterns:
+  - "(从不|不要)熄屏"
+  - "{seconds}分钟后熄屏"
+input_schema:
+  type: object
+  required: [seconds]
+  properties:
+    seconds:
+      type: integer
+      minimum: 0
+      maximum: 3600
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: idle_delay
+  schema: org.gnome.desktop.session
+  key: idle-delay
+setting:
+  key_id: display.idle_delay
+  min: 0
+  max: 3600
+  unit: "s"
+undo: restore_previous_value
+verification:
+  kind: readback

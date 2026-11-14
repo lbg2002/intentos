@@ -1,0 +1,45 @@
+id: app.launch
+version: 1
+summary: 启动或聚焦已安装的桌面应用（支持中英文名、拼音、常用缩写如 vsc、汽水音乐、飞书、轻笺）
+category: applications
+aliases: ["打开应用", "打开软件", "启动", "运行", "launch", "open app"]
+l0_patterns:
+  - "(打开|启动|运行|开|open|o) {app}"
+input_schema:
+  type: object
+  properties:
+    app_id:
+      type: string
+      maxLength: 256
+      description: 应用 .desktop ID 或应用中英文名称（如 sodam.desktop、汽水音乐、QQ、code）
+    app_name:
+      type: string
+      maxLength: 256
+      description: 应用中英文显示名称（如 汽水音乐、飞书、轻笺、WPS）
+    app:
+      type: string
+      maxLength: 256
+      description: 应用名称或常用别名（如 汽水音乐、SodaM、微信、vsc）
+    name:
+      type: string
+      maxLength: 256
+    query:
+      type: string
+      maxLength: 256
+    new_window:
+      type: boolean
+  oneOf:
+    - required: [app_id]
+    - required: [app_name]
+    - required: [app]
+    - required: [name]
+    - required: [query]
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: app.launch
+undo: none
+verification:
+  kind: spawn_accepted
+feedback: "已请求打开应用 {app_name}"

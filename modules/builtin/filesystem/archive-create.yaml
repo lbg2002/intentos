@@ -1,0 +1,25 @@
+id: archive.create
+version: 1
+summary: 将授权目录内的文件或目录打包为 .tar.gz 或 .zip 压缩包（支持一键撤销）
+category: filesystem
+aliases: ["打包", "压缩", "归档压缩", "create archive"]
+l0_patterns:
+  - "把 {source} 打包为 {output}"
+input_schema:
+  type: object
+  required: [source, output]
+  properties:
+    source:
+      type: string
+      maxLength: 1024
+    output:
+      type: string
+      maxLength: 1024
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: archive.create
+undo: changeset
+verification:
+  kind: output_exists_and_nonempty

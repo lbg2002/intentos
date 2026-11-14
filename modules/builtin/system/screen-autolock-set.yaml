@@ -1,0 +1,27 @@
+id: screen.autolock.set
+version: 1
+summary: 开启或关闭屏幕空闲自动锁定（org.gnome.desktop.screensaver lock-enabled，可撤销）
+category: system
+aliases: ["自动锁屏", "空闲锁屏", "autolock"]
+l0_patterns:
+  - "(开启|打开|关闭|关掉)自动锁屏"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: autolock
+  schema: org.gnome.desktop.screensaver
+  key: lock-enabled
+setting:
+  key_id: screen.autolock
+  enum_values: ["on", "off"]
+undo: restore_previous_value
+verification:
+  kind: readback

@@ -1,0 +1,25 @@
+id: archive.extract
+version: 1
+summary: 将压缩包安全解压到授权目录下的独立新建子目录（防 Zip Slip，支持一键撤销）
+category: filesystem
+aliases: ["解压", "解压缩", "extract", "unzip"]
+l0_patterns:
+  - "解压 {archive}( 到 {destination})?"
+input_schema:
+  type: object
+  required: [archive]
+  properties:
+    archive:
+      type: string
+      maxLength: 1024
+    destination:
+      type: string
+      maxLength: 1024
+effects: [write.reversible]
+idempotent: false
+execution:
+  type: builtin
+  handler: archive.extract
+undo: changeset
+verification:
+  kind: output_exists_and_nonempty

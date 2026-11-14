@@ -1,0 +1,25 @@
+id: process.list
+version: 1
+summary: 列出当前占用内存或 CPU 最高的前 N 个进程（结构化采样）
+category: devtools
+aliases: ["进程列表", "占内存最多的进程", "占CPU最高的进程", "top processes"]
+l0_patterns:
+  - "(查看)?占(内存|CPU)最多的进程"
+input_schema:
+  type: object
+  properties:
+    sort_by:
+      type: string
+      enum: [memory, cpu]
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 50
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: process.list
+undo: none
+verification:
+  kind: structured_output

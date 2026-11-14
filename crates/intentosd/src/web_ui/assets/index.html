@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>✦ IntentOS · 随问 — 原生 AIOS 悬浮对话窗</title>
+  <meta name="description" content="IntentOS 极简悬浮对话窗：融合个人文件章节大纲记忆层、个性化桌面软件指令转译层、敏感路径分级审批与实时多后端模型引擎。" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('intentos-theme');
+        if (saved === 'light' || saved === 'dark') {
+          document.documentElement.setAttribute('data-theme', saved);
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/styles/design-tokens.css" />
+  <link rel="stylesheet" href="/assets/styles/launcher-spotlight.css" />
+  <link rel="stylesheet" href="/assets/styles/workspace-surface.css" />
+  <link rel="stylesheet" href="/assets/styles/settings-center.css" />
+  <link rel="stylesheet" href="/assets/styles/quick-chat-dialog.css" />
+</head>
+<body class="qc-desktop-body">
+  <main class="desktop-backdrop">
+    <!-- Single Floating Glassmorphic Quick-Chat AIOS Dialog (`✦ IntentOS · 随问`) -->
+    <section
+      id="quick-chat-dialog"
+      class="quick-chat-dialog"
+      data-incognito="false"
+      aria-label="IntentOS 随问悬浮对话窗"
+    >
+      <!-- 1. Minimal Top Header Bar -->
+      <header id="qc-drag-header" class="qc-header">
+        <div class="qc-header-left">
+          <span class="qc-brand" title="双击标题栏可重置窗口居中位置">
+            <span id="qc-status-sparkle" class="qc-sparkle" aria-hidden="true">✦</span>
+            <span>IntentOS</span>
+          </span>
+
+          <button
+            id="btn-engine-pill"
+            type="button"
+            class="qc-engine-pill"
+            aria-expanded="false"
+            title="点击切换后端引擎、实时 /v1/models 接口模型与思考强度"
+          >
+            <span id="qc-engine-pill-label" class="qc-engine-pill-text">自动 · 检测引擎…</span>
+            <span class="qc-engine-chevron" aria-hidden="true">▾</span>
+          </button>
+
+          <button
+            id="btn-security-pill"
+            type="button"
+            class="qc-security-pill mode-balanced"
+            aria-expanded="false"
+            title="点击切换全局安全防护模式 (严格审批 / 平衡防护 / 开发者模式) 并管理本会话临时放行范围"
+          >
+            <span aria-hidden="true">🛡</span>
+            <span id="qc-security-pill-label">平衡防护</span>
+          </button>
+        </div>
+
+        <div class="qc-header-right" role="toolbar" aria-label="快捷工具栏">
+          <button
+            id="btn-clipboard-attach"
+            type="button"
+            class="qc-icon-btn"
+            title="附加剪贴板/选区上下文 (随问)"
+            aria-label="附加剪贴板上下文"
+          >📋</button>
+          <button
+            id="btn-memory-popover"
+            type="button"
+            class="qc-icon-btn"
+            title="记忆、文档章节大纲与软件转译层快照 (提及文件 / 文档大纲 / 高频文件 / 个性化软件转译器)"
+            aria-label="记忆与转译层快照"
+          >🧠</button>
+          <button
+            id="btn-session-history"
+            type="button"
+            class="qc-icon-btn"
+            title="切换历史对话"
+            aria-label="历史对话列表"
+          >🕒</button>
+          <button
+            id="btn-new-chat"
+            type="button"
+            class="qc-icon-btn"
+            title="新建对话 (Ctrl+N)"
+            aria-label="新建对话"
+          >+</button>
+          <button
+            id="btn-incognito"
+            type="button"
+            class="qc-icon-btn"
+            title="隐私会话开关 (开启后不写入持久记忆库)"
+            aria-label="隐私会话开关"
+          >🔒</button>
+          <button
+            id="btn-header-theme-toggle"
+            type="button"
+            class="qc-icon-btn"
+            title="切换深色 / 浅色高对比度主题"
+            aria-label="切换深色或浅色主题"
+          >◑</button>
+          <button
+            id="btn-open-settings"
+            type="button"
+            class="qc-icon-btn"
+            title="打开 11 页全要素设置中心 (Ctrl+,)"
+            aria-label="打开设置中心"
+          >⚙</button>
+        </div>
+      </header>
+
+      <!-- 2. Inline Quick Switcher Strip (Toggled by clicking `▾` pill) -->
+      <div id="qc-engine-strip" class="qc-engine-strip" hidden>
+        <div class="qc-strip-row">
+          <span class="qc-strip-label">后端引擎</span>
+          <div id="qc-backend-group" class="qc-seg-group" role="radiogroup" aria-label="后端引擎选择">
+            <button type="button" class="qc-seg-btn active" data-backend="auto">自动</button>
+            <button type="button" class="qc-seg-btn" data-backend="zcode">ZCode</button>
+            <button type="button" class="qc-seg-btn" data-backend="codex">Codex</button>
+            <button type="button" class="qc-seg-btn" data-backend="pi">Pi</button>
+            <button type="button" class="qc-seg-btn" data-backend="openai">OpenAI API</button>
+          </div>
+        </div>
+
+        <div class="qc-strip-provider-bar">
+          <select id="qc-provider-select" class="qc-compact-select" aria-label="供应商选择">
+            <option value="auto">默认供应商 (Auto)</option>
+          </select>
+          <button
+            id="btn-refresh-models"
+            type="button"
+            class="qc-refresh-models-btn"
+            title="实时查询供应商 /v1/models 接口获取完整模型列表"
+          >↻ 刷新接口模型</button>
+        </div>
+
+        <!-- Searchable Live `/v1/models` Picker -->
+        <div class="qc-model-picker-card">
+          <div class="qc-model-search-row">
+            <input
+              id="qc-model-search"
+              type="search"
+              class="qc-compact-input qc-model-search-input"
+              placeholder="搜索模型 (共 0 个)..."
+              autocomplete="off"
+              aria-label="搜索接口模型"
+            />
+            <input
+              id="qc-model-input"
+              type="text"
+              list="qc-model-datalist"
+              class="qc-compact-input qc-model-custom-input"
+              placeholder="当前或自定义模型 ID"
+              aria-label="当前或自定义模型名称"
+            />
+            <datalist id="qc-model-datalist">
+              <option value="glm-4.7"></option>
+              <option value="deepseek-chat"></option>
+              <option value="deepseek-reasoner"></option>
+              <option value="gpt-4o"></option>
+              <option value="gpt-4o-mini"></option>
+              <option value="qwen-plus"></option>
+              <option value="qwen2.5:7b"></option>
+            </datalist>
+          </div>
+          <div
+            id="qc-model-picker-list"
+            class="qc-model-picker-list"
+            role="listbox"
+            aria-label="可选接口模型列表"
+          ></div>
+          <div id="qc-model-refresh-status" class="qc-strip-status" hidden></div>
+        </div>
+
+        <div class="qc-strip-row">
+          <span class="qc-strip-label">思考强度</span>
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            <div id="qc-effort-group" class="qc-seg-group" role="radiogroup" aria-label="思考强度选择">
+              <button type="button" class="qc-seg-btn active" data-effort="default">默认</button>
+              <button type="button" class="qc-seg-btn" data-effort="fast">快</button>
+              <button type="button" class="qc-seg-btn" data-effort="medium">标准</button>
+              <button type="button" class="qc-seg-btn" data-effort="high">深入</button>
+            </div>
+            <button
+              id="btn-theme-toggle"
+              type="button"
+              class="qc-seg-btn"
+              title="切换深色/浅色主题"
+            >◑ 主题</button>
+          </div>
+        </div>
+
+        <!-- Inline API Key Quick Input (Visible when `OpenAI API` is chosen) -->
+        <div id="qc-openai-config" class="qc-openai-box" hidden>
+          <div class="qc-strip-row">
+            <span class="qc-strip-label">快捷预设</span>
+            <div class="qc-seg-group">
+              <button type="button" class="qc-seg-btn llm-preset-btn" data-id="deepseek" data-url="https://api.deepseek.com/v1" data-model="deepseek-chat">DeepSeek</button>
+              <button type="button" class="qc-seg-btn llm-preset-btn" data-id="openai" data-url="https://api.openai.com/v1" data-model="gpt-4o-mini">OpenAI</button>
+              <button type="button" class="qc-seg-btn llm-preset-btn" data-id="qwen" data-url="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">Qwen</button>
+              <button type="button" class="qc-seg-btn llm-preset-btn" data-id="siliconflow" data-url="https://api.siliconflow.cn/v1" data-model="Qwen/Qwen2.5-72B-Instruct">硅基流动</button>
+              <button type="button" class="qc-seg-btn llm-preset-btn" data-id="ollama" data-url="http://127.0.0.1:11434/v1" data-model="qwen2.5:7b">本地 Ollama</button>
+            </div>
+          </div>
+          <div class="qc-openai-inputs">
+            <input
+              id="quick-llm-url"
+              type="text"
+              class="qc-compact-input"
+              placeholder="API Base URL"
+              value="https://api.deepseek.com/v1"
+            />
+            <input
+              id="quick-llm-key"
+              type="password"
+              class="qc-compact-input"
+              placeholder="API Key (存入 0600 密钥库)"
+            />
+            <button id="btn-save-quick-llm" type="button" class="btn-primary" style="padding:5px 10px; font-size:0.74rem;">保存激活</button>
+          </div>
+          <div id="quick-llm-status" class="qc-strip-status"></div>
+        </div>
+      </div>
+
+      <!-- 2b. Slide-Over Popover: Security Posture & Session Scope Grants (`🛡`) -->
+      <aside
+        id="qc-security-popover"
+        class="qc-popover-panel"
+        aria-label="全局安全审批态势与会话放行范围"
+        hidden
+      ></aside>
+
+      <!-- 3. Slide-Over Popover: Memory, Document Outlines & Software Translation Layer (`🧠`) -->
+      <aside
+        id="qc-memory-popover"
+        class="qc-popover-panel"
+        aria-label="个人记忆、文档章节大纲与软件转译层浮层"
+        hidden
+      ></aside>
+
+      <!-- 4. Slide-Over Popover: Session History Switcher (`🕒`) -->
+      <aside
+        id="qc-sessions-popover"
+        class="qc-popover-panel"
+        aria-label="历史会话列表"
+        hidden
+      ></aside>
+
+      <!-- 5. Streaming Markdown Chat Stream + Welcome Starter Pills -->
+      <div id="qc-chat-stream" class="qc-chat-stream" aria-live="polite">
+        <div id="qc-empty-state" class="qc-empty-state">
+          <div class="qc-empty-orb" aria-hidden="true">✦</div>
+          <h1 class="qc-empty-title">✦ IntentOS · 随问</h1>
+          <p class="qc-empty-subtitle">
+            记住之前说的文件与章节大纲 · 个性化桌面软件转译操控 · 敏感路径透明审批
+          </p>
+
+          <div class="qc-starter-pills" aria-label="智能起始提问">
+            <button type="button" class="qc-starter-pill" data-prompt="我最近和长期常用的文件有哪些？">
+              <span>📂 我最近和长期常用的文件有哪些？</span>
+              <span class="qc-starter-arrow">↵</span>
+            </button>
+            <button type="button" class="qc-starter-pill" data-prompt="我电脑上装了哪些常用软件？">
+              <span>🧩 我电脑上装了哪些常用软件？</span>
+              <span class="qc-starter-arrow">↵</span>
+            </button>
+            <button type="button" class="qc-starter-pill" data-prompt="用转译层查看或控制当前音乐播放">
+              <span>🎵 用转译层查看或控制当前音乐播放</span>
+              <span class="qc-starter-arrow">↵</span>
+            </button>
+            <button type="button" class="qc-starter-pill" data-prompt="屏幕太亮了，帮我调暗并开启护眼">
+              <span>🌙 屏幕太亮了，帮我调暗并开启护眼</span>
+              <span class="qc-starter-arrow">↵</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="qc-messages-list" class="qc-messages-list"></div>
+      </div>
+
+      <!-- 6. Clean Bottom Input Box + Inline `@` Mention Menu -->
+      <footer class="qc-composer">
+        <!-- Lightweight `@` Mention Autocomplete Menu -->
+        <div
+          id="qc-mention-menu"
+          class="qc-mention-menu"
+          role="listbox"
+          aria-label="引用记忆文件、文档大纲或软件"
+          hidden
+        ></div>
+
+        <!-- Attached Context Chips (Clipboard / Explicit @mentions) -->
+        <div id="qc-context-strip" class="qc-context-strip" hidden></div>
+
+        <!-- Manual Clipboard Paste Bar (Fallback when browser blocks clipboard read) -->
+        <div id="qc-paste-bar" class="qc-paste-bar" hidden>
+          <input
+            id="qc-paste-input"
+            type="text"
+            class="qc-compact-input"
+            placeholder="在此按 Ctrl+V 粘贴要随问的文本片段，按 Enter 附加…"
+          />
+          <button id="btn-confirm-paste" type="button" class="qc-mini-btn">附加</button>
+          <button id="btn-cancel-paste" type="button" class="qc-mini-btn">✕</button>
+        </div>
+
+        <!-- Voice Recognition (ASR) Inline Setup / Readiness Banner -->
+        <div id="qc-voice-banner" class="qc-voice-banner" role="status" aria-live="polite" hidden></div>
+
+        <div class="qc-input-box">
+          <textarea
+            id="intent-input"
+            class="qc-textarea"
+            rows="1"
+            spellcheck="false"
+            placeholder="随问任何事、输入 @ 引用文件大纲与软件… (Enter 发送 · Shift+Enter 换行)"
+            autofocus
+          ></textarea>
+          <button
+            id="btn-voice-input"
+            type="button"
+            class="qc-mic-btn"
+            title="本地离线语音识别输入 (🎙 点击录音 / 再次点击识别)"
+            aria-label="语音识别输入"
+          >🎙</button>
+          <button
+            id="btn-submit-intent"
+            type="button"
+            class="qc-send-btn"
+            title="发送 (Enter)"
+            aria-label="发送"
+          >↑</button>
+        </div>
+      </footer>
+    </section>
+  </main>
+
+  <!-- Hidden Contextual Action Menu Popover -->
+  <div id="action-menu-popover" class="action-menu-popover" role="menu" aria-label="上下文动作菜单"></div>
+
+  <!-- Subtle Floating Undo / Notification Toast Banner (Hidden until triggered) -->
+  <div id="undo-toast-banner" class="undo-toast-banner" role="status" aria-live="polite">
+    <span id="undo-countdown-ring" class="undo-countdown-ring">30s</span>
+    <span id="undo-toast-text">可撤销最近一次修改</span>
+    <button id="btn-toast-undo" type="button" class="btn-primary">↶ 撤销 (Ctrl+Z)</button>
+    <button id="btn-toast-dismiss" type="button" class="btn-ghost">✕</button>
+  </div>
+
+  <!-- 11-Page Full-Featured Visual Settings Center Modal (Hidden unless `⚙` is clicked!) -->
+  <div id="settings-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="settings-modal-shell">
+      <div class="modal-header">
+        <span id="settings-modal-title">⚙ IntentOS 11页全要素设置中心（零明文密钥 · 独立可信配置通道）</span>
+        <button id="btn-close-settings" class="btn-ghost" type="button">关闭 (Esc) ✕</button>
+      </div>
+      <div class="settings-layout">
+        <nav id="settings-sidebar-nav" class="settings-sidebar" aria-label="11页设置中心导航"></nav>
+        <div id="settings-modal-body" class="settings-content-pane">加载中…</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/assets/js/main.js"></script>
+</body>
+</html>

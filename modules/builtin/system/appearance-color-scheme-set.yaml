@@ -1,0 +1,29 @@
+id: appearance.color_scheme.set
+version: 1
+summary: 切换系统外观深浅色主题（深色模式 / 浅色模式 / 默认，同步 GNOME color-scheme 与 Yaru 主题）
+category: system
+aliases: ["深色模式", "暗黑模式", "夜间模式", "浅色模式", "亮色模式", "dark mode", "light mode"]
+l0_patterns:
+  - "(开启|切到|换成)?(深色|暗色|暗黑|夜间)模式"
+  - "(开启|切到|换成)?(浅色|亮色|日间)模式"
+input_schema:
+  type: object
+  required: [scheme]
+  properties:
+    scheme:
+      type: string
+      enum: [prefer-dark, prefer-light, default]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: color_scheme
+  schema: org.gnome.desktop.interface
+  key: color-scheme
+setting:
+  key_id: appearance.color_scheme
+  enum_values: [prefer-dark, prefer-light, default]
+undo: restore_previous_value
+verification:
+  kind: readback
+feedback: "外观主题 {before} → {after}"

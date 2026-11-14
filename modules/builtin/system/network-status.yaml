@@ -1,0 +1,18 @@
+id: network.status
+version: 1
+summary: 查看当前网络连接状态、活动网卡与网关信息
+category: system
+aliases: ["网络状态", "联网状态", "network status"]
+l0_patterns:
+  - "(查看)?网络(连接)?状态"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: network.status
+undo: none
+verification:
+  kind: structured_output

@@ -1,0 +1,21 @@
+id: app.search
+version: 1
+summary: 在本地应用索引中按名称、拼音、首字母或别名搜索桌面软件
+category: applications
+aliases: ["找软件", "搜索应用", "search app"]
+l0_patterns:
+  - "找应用 {query}"
+input_schema:
+  type: object
+  required: [query]
+  properties:
+    query:
+      type: string
+      maxLength: 200
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: app.search
+undo: none
+feedback: "找到 {count} 个匹配应用"

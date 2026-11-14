@@ -1,0 +1,22 @@
+id: app.quit
+version: 1
+summary: 请求指定应用优雅关闭退出（绝不发送 SIGKILL 强杀，保护未保存文档）
+category: applications
+aliases: ["关闭应用", "关掉", "退出软件", "quit app"]
+l0_patterns:
+  - "(关掉|关闭|退出) {app}"
+input_schema:
+  type: object
+  required: [app]
+  properties:
+    app:
+      type: string
+      maxLength: 256
+effects: [ui]
+idempotent: false
+execution:
+  type: builtin
+  handler: app.quit
+undo: none
+verification:
+  kind: process_or_request

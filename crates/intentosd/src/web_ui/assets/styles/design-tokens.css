@@ -1,0 +1,361 @@
+/* IntentOS v0.3 — Design Tokens & Global Reset
+ * Ubuntu 26.04 Yaru Modern Glassmorphic Aesthetic (Dark / Light Adaptive)
+ */
+
+:root,
+[data-theme="dark"] {
+  --bg-page: #0b0f17;
+  --bg-page-gradient:
+    radial-gradient(1100px 580px at 14% -8%, rgba(233, 84, 32, 0.16), transparent 62%),
+    radial-gradient(960px 520px at 88% 4%, rgba(56, 189, 248, 0.14), transparent 58%),
+    radial-gradient(800px 520px at 50% 95%, rgba(168, 85, 247, 0.10), transparent 65%),
+    linear-gradient(180deg, #0b0f17 0%, #0f1623 100%);
+
+  --bg-glass: rgba(18, 25, 38, 0.78);
+  --bg-glass-strong: rgba(15, 21, 33, 0.90);
+  --bg-surface: #131b2b;
+  --bg-elevated: #1a2438;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-selected: rgba(56, 189, 248, 0.16);
+  --bg-code: #090d14;
+  --text-code: #e2e8f0;
+
+  --border-subtle: rgba(148, 163, 184, 0.16);
+  --border-strong: rgba(148, 163, 184, 0.30);
+  --border-highlight: rgba(255, 255, 255, 0.12);
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Ubuntu Yaru Orange + Electric Cyan Dual Accent */
+  --yaru-orange: #e95420;
+  --yaru-orange-soft: rgba(233, 84, 32, 0.18);
+  --accent: #38bdf8;
+  --accent-strong: #0284c7;
+  --accent-fg: #08101d;
+  --accent-glow: rgba(56, 189, 248, 0.25);
+
+  /* Privacy / Incognito */
+  --priv: #c084fc;
+  --priv-bg: rgba(168, 85, 247, 0.18);
+  --priv-border: rgba(192, 132, 252, 0.45);
+
+  /* Risk & Semantic Badges (R0-R3) */
+  --r0-fg: #34d399;
+  --r0-bg: rgba(16, 185, 129, 0.16);
+  --r0-border: rgba(52, 211, 153, 0.36);
+
+  --r1-fg: #60a5fa;
+  --r1-bg: rgba(59, 130, 246, 0.16);
+  --r1-border: rgba(96, 165, 250, 0.36);
+
+  --r2-fg: #fbbf24;
+  --r2-bg: rgba(245, 158, 11, 0.16);
+  --r2-border: rgba(251, 191, 36, 0.38);
+
+  --r3-fg: #f87171;
+  --r3-bg: rgba(239, 68, 68, 0.16);
+  --r3-border: rgba(248, 113, 113, 0.40);
+
+  --ok: #34d399;
+  --ok-bg: rgba(16, 185, 129, 0.15);
+  --warn: #fbbf24;
+  --warn-bg: rgba(245, 158, 11, 0.15);
+  --err: #f87171;
+  --err-bg: rgba(239, 68, 68, 0.16);
+
+  /* Diff Colors */
+  --diff-add-bg: rgba(16, 185, 129, 0.15);
+  --diff-add-fg: #6ee7b7;
+  --diff-del-bg: rgba(239, 68, 68, 0.16);
+  --diff-del-fg: #fca5a5;
+
+  --shadow-shell:
+    0 24px 64px -16px rgba(2, 6, 23, 0.72),
+    0 4px 16px rgba(2, 6, 23, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --shadow-popover:
+    0 18px 42px -8px rgba(2, 6, 23, 0.80),
+    0 2px 10px rgba(2, 6, 23, 0.50);
+
+  --blur-glass: blur(20px) saturate(160%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 9999px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ui-scale: 1;
+}
+
+[data-theme="light"] {
+  --bg-page: #f3f6fb;
+  --bg-page-gradient:
+    radial-gradient(1000px 520px at 12% -10%, rgba(233, 84, 32, 0.10), transparent 60%),
+    radial-gradient(900px 480px at 88% 0%, rgba(2, 132, 199, 0.10), transparent 58%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f9 100%);
+
+  --bg-glass: rgba(255, 255, 255, 0.82);
+  --bg-glass-strong: rgba(255, 255, 255, 0.94);
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --bg-hover: rgba(15, 23, 42, 0.06);
+  --bg-selected: rgba(2, 132, 199, 0.12);
+  --bg-code: #f8fafc;
+  --text-code: #0f172a;
+
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-highlight: rgba(255, 255, 255, 0.90);
+
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #475569;
+
+  --yaru-orange: #e95420;
+  --yaru-orange-soft: rgba(233, 84, 32, 0.12);
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
+  --accent-fg: #ffffff;
+  --accent-glow: rgba(2, 132, 199, 0.18);
+
+  --priv: #7e22ce;
+  --priv-bg: rgba(147, 51, 234, 0.10);
+  --priv-border: rgba(126, 34, 206, 0.35);
+
+  --r0-fg: #047857;
+  --r0-bg: rgba(16, 185, 129, 0.12);
+  --r0-border: rgba(4, 120, 87, 0.28);
+
+  --r1-fg: #1d4ed8;
+  --r1-bg: rgba(59, 130, 246, 0.12);
+  --r1-border: rgba(29, 78, 216, 0.28);
+
+  --r2-fg: #b45309;
+  --r2-bg: rgba(245, 158, 11, 0.14);
+  --r2-border: rgba(180, 83, 9, 0.30);
+
+  --r3-fg: #b91c1c;
+  --r3-bg: rgba(239, 68, 68, 0.12);
+  --r3-border: rgba(185, 28, 28, 0.30);
+
+  --ok: #059669;
+  --ok-bg: rgba(16, 185, 129, 0.12);
+  --warn: #d97706;
+  --warn-bg: rgba(245, 158, 11, 0.14);
+  --err: #dc2626;
+  --err-bg: rgba(239, 68, 68, 0.12);
+
+  --diff-add-bg: rgba(16, 185, 129, 0.14);
+  --diff-add-fg: #065f46;
+  --diff-del-bg: rgba(239, 68, 68, 0.14);
+  --diff-del-fg: #991b1b;
+
+  --shadow-shell:
+    0 20px 48px -14px rgba(15, 23, 42, 0.14),
+    0 2px 8px rgba(15, 23, 42, 0.06);
+  --shadow-popover:
+    0 14px 34px -6px rgba(15, 23, 42, 0.18),
+    0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: calc(15px * var(--ui-scale));
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--bg-page);
+  background-image: var(--bg-page-gradient);
+  background-attachment: fixed;
+  color: var(--text-primary);
+  font-family: "Ubuntu Sans", "Inter", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  transition: background-color 200ms var(--ease-out), color 200ms var(--ease-out);
+  overflow-x: hidden;
+}
+
+code, pre, kbd, .mono-id {
+  font-family: "JetBrains Mono", "Ubuntu Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 1px 0 var(--border-subtle);
+  color: var(--text-secondary);
+  line-height: 1.25;
+}
+
+.mono-id {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+/* Risk Badges (R0 - R3) */
+.risk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.70rem;
+  font-weight: 700;
+  padding: 0.12rem 0.45rem;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.risk-R0, .risk-r0 {
+  color: var(--r0-fg);
+  background: var(--r0-bg);
+  border: 1px solid var(--r0-border);
+}
+.risk-R1, .risk-r1 {
+  color: var(--r1-fg);
+  background: var(--r1-bg);
+  border: 1px solid var(--r1-border);
+}
+.risk-R2, .risk-r2 {
+  color: var(--r2-fg);
+  background: var(--r2-bg);
+  border: 1px solid var(--r2-border);
+}
+.risk-R3, .risk-r3 {
+  color: var(--r3-fg);
+  background: var(--r3-bg);
+  border: 1px solid var(--r3-border);
+}
+
+/* Verification Pills */
+.verify-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+}
+.verify-passed {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border: 1px solid var(--r0-border);
+}
+.verify-unverified {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid var(--r2-border);
+}
+.verify-failed {
+  background: var(--err-bg);
+  color: var(--err);
+  border: 1px solid var(--r3-border);
+}
+
+/* Buttons */
+.btn-primary {
+  appearance: none;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 0.82rem;
+  padding: 0.44rem 0.92rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: transform 100ms var(--ease-out), box-shadow 140ms var(--ease-out), opacity 120ms ease;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+.btn-primary:hover {
+  opacity: 0.95;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+.btn-yaru {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, #e95420 0%, #c74214 100%);
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 0.82rem;
+  padding: 0.44rem 0.92rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: transform 100ms var(--ease-out), opacity 120ms ease;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+.btn-yaru:hover { opacity: 0.93; }
+
+.btn-ghost {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  padding: 0.34rem 0.68rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.79rem;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 130ms var(--ease-out);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+.btn-ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.btn-ghost.incog-active {
+  background: var(--priv-bg);
+  color: var(--priv);
+  border-color: var(--priv-border);
+  font-weight: 650;
+}
+.btn-danger {
+  border-color: var(--r3-border);
+  color: var(--r3-fg);
+  background: var(--r3-bg);
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.26);
+  color: var(--r3-fg);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}

@@ -1,0 +1,20 @@
+id: power.profile.get
+version: 1
+summary: 查询当前系统电源性能档位（省电 / 平衡 / 性能）
+category: system
+aliases: ["当前电源模式", "电源档位", "power profile"]
+l0_patterns:
+  - "(查看|当前)?电源(模式|档位)"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: power_profile
+setting:
+  key_id: power.profile
+undo: none
+verification:
+  kind: readback

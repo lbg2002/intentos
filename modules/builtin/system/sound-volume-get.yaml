@@ -1,0 +1,23 @@
+id: sound.volume.get
+version: 1
+summary: 查询当前默认音频输出设备的音量与静音状态
+category: system
+aliases: ["当前音量", "查音量", "音量多少", "get volume"]
+l0_patterns:
+  - "(当前)?音量(是多少|多少)?"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: setting_backend
+  driver: wpctl_volume
+setting:
+  key_id: sound.volume
+  min: 0
+  max: 100
+  step: 10
+  unit: "%"
+undo: none
+feedback: "当前音量 {value}%"

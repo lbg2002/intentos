@@ -1,0 +1,22 @@
+id: project.open
+version: 1
+summary: 使用首选代码编辑器（如 VS Code）打开指定项目目录
+category: devtools
+aliases: ["打开项目", "用编辑器打开项目", "open project"]
+l0_patterns:
+  - "打开项目 {path}"
+input_schema:
+  type: object
+  required: [path]
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [ui]
+idempotent: true
+execution:
+  type: builtin
+  handler: project.open
+undo: none
+verification:
+  kind: requested_unverified

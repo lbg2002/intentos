@@ -1,0 +1,30 @@
+id: appearance.clock.set
+version: 1
+summary: 设置顶栏时钟制式（24h/12h）、是否显示秒数与星期（可撤销）
+category: system
+aliases: ["24小时制", "12小时制", "顶栏显示秒数", "时钟设置"]
+l0_patterns:
+  - "(切换|改为)?(24|12)小时制"
+  - "(显示|隐藏)时钟秒数"
+input_schema:
+  type: object
+  properties:
+    format:
+      type: string
+      enum: ["24h", "12h"]
+    show_seconds:
+      type: boolean
+    show_weekday:
+      type: boolean
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: clock
+  schema: org.gnome.desktop.interface
+  key: clock-format
+setting:
+  key_id: appearance.clock
+undo: restore_previous_value
+verification:
+  kind: readback

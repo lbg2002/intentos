@@ -1,0 +1,18 @@
+id: power.battery.status
+version: 1
+summary: 查询电池剩余电量百分比、充放电状态与预计续航时间（UPower / sysfs）
+category: system
+aliases: ["电池电量", "还剩多少电", "续航", "battery status"]
+l0_patterns:
+  - "(查看)?(电池)?(电量|还剩多少电)"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: power.battery.status
+undo: none
+verification:
+  kind: structured_output

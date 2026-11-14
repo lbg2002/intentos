@@ -1,0 +1,424 @@
+/* IntentOS v0.3 — Intent Workspace Surface & 5 Declarative Result Components (UI-10 ~ UI-14) */
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 1.15rem;
+  margin-top: 1.15rem;
+  align-items: start;
+}
+
+body[data-view-mode="spotlight"] .workspace-grid {
+  grid-template-columns: 1fr;
+}
+
+body[data-view-mode="spotlight"] .session-drawer-card {
+  display: none;
+}
+
+/* Left Column: Multi-turn Conversation & Session Drawer (UI-10) */
+.session-drawer-card {
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-shell);
+  display: flex;
+  flex-direction: column;
+  max-height: 680px;
+  overflow: hidden;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.24);
+  font-size: 0.83rem;
+  font-weight: 650;
+}
+
+.session-turns-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.turn-bubble {
+  padding: 0.65rem 0.8rem;
+  border-radius: var(--radius-md);
+  font-size: 0.81rem;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.turn-bubble.user-turn {
+  background: var(--bg-selected);
+  border-color: rgba(56, 189, 248, 0.30);
+}
+
+.turn-bubble .turn-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.turn-bubble .turn-text {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.drawer-footer {
+  padding: 0.65rem 0.85rem;
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.20);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Right Column: Declarative Result Surface & System Inspector */
+.surface-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  min-width: 0;
+}
+
+.feedback-panel {
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 1.05rem 1.2rem;
+  box-shadow: var(--shadow-shell);
+  display: none;
+  animation: pop-in 160ms var(--ease-out);
+}
+
+.feedback-panel.visible {
+  display: block;
+}
+
+.feedback-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.feedback-msg {
+  font-size: 0.96rem;
+  font-weight: 600;
+  margin: 0.35rem 0 0.75rem;
+  color: var(--text-primary);
+}
+
+/* Declarative Surface Container (UI-14) */
+.declarative-surface-box {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+/* Component 1: ResourceListView */
+.resource-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.65rem;
+}
+
+.resource-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.55rem;
+  transition: border-color 120ms ease;
+}
+
+.resource-card:hover {
+  border-color: var(--accent);
+}
+
+.resource-card-title {
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.resource-card-path {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.resource-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+/* Component 2: ApprovalDiffCard (UI-07) */
+.approval-diff-card {
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--r2-border);
+  overflow: hidden;
+}
+
+.approval-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.95rem;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--r2-border);
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--warn);
+}
+
+.diff-lines-view {
+  padding: 0.75rem 0.95rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  background: var(--bg-code);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.diff-line {
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-line.add {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-fg);
+}
+.diff-line.del {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-fg);
+}
+
+.approval-actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.7rem 0.95rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Component 3: DiagnosticCard */
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.65rem;
+}
+
+.diag-metric-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.9rem;
+}
+
+.diag-metric-label {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+
+.diag-metric-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+}
+
+.diag-progress-track {
+  margin-top: 0.45rem;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.diag-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--yaru-orange) 100%);
+  transition: width 300ms var(--ease-out);
+}
+
+/* Component 4: TerminalOutputPanel (UI-11) */
+.terminal-pty-panel {
+  border-radius: var(--radius-md);
+  background: #070a10;
+  border: 1px solid var(--border-strong);
+  overflow: hidden;
+  color: #e2e8f0;
+}
+
+.terminal-pty-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.48rem 0.85rem;
+  background: #0f1623;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  font-size: 0.75rem;
+}
+
+.terminal-dots {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.terminal-dots span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.terminal-dots span:nth-child(1) { background: #ef4444; }
+.terminal-dots span:nth-child(2) { background: #f59e0b; }
+.terminal-dots span:nth-child(3) { background: #10b981; }
+
+.terminal-pty-body {
+  padding: 0.8rem 0.95rem;
+  margin: 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.79rem;
+  line-height: 1.45;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Component 5: TaskStepsView (UI-12) */
+.task-steps-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.task-step-node {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.62rem 0.85rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: 0.81rem;
+}
+
+.task-step-node.step-ok { border-left-color: var(--ok); }
+.task-step-node.step-warn { border-left-color: var(--warn); }
+.task-step-node.step-err { border-left-color: var(--err); }
+
+.code-output {
+  margin-top: 0.65rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+  color: var(--text-code, #e2e8f0);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.79rem;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Inspector Bottom Tabs Card */
+.inspector-section {
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-shell);
+  overflow: hidden;
+}
+
+.tabs-nav {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.tab-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 0.65rem 0.95rem;
+  font-size: 0.81rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 120ms ease;
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--bg-selected);
+}
+
+.tab-body {
+  padding: 0.95rem 1.15rem;
+  font-size: 0.83rem;
+}
+
+.row-record {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.row-record:last-child {
+  border-bottom: none;
+}
+
+@media (max-width: 920px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}

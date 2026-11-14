@@ -1,0 +1,21 @@
+id: appearance.font.list
+version: 1
+summary: 查询系统已安装的字体族列表（缓存自 fc-list）
+category: system
+aliases: ["字体列表", "已安装字体", "list fonts"]
+l0_patterns:
+  - "(查看|列出)?系统字体(列表)?"
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      maxLength: 128
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: appearance.font.list
+undo: none
+verification:
+  kind: structured_output

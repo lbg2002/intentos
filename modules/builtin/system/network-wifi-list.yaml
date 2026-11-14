@@ -1,0 +1,18 @@
+id: network.wifi.list
+version: 1
+summary: 扫描并列出周围可用的 Wi-Fi 无线网络信号（nmcli device wifi list）
+category: system
+aliases: ["附近Wi-Fi", "扫描无线网", "wifi list"]
+l0_patterns:
+  - "(查看|扫描|列出)(附近|可用)?(Wi-Fi|wifi|无线网)"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: network.wifi.list
+undo: none
+verification:
+  kind: structured_output

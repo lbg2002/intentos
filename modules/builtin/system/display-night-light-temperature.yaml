@@ -1,0 +1,35 @@
+id: display.night_light.temperature
+version: 1
+summary: 设置或相对调整夜灯色温（1700–4700 K，步长 500 K，「暖一点/冷一点」，可撤销）
+category: system
+aliases: ["色温", "暖一点", "冷一点", "night light temperature"]
+l0_patterns:
+  - "(屏幕|夜灯)?(暖一点|冷一点)"
+  - "色温(调到|设为)? {value}"
+input_schema:
+  type: object
+  properties:
+    value:
+      type: number
+    relative:
+      type: string
+      enum: [warmer, cooler, up, down]
+  oneOf:
+    - required: [value]
+    - required: [relative]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: night_light_temp
+  schema: org.gnome.settings-daemon.plugins.color
+  key: night-light-temperature
+setting:
+  key_id: display.night_light.temperature
+  min: 1700
+  max: 4700
+  step: 500
+  unit: "K"
+undo: restore_previous_value
+verification:
+  kind: readback

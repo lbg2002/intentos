@@ -1,0 +1,17 @@
+id: system.inspect
+version: 1
+summary: 采样当前系统负载、内存用量、运行时间与内核信息
+category: devtools
+aliases: ["系统状态", "内存占用", "电脑为什么卡", "负载", "system status"]
+l0_patterns:
+  - "(查看)?(系统状态|内存使用|系统负载)"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: system.inspect
+undo: none
+feedback: "已完成系统实时状态采样"

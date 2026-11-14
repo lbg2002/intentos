@@ -1,0 +1,21 @@
+id: disk.usage
+version: 1
+summary: 统计指定授权目录下各子目录或文件的磁盘占用体积排名
+category: devtools
+aliases: ["目录大小", "谁占空间最多", "空间占用排行", "disk usage"]
+l0_patterns:
+  - "(查看)? {path} 目录占用大小"
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      maxLength: 1024
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: disk.usage
+undo: none
+verification:
+  kind: structured_output

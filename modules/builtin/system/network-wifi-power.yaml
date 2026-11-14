@@ -1,0 +1,25 @@
+id: network.wifi.power
+version: 1
+summary: 开启或关闭系统 Wi-Fi 无线网卡开关（nmcli radio wifi，可撤销）
+category: system
+aliases: ["打开Wi-Fi", "关闭Wi-Fi", "开关无线网", "wifi power"]
+l0_patterns:
+  - "(打开|开启|关闭|关掉)(Wi-Fi|wifi|无线网)"
+input_schema:
+  type: object
+  required: [state]
+  properties:
+    state:
+      type: string
+      enum: ["on", "off", "toggle"]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wifi_power
+setting:
+  key_id: network.wifi.power
+  enum_values: ["on", "off", "toggle"]
+undo: restore_previous_value
+verification:
+  kind: readback

@@ -1,0 +1,18 @@
+id: window.list
+version: 1
+summary: 列出当前桌面会话打开的窗口列表（通过 GNOME Shell 扩展桥接，Wayland 原生）
+category: applications
+aliases: ["窗口列表", "打开了哪些窗口", "list windows"]
+l0_patterns:
+  - "(查看|列出)?窗口列表"
+input_schema:
+  type: object
+  properties: {}
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: window.list
+undo: none
+verification:
+  kind: structured_output

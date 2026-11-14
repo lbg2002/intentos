@@ -1,0 +1,29 @@
+id: settings.reset
+version: 1
+summary: 将白名单内的某项系统设置恢复为系统默认值（支持撤销）
+category: system
+aliases: ["恢复默认", "重置设置", "reset setting"]
+l0_patterns:
+  - "{target}恢复默认"
+input_schema:
+  type: object
+  required: [key_id]
+  properties:
+    key_id:
+      type: string
+      enum:
+        - sound.volume
+        - sound.mute
+        - display.brightness
+        - appearance.color_scheme
+        - appearance.text_scale
+        - notify.dnd
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: reset
+undo: restore_previous_value
+verification:
+  kind: readback
+feedback: "已将 {key_id} 恢复默认值"

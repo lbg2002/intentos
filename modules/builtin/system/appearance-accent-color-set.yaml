@@ -1,0 +1,27 @@
+id: appearance.accent_color.set
+version: 1
+summary: 设置桌面强调色（blue/teal/green/yellow/orange/red/pink/purple/slate，同步 Yaru 变体，可撤销）
+category: system
+aliases: ["强调色", "主题色", "accent color"]
+l0_patterns:
+  - "(把)?强调色(改成|设为) {color}"
+input_schema:
+  type: object
+  required: [color]
+  properties:
+    color:
+      type: string
+      enum: [blue, teal, green, yellow, orange, red, pink, purple, slate]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: accent_color
+  schema: org.gnome.desktop.interface
+  key: accent-color
+setting:
+  key_id: appearance.accent_color
+  enum_values: [blue, teal, green, yellow, orange, red, pink, purple, slate]
+undo: restore_previous_value
+verification:
+  kind: readback

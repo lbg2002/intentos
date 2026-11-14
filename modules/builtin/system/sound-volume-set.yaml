@@ -1,0 +1,35 @@
+id: sound.volume.set
+version: 1
+summary: 设置或相对调整系统输出音量（0–100%，步长 10%，读回验证并支持一键撤销）
+category: system
+aliases: ["音量", "调音量", "声音大一点", "声音小一点", "set volume"]
+l0_patterns:
+  - "音量(调到|设为)? {value}%?"
+  - "(音量|声音)(调)?(大|高|小|低)(一点)?"
+input_schema:
+  type: object
+  properties:
+    value:
+      type: number
+    relative:
+      type: string
+      enum: [up, down]
+  oneOf:
+    - required: [value]
+    - required: [relative]
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: wpctl_volume
+setting:
+  key_id: sound.volume
+  min: 0
+  max: 100
+  step: 10
+  unit: "%"
+undo: restore_previous_value
+verification:
+  kind: readback
+  tolerance: 1.0
+feedback: "音量 {before}% → {after}%"

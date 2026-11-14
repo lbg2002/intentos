@@ -1,0 +1,24 @@
+id: bluetooth.connect
+version: 1
+summary: 按名称模糊匹配连接已配对的蓝牙设备（如 AirPods/蓝牙耳机，未配对则打开蓝牙设置页）
+category: system
+aliases: ["连蓝牙耳机", "连接蓝牙设备", "连 AirPods"]
+l0_patterns:
+  - "连(接)?蓝牙(设备)? {device}"
+input_schema:
+  type: object
+  required: [device]
+  properties:
+    device:
+      type: string
+      maxLength: 128
+effects: [setting]
+idempotent: false
+execution:
+  type: setting_backend
+  driver: bluetooth_connect
+setting:
+  key_id: bluetooth.connect
+undo: none
+verification:
+  kind: readback
