@@ -9,7 +9,11 @@
 //!   `<think>` & `reasoning_content` extraction, 6-color `Trace Dots` builder, cancellation/idempotency state machine,
 //!   and automatic fallback to `core.submit_intent`.
 
+pub mod broker_bridge;
 pub mod detector;
+pub mod providers_cli;
+pub mod providers_http;
+pub mod turn_checkpoint;
 pub mod turn_engine;
 
 pub use detector::{
@@ -18,8 +22,9 @@ pub use detector::{
     is_non_chat_utility_model, normalize_reasoning_effort, scrub_json_secrets,
 };
 pub use turn_engine::{
-    PersistedQuickChatBackend, ScopedZcodeRuntimeOverride, TraceDot, cancel_turn,
-    extract_thinking_and_clean_reply, load_persisted_backend, resume_approved_turn_with_options,
+    ActiveTurnHandle, BackendExecutionMode, PersistedQuickChatBackend, ScopedZcodeRuntimeOverride,
+    StepExecutionRecord, TraceDot, TurnEffectLedger, cancel_turn, extract_thinking_and_clean_reply,
+    load_persisted_backend, resolve_active_selection, resume_approved_turn_with_options,
     send_quick_chat_turn_with_options, set_active_backend_with_options,
 };
 
@@ -1519,5 +1524,475 @@ mod tests {
         );
         let msgs = sent["messages"].as_array().unwrap();
         assert!(msgs.iter().all(|m| m["role"] != "tool"));
+    }
+
+    #[tokio::test]
+    async fn test_m1_effect_ledger_blocks_fallback_replay_after_mutating_tool_round1_ok_round2_500() {
+        let (tmp, core) = setup_test_core();
+        let mock_home = tmp.path().join("mock_home_m1_ledger");
+        std::fs::create_dir_all(&mock_home).unwrap();
+
+        // Unit-verify canonical SHA-256 idempotency key stability & duplicate lookup first
+        let mut unit_ledger = TurnEffectLedger::new("turn_unit_canon");
+        let k1 = unit_ledger.compute_idempotency_key("sound.volume.set", r#"{"b":2,"value":38}"#);
+        let k2 = unit_ledger.compute_idempotency_key("sound.volume.set", r#"{"value": 38, "b": 2}"#);
+        assert_eq!(k1, k2, "Canonical JSON idempotency_key must be key-order invariant");
+        assert_eq!(k1.len(), 64);
+        assert!(unit_ledger.lookup_idempotent(&k2).is_none());
+        let unit_sid = unit_ledger.next_step_id();
+        unit_ledger.record_step(StepExecutionRecord {
+            step_id: unit_sid,
+            idempotency_key: k1.clone(),
+            capability_id: "sound.volume.set".into(),
+            canonical_args_json: r#"{"b":2,"value":38}"#.into(),
+            effect: intentos_protocol::Effect::Setting,
+            mutated_state: true,
+            succeeded: true,
+            changeset_id: Some("cs_unit_1".into()),
+            verification_status: "Passed".into(),
+            cached_output: json!({"volume": 38}),
+        });
+        assert!(unit_ledger.lookup_idempotent(&k2).is_some());
+        assert!(unit_ledger.has_committed_side_effects());
+
+        // Install a mock `codex` CLI binary that writes a sentinel flag if fallback ever invokes CLI
+        let cli_sentinel = tmp.path().join("cli_fallback_must_not_run.flag");
+        write_executable(
+            &mock_home.join(".local/bin/codex"),
+            &format!(
+                "#!/bin/sh\necho invoked > \"{}\"\necho \"CLI fallback ran illegally\"\n",
+                cli_sentinel.display()
+            ),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let round_counter = Arc::new(AtomicUsize::new(0));
+        let round_counter_srv = round_counter.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let raw_req = read_full_http_request_body(&mut stream).await;
+                let step_idx = round_counter_srv.fetch_add(1, Ordering::SeqCst);
+                let req_val: Value = serde_json::from_str(&raw_req).unwrap_or_else(|_| json!({}));
+                let has_tool_msg = req_val["messages"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|m| m["role"] == "tool"));
+
+                if !has_tool_msg && step_idx == 0 {
+                    // Round 1: invoke mutating capability `sound.volume.set` (`Effect::ModifyLocal > Effect::Observe`)
+                    let body = serde_json::to_string(&json!({
+                        "id": "chatcmpl_m1_r1",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "<think>将系统音量设为 38%</think>",
+                                "tool_calls": [{
+                                    "id": "call_vol_m1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "sound_volume_set",
+                                        "arguments": "{\"value\":38}"
+                                    }
+                                }]
+                            }
+                        }]
+                    }))
+                    .unwrap();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else {
+                    // Round 2: upstream crashes with HTTP 500 AFTER mutating tool succeeded!
+                    let err_body = r#"{"error":{"message":"gateway crashed upstream key sk-m1-err-leak-998811"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        err_body.len(),
+                        err_body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let codex_toml = format!(
+            "model = \"gpt-6.1-sol\"\nmodel_provider = \"corp_codex\"\n\n[model_providers.corp_codex]\nname = \"Corp Codex\"\nbase_url = \"http://{}/v1\"\napi_key = \"sk-m1-codex-http-key\"\n",
+            addr
+        );
+        let codex_cfg_path = mock_home.join(".codex/config.toml");
+        std::fs::create_dir_all(codex_cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&codex_cfg_path, codex_toml).unwrap();
+
+        let mut opts = DiscoveryOptions::from_core(&core, true);
+        opts.home_dir = mock_home.clone();
+        opts.include_system_paths = false;
+        opts.allow_env_keys = false;
+        opts.probe_remote_models = false;
+
+        set_active_backend_with_options(
+            &core,
+            &json!({
+                "backend": "codex",
+                "provider": "corp_codex",
+                "model": "gpt-6.1-sol",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        // Note: "把音量调到 38%" ALSO matches L0 `sound.volume.set` in `core.submit_intent`,
+        // so if fallback occurred, either `cli_sentinel` would exist OR a 2nd changeset would be created!
+        let res = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "ses_m1_no_replay",
+                "text": "把音量调到 38%",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res["status"], "completed");
+        assert_eq!(res["side_effect_replay_prevented"], true);
+        assert_eq!(res["execution_mode"], "managed_broker");
+        assert!(
+            !cli_sentinel.exists(),
+            "CLI fallback MUST NOT run after a mutating side-effect committed!"
+        );
+
+        let cs_ids = res["changeset_ids"].as_array().unwrap();
+        assert_eq!(
+            cs_ids.len(),
+            1,
+            "Exactly 1 changeset must exist (zero duplicate replay on `core.submit_intent`!), got: {:?}",
+            cs_ids
+        );
+
+        let ledger = &res["effect_ledger"];
+        assert_eq!(ledger["has_committed_side_effects"], true);
+        assert_eq!(ledger["mutated_steps"], 1);
+        assert_eq!(ledger["total_steps"], 1);
+        assert_eq!(ledger["steps"][0]["step_id"], "step_1");
+        assert_eq!(ledger["steps"][0]["capability_id"], "sound.volume.set");
+        assert_eq!(ledger["steps"][0]["mutated_state"], true);
+
+        let dots = res["trace_dots"].as_array().unwrap();
+        assert!(
+            dots.iter()
+                .any(|d| d["title"].as_str().unwrap_or("").contains("sound.volume.set")),
+            "Round 1 trace_dots must be preserved on safe halt, got: {:?}",
+            dots
+        );
+
+        let reply_md = res["reply_markdown"].as_str().unwrap_or("");
+        assert!(reply_md.contains("sound.volume.set"));
+        assert!(reply_md.contains(cs_ids[0].as_str().unwrap()));
+        assert!(
+            !res.to_string().contains("sk-m1-err-leak-998811"),
+            "Upstream HTTP 500 error message secrets must be scrubbed!"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_m1_incognito_never_leaks_explicit_state_db_memories_to_outbound_llm() {
+        let (tmp, core) = setup_test_core();
+        let mock_home = tmp.path().join("mock_home_m1_incog");
+        std::fs::create_dir_all(&mock_home).unwrap();
+
+        // Populate explicit long-term user preferences in StateDb
+        core.state_db
+            .save_explicit_memory("文档偏好", "默认使用 WPS 打开文档", None)
+            .unwrap();
+        core.state_db
+            .save_explicit_memory("办公地点", "常驻杭州滨江研发园区", None)
+            .unwrap();
+        assert_eq!(core.state_db.list_active_memories().unwrap().len(), 2);
+
+        let captured_bodies: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_srv = captured_bodies.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let raw_req = read_full_http_request_body(&mut stream).await;
+                captured_srv.lock().unwrap().push(raw_req);
+                let body = serde_json::to_string(&json!({
+                    "id": "chatcmpl_m1_incog",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "已为您完成纪要润色。"
+                        }
+                    }]
+                }))
+                .unwrap();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let mut opts = DiscoveryOptions::from_core(&core, true);
+        opts.home_dir = mock_home.clone();
+        opts.include_system_paths = false;
+        opts.allow_env_keys = false;
+        opts.probe_remote_models = false;
+
+        set_active_backend_with_options(
+            &core,
+            &json!({
+                "backend": "openai",
+                "provider": "mock-incog-llm",
+                "model": "gpt-5.4",
+                "base_url": format!("http://{}/v1", addr),
+                "api_key": "sk-mock-incog-key"
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        // 1) Incognito turn: MUST NOT leak `StateDb::list_active_memories()` into outbound LLM request OR response!
+        let incog_res = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "incog_ses_m1_verify",
+                "incognito": true,
+                "text": "帮我润色一段周会纪要",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(incog_res["status"], "completed");
+        assert_eq!(incog_res["execution_mode"], "managed_broker");
+        assert!(
+            incog_res["memory_hits"].as_array().unwrap().is_empty(),
+            "Incognito turn MUST NOT return explicit StateDb memories in `memory_hits`!"
+        );
+        assert!(
+            incog_res["trace_dots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["kind"] != "memory"),
+            "Incognito turn MUST NOT emit memory trace dots!"
+        );
+
+        let incog_outbound = captured_bodies.lock().unwrap()[0].clone();
+        for forbidden in ["默认使用 WPS 打开文档", "文档偏好", "杭州滨江研发园区", "办公地点"] {
+            assert!(
+                !incog_outbound.contains(forbidden),
+                "PRIVACY VIOLATION: Incognito outbound LLM payload leaked explicit StateDb memory '{}'! Payload: {}",
+                forbidden,
+                incog_outbound
+            );
+        }
+
+        // Verify zero persistence in `memory_hub` for incognito session (session does not even exist!)
+        let mem_ses = crate::memory_hub::handle_module_rpc(
+            &core,
+            "get_session",
+            json!({ "session_id": "incog_ses_m1_verify" }),
+        )
+        .await;
+        assert!(
+            mem_ses.is_err()
+                || mem_ses
+                    .unwrap()["messages"]
+                    .as_array()
+                    .is_none_or(|arr| arr.is_empty()),
+            "Incognito turn MUST NOT write conversation history!"
+        );
+
+        // 2) Normal (`incognito: false`) turn: explicit memories remain active & available
+        let normal_res = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "normal_ses_m1_verify",
+                "incognito": false,
+                "text": "帮我润色一段周会纪要",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !normal_res["memory_hits"].as_array().unwrap().is_empty(),
+            "Non-incognito turn should still surface explicit StateDb preferences"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_m1_cli_broker_bridge_executes_tool_call_and_suspends_on_pending_approval() {
+        let (tmp, core) = setup_test_core();
+        let mock_home = tmp.path().join("mock_home_m1_cli_bridge");
+        std::fs::create_dir_all(&mock_home).unwrap();
+
+        let outside_dir = tmp.path().join("controlled_external_vault");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(
+            outside_dir.join("confidential_roadmap_2026.md"),
+            "# Roadmap 2026\nMilestone 1 unified broker.\n",
+        )
+        .unwrap();
+
+        // Mock `codex` CLI binary speaking the controlled `<intentos_tool_call>` protocol
+        let mock_codex_script = format!(
+            r#"#!/bin/sh
+for prompt; do :; done
+case "$prompt" in
+  *intentos_tool_results*confidential_roadmap_2026.md*)
+    printf "已完成受控目录检索，发现文件 confidential_roadmap_2026.md。"
+    ;;
+  *intentos_tool_results*42%*)
+    printf "已通过受控 Broker 将屏幕亮度设为 42%%（调试密钥 sk-cli-leak-test-887766 已隔离）。"
+    ;;
+  *intentos_tool_results*)
+    printf "已完成受控工具执行闭环。"
+    ;;
+  *调暗屏幕亮度测试*)
+    printf "<think>通过 IntentOS CapabilityBroker 调整屏幕亮度</think><intentos_tool_call>{{\"name\":\"display.brightness.set\",\"arguments\":{{\"value\":42}}}}</intentos_tool_call>"
+    ;;
+  *检索受控外部路线图*)
+    printf "<intentos_tool_call>{{\"name\":\"file.search\",\"arguments\":{{\"directory\":\"{}\",\"query\":\"roadmap\"}}}}</intentos_tool_call>"
+    ;;
+  *)
+    printf "纯对话模式回复 <intentos_tool_call>{{broken_tag</intentos_tool_call> 完毕。"
+    ;;
+esac
+"#,
+            outside_dir.display()
+        );
+        write_executable(&mock_home.join(".local/bin/codex"), &mock_codex_script);
+
+        let codex_cfg_path = mock_home.join(".codex/config.toml");
+        std::fs::create_dir_all(codex_cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&codex_cfg_path, "model = \"gpt-6.1-cli\"\n").unwrap();
+
+        let mut opts = DiscoveryOptions::from_core(&core, true);
+        opts.home_dir = mock_home.clone();
+        opts.include_system_paths = false;
+        opts.allow_env_keys = false;
+        opts.probe_remote_models = false;
+
+        set_active_backend_with_options(
+            &core,
+            &json!({
+                "backend": "codex",
+                "model": "gpt-6.1-cli",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        // Case A: CLI emits `<intentos_tool_call>` for `display.brightness.set` -> Broker executes -> Round 2 summarizes
+        let res_bright = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "ses_m1_cli_bright",
+                "text": "调暗屏幕亮度测试",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res_bright["status"], "completed");
+        assert_eq!(res_bright["backend_used"], "codex");
+        assert_eq!(res_bright["execution_mode"], "cli_broker_bridged");
+        assert_eq!(res_bright["changeset_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            res_bright["effect_ledger"]["has_committed_side_effects"],
+            true
+        );
+        let bright_dots = res_bright["trace_dots"].as_array().unwrap();
+        assert!(
+            bright_dots
+                .iter()
+                .any(|d| d["title"].as_str().unwrap_or("").contains("display.brightness.set")),
+            "CLI broker bridge must emit real `TraceDot` for executed capability, got: {:?}",
+            bright_dots
+        );
+        assert!(
+            !res_bright.to_string().contains("sk-cli-leak-test-887766"),
+            "CLI output secrets must be scrubbed!"
+        );
+
+        // Case B: CLI emits `<intentos_tool_call>` for outside `file.search` -> suspends on `PendingApproval` -> resumes cleanly!
+        let paused = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "ses_m1_cli_approval",
+                "text": "检索受控外部路线图",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(paused["status"], "awaiting_approval");
+        assert_eq!(paused["execution_mode"], "cli_broker_bridged");
+        let pa = &paused["pending_approval"];
+        assert_eq!(pa["capability_id"], "file.search");
+        assert!(!pa["nonce"].as_str().unwrap_or("").is_empty());
+
+        let resumed = resume_approved_turn_with_options(
+            &core,
+            &json!({
+                "approval_id": pa["approval_id"],
+                "decision": "once",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resumed["status"], "completed");
+        assert_eq!(resumed["approval_resolved"], "approved");
+        assert_eq!(resumed["execution_mode"], "cli_broker_bridged");
+        assert!(
+            resumed["reply_markdown"]
+                .as_str()
+                .unwrap_or("")
+                .contains("confidential_roadmap_2026.md"),
+            "Resumed CLI turn must receive approved file.search results, got: {}",
+            resumed["reply_markdown"]
+        );
+
+        // Case C: `allow_broker_tools: false` reports `external_chat_only` and strips malformed tags
+        let chat_only = send_quick_chat_turn_with_options(
+            &core,
+            &json!({
+                "session_id": "ses_m1_cli_chat_only",
+                "allow_broker_tools": false,
+                "text": "普通闲聊无需系统工具",
+            }),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(chat_only["status"], "completed");
+        assert_eq!(chat_only["execution_mode"], "external_chat_only");
+        assert_eq!(chat_only["effect_ledger"]["total_steps"], 0);
+        let cleaned = chat_only["reply_markdown"].as_str().unwrap_or("");
+        assert!(!cleaned.contains("intentos_tool_call"));
+        assert!(cleaned.contains("纯对话模式回复"));
     }
 }
