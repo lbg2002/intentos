@@ -53,15 +53,114 @@ pub use schema_and_db::{
 pub use session_rag::{
     MAX_AUTO_MEMORY_CHARS, MAX_INSPECT_DOC_CHARS, MemoryOverviewCategory, MemoryRecallIntent,
     RecordTurnInput, RecordTurnOutcome, SessionDetail, build_memory_trace_dot,
-    build_personal_memory_prompt, classify_memory_query_intent, create_session, delete_session,
-    execute_memory_tool, get_session_detail, get_session_record, inspect_document, is_memory_tool,
-    list_sessions, memory_tool_specs, record_conversation_turn, remove_synthetic_approval_echo,
-    search_past_chats, try_answer_memory_query_deterministically,
+    classify_memory_query_intent, create_session, delete_session, get_session_detail,
+    get_session_record, inspect_document, is_memory_tool, list_sessions, memory_tool_specs,
+    remove_synthetic_approval_echo, search_past_chats,
 };
 
 use crate::core::IntentOsCore;
+use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+
+/// Privacy- and redaction-guarded conversation turn recorder (`memory_hub`).
+///
+/// Enforces:
+/// 1. `StrictIsolated` (`incognito == true` or `incog_*`) and `EphemeralReadOnly` perform ZERO SQLite writes.
+/// 2. `Standard` sessions scrub `user_text`, `assistant_text`, `thinking`, `tool_steps`, and `trace_dots`
+///    via [`SensitiveDataGuard`] BEFORE entity extraction or SQLite persistence.
+pub fn record_conversation_turn(
+    core: &IntentOsCore,
+    input: &RecordTurnInput,
+) -> anyhow::Result<RecordTurnOutcome> {
+    let policy = PrivacySessionPolicy::from_session(input.incognito, input.session_id.as_deref());
+    if !policy.allows_memory_write() {
+        return Ok(RecordTurnOutcome {
+            recorded: false,
+            incognito: true,
+            session_id: input.session_id.clone().unwrap_or_default(),
+            extracted_entities: Vec::new(),
+            updated_files: 0,
+            updated_apps: 0,
+        });
+    }
+
+    let mut clean_steps = input.tool_steps.clone();
+    for step in &mut clean_steps {
+        SensitiveDataGuard::redact_json(step);
+    }
+    let mut clean_dots = input.trace_dots.clone();
+    for dot in &mut clean_dots {
+        SensitiveDataGuard::redact_json(dot);
+    }
+
+    let sanitized = RecordTurnInput {
+        session_id: input.session_id.clone(),
+        user_text: SensitiveDataGuard::redact_text(&input.user_text).0,
+        assistant_text: SensitiveDataGuard::redact_text(&input.assistant_text).0,
+        thinking: input
+            .thinking
+            .as_deref()
+            .map(|t| SensitiveDataGuard::redact_text(t).0),
+        tool_steps: clean_steps,
+        trace_dots: clean_dots,
+        incognito: false,
+    };
+    session_rag::record_conversation_turn(core, &sanitized)
+}
+
+/// Privacy-guarded `[Personal OS Memory]` RAG prompt builder.
+/// Returns empty context and zero hits when `session_id` belongs to a `StrictIsolated` (`incog_*`) session.
+pub fn build_personal_memory_prompt(
+    core: &IntentOsCore,
+    user_text: &str,
+    session_id: Option<&str>,
+) -> (String, Vec<Value>) {
+    let policy = PrivacySessionPolicy::from_session(false, session_id);
+    if !policy.allows_memory_read() {
+        return (String::new(), Vec::new());
+    }
+    session_rag::build_personal_memory_prompt(core, user_text, session_id)
+}
+
+/// Privacy-guarded deterministic personal-memory responder for offline mode.
+/// Returns `None` without opening `memory_hub.db` when `!policy.allows_memory_read()`.
+pub fn try_answer_memory_query_deterministically(
+    core: &IntentOsCore,
+    user_text: &str,
+    session_id: Option<&str>,
+) -> Option<(String, Vec<Value>)> {
+    let policy = PrivacySessionPolicy::from_session(false, session_id);
+    if !policy.allows_memory_read() {
+        return None;
+    }
+    session_rag::try_answer_memory_query_deterministically(core, user_text, session_id)
+}
+
+/// Privacy-guarded `memory_*` LLM tool executor.
+pub fn execute_memory_tool(
+    core: &IntentOsCore,
+    tool_name: &str,
+    args: &Value,
+) -> anyhow::Result<Value> {
+    let incog = args
+        .get("incognito")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sid = args.get("session_id").and_then(|v| v.as_str());
+    let policy = PrivacySessionPolicy::from_session(incog, sid);
+    if !policy.allows_memory_read() {
+        return Ok(json!({
+            "ok": true,
+            "incognito_isolated": true,
+            "found": false,
+            "count": 0,
+            "items": [],
+            "hits": [],
+        }));
+    }
+    session_rag::execute_memory_tool(core, tool_name, args)
+}
 
 /// Unified `UiRpcRequest::ModuleRpc { domain: "memory_hub", action, payload }` dispatcher.
 pub async fn handle_module_rpc(
@@ -238,9 +337,6 @@ pub async fn handle_module_rpc(
         }
 
         "query_personal_memory" => {
-            let db = MemoryHubDb::open_for_core(core)?;
-            ensure_lazy_synced(core, &db);
-
             let query = payload
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -250,6 +346,28 @@ pub async fn handle_module_rpc(
                 .and_then(|v| v.as_str())
                 .unwrap_or("all");
             let session_id = payload.get("session_id").and_then(|v| v.as_str());
+            let incognito = payload
+                .get("incognito")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !PrivacySessionPolicy::from_session(incognito, session_id).allows_memory_read() {
+                return Ok(json!({
+                    "query": query,
+                    "kind": kind,
+                    "hits": [],
+                    "mentioned_files": [],
+                    "frequent_files": [],
+                    "document_outlines": [],
+                    "software": [],
+                    "past_chats": [],
+                    "context_markdown": "",
+                    "answer_markdown": Value::Null,
+                    "trace_dot": Value::Null,
+                }));
+            }
+
+            let db = MemoryHubDb::open_for_core(core)?;
+            ensure_lazy_synced(core, &db);
             let limit = payload
                 .get("limit")
                 .and_then(|v| v.as_u64())
@@ -745,7 +863,21 @@ mod tests {
         let detail = get_session_detail(&db, "ses_normal", 20).unwrap().unwrap();
         assert_eq!(detail.messages.len(), 2);
         assert!(!detail.messages[0].content.contains("sk-abcdef1234567890SECRETKEY"));
-        assert!(detail.messages[0].content.contains("[REDACTED_KEY]"));
+        assert!(detail.messages[0].content.contains("[REDACTED_SECRET]"));
+
+        // 3. Incognito session (`incog_*`) MUST also perform ZERO reads from MemoryHub
+        let (incog_prompt, incog_hits) =
+            build_personal_memory_prompt(&core, "刚才改的 app.toml 在哪里", Some("incog_isolated"));
+        assert!(incog_prompt.is_empty());
+        assert!(incog_hits.is_empty());
+        assert!(
+            try_answer_memory_query_deterministically(
+                &core,
+                "我之前说的文件有哪些",
+                Some("incog_isolated")
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]

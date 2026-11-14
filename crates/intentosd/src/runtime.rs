@@ -7,11 +7,13 @@ use crate::broker::{BrokerDispatchOutcome, CapabilityBroker};
 use crate::config::XdgPaths;
 use crate::db::StateDb;
 use crate::gateway::ModelGateway;
+use crate::security_guard::PrivacySessionPolicy;
 use chrono::{DateTime, Duration, Utc};
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
-    CapabilityCall, ChatMessage, ContextBlock, DataClass, ExecutionStatus, InvocationOrigin,
-    PendingApproval, RunRequest, RuntimeEvent, TaskBudget, TaskStep, Taint, ToolSpec,
+    CapabilityCall, CapabilityDescriptor, ChatMessage, ContextBlock, DataClass, ExecutionStatus,
+    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, TaskBudget, TaskStep, Taint,
+    ToolSpec,
 };
 use intentos_sandbox::{SandboxSpec, build_sandboxed_command};
 use serde_json::{Value, json};
@@ -115,11 +117,15 @@ impl SessionBuffer {
     }
 }
 
-/// Context Builder (§11.6): assembles system prompt, explicit memories, and taint-tagged blocks.
-pub fn build_context_blocks(
+/// Privacy-aware Context Builder (§11.6, M1 P0): assembles system prompt, explicit memories (only when
+/// `privacy.allows_memory_read()`), and taint-tagged blocks.
+pub fn build_context_blocks_with_privacy(
     state_db: &StateDb,
+    capabilities: &[CapabilityDescriptor],
     extra_blocks: Vec<ContextBlock>,
-) -> (Vec<ContextBlock>, Vec<Taint>, DataClass) {
+    privacy: PrivacySessionPolicy,
+) -> Vec<ContextBlock> {
+    let _ = capabilities;
     let mut blocks = vec![ContextBlock {
         id: "sys_rules".into(),
         label: "system_rules".into(),
@@ -135,8 +141,10 @@ pub fn build_context_blocks(
         data_class: DataClass::Public,
     }];
 
-    if let Ok(mems) = state_db.list_active_memories()
-        && !mems.is_empty() {
+    if privacy.allows_memory_read() {
+        if let Ok(mems) = state_db.list_active_memories()
+            && !mems.is_empty()
+        {
             let formatted = mems
                 .iter()
                 .take(10)
@@ -151,12 +159,22 @@ pub fn build_context_blocks(
                 data_class: DataClass::Personal,
             });
         }
+        blocks.extend(extra_blocks);
+    } else {
+        blocks.extend(extra_blocks.into_iter().filter(|b| {
+            b.taint != Taint::Memory
+                && b.label != "memories"
+                && b.label != "personal_os_memory"
+        }));
+    }
 
-    blocks.extend(extra_blocks);
+    blocks
+}
 
+fn compute_context_taints_and_class(blocks: &[ContextBlock]) -> (Vec<Taint>, DataClass) {
     let mut taints = vec![Taint::User];
     let mut max_dc = DataClass::Public;
-    for b in &blocks {
+    for b in blocks {
         if !taints.contains(&b.taint) {
             taints.push(b.taint);
         }
@@ -164,6 +182,22 @@ pub fn build_context_blocks(
             max_dc = b.data_class;
         }
     }
+    (taints, max_dc)
+}
+
+/// Context Builder (§11.6): assembles system prompt, explicit memories, and taint-tagged blocks
+/// under [`PrivacySessionPolicy::Standard`].
+pub fn build_context_blocks(
+    state_db: &StateDb,
+    extra_blocks: Vec<ContextBlock>,
+) -> (Vec<ContextBlock>, Vec<Taint>, DataClass) {
+    let blocks = build_context_blocks_with_privacy(
+        state_db,
+        &[],
+        extra_blocks,
+        PrivacySessionPolicy::Standard,
+    );
+    let (taints, max_dc) = compute_context_taints_and_class(&blocks);
     (blocks, taints, max_dc)
 }
 
@@ -228,51 +262,48 @@ impl AgentCoordinator {
         mut extra_blocks: Vec<ContextBlock>,
         budget: TaskBudget,
     ) -> anyhow::Result<AgentRunResult> {
+        let privacy = PrivacySessionPolicy::from_session(false, Some(&session.session_id));
+
         // 1. Offline / No-Cloud-Key Deterministic AIOS Fallbacks:
         //    a) Personal Memory Hub (`memory_hub` — mentioned files, XBEL frequent files, Ubuntu software profile)
         //    b) Software Translation Layer (`app_adapter` — MPRIS2 music / adapter inspection)
         //    c) Developer Command Handoff (§8.8, A16)
         if !self.gateway.has_usable_credentials() {
             if let Some(core) = self.core() {
-                let is_incog = session.session_id.starts_with("incog_");
-                if !is_incog || crate::memory_hub::MemoryHubDb::path_for_core(&core).exists() {
-                    let sid_opt = if is_incog {
-                        None
-                    } else {
-                        Some(session.session_id.as_str())
-                    };
-                    if let Some((answer_md, hits)) =
+                if privacy.allows_memory_read()
+                    && let Some((answer_md, hits)) =
                         crate::memory_hub::try_answer_memory_query_deterministically(
-                            &core, user_text, sid_opt,
+                            &core,
+                            user_text,
+                            Some(session.session_id.as_str()),
                         )
-                    {
-                        let step = TaskStep {
-                            step_id: format!(
-                                "mem_{}",
-                                &uuid::Uuid::new_v4().simple().to_string()[..8]
-                            ),
-                            capability_id: "memory_hub.query".into(),
-                            arguments_summary: json!({ "query": user_text }).to_string(),
-                            status: ExecutionStatus::Exited,
-                            verification: intentos_protocol::VerificationReport {
-                                state: intentos_protocol::VerificationState::Passed,
-                                method: "memory_hub_sqlite_wal".into(),
-                                checks: vec!["personal_memory_recalled".into()],
-                                details: None,
-                            },
-                            changeset_id: None,
-                            message: format!("已从个人记忆与数据层召回 {} 项记录", hits.len()),
-                            data: json!({ "hits": hits }),
-                            duration_ms: 1,
-                        };
-                        return Ok(AgentRunResult {
-                            final_message: answer_md,
-                            steps: vec![step],
-                            changeset_ids: Vec::new(),
-                            pending_approval: None,
-                            handoff_command: None,
-                        });
-                    }
+                {
+                    let step = TaskStep {
+                        step_id: format!(
+                            "mem_{}",
+                            &uuid::Uuid::new_v4().simple().to_string()[..8]
+                        ),
+                        capability_id: "memory_hub.query".into(),
+                        arguments_summary: json!({ "query": user_text }).to_string(),
+                        status: ExecutionStatus::Exited,
+                        verification: intentos_protocol::VerificationReport {
+                            state: intentos_protocol::VerificationState::Passed,
+                            method: "memory_hub_sqlite_wal".into(),
+                            checks: vec!["personal_memory_recalled".into()],
+                            details: None,
+                        },
+                        changeset_id: None,
+                        message: format!("已从个人记忆与数据层召回 {} 项记录", hits.len()),
+                        data: json!({ "hits": hits }),
+                        duration_ms: 1,
+                    };
+                    return Ok(AgentRunResult {
+                        final_message: answer_md,
+                        steps: vec![step],
+                        changeset_ids: Vec::new(),
+                        pending_approval: None,
+                        handoff_command: None,
+                    });
                 }
                 if let Some(adapter_res) =
                     crate::core::try_execute_deterministic_adapter_intent(&core, task_id, user_text)
@@ -302,9 +333,9 @@ impl AgentCoordinator {
             });
         }
 
-        // 2. Automatically inject `[Personal OS Memory]` RAG prompt before LLM inference if not already present
+        // 2. Automatically inject `[Personal OS Memory]` RAG prompt before LLM inference if permitted by privacy policy
         if let Some(core) = self.core()
-            && !session.session_id.starts_with("incog_")
+            && privacy.allows_memory_read()
             && !extra_blocks.iter().any(|b| b.label == "personal_os_memory")
         {
             let (mem_md, _hits) = crate::memory_hub::build_personal_memory_prompt(
@@ -323,16 +354,27 @@ impl AgentCoordinator {
             }
         }
 
-        let (context_blocks, taints, data_class) =
-            build_context_blocks(&self.state_db, extra_blocks);
+        let descriptors = self.broker.descriptors();
+        let owned_descriptors: Vec<CapabilityDescriptor> =
+            descriptors.iter().map(|d| (*d).clone()).collect();
+        let context_blocks = build_context_blocks_with_privacy(
+            &self.state_db,
+            &owned_descriptors,
+            extra_blocks,
+            privacy,
+        );
+        let (taints, data_class) = compute_context_taints_and_class(&context_blocks);
 
-        let mut tools: Vec<ToolSpec> = self
-            .broker
-            .descriptors()
+        let mut tools: Vec<ToolSpec> = descriptors
             .into_iter()
             .map(descriptor_to_tool_spec)
             .collect();
-        tools.extend(self.broker.aios_tool_specs());
+        for spec in self.broker.aios_tool_specs() {
+            if !privacy.allows_memory_read() && crate::memory_hub::is_memory_tool(&spec.name) {
+                continue;
+            }
+            tools.push(spec);
+        }
 
         let (profile, _) = self.gateway.resolve_profile("main")?;
         let run_token = self.gateway.issue_run_lease(task_id, "main", data_class);
