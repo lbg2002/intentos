@@ -171,3 +171,25 @@
   - 零环境变量 `cargo clippy --workspace --all-targets -- -D warnings`：**0 警告，0 错误**
   - 零环境变量 `cargo test --workspace -- --test-threads=1`：**`115/115` 测试（含 `tests/e2e_wave5.rs`）100% 通过**
   - `intentos-settings.py --smoke-ui`、`intentos-launcher.py --smoke-ui` 与全量 JS 语法检查：**0 警告，0 错误**
+
+---
+
+### 里程碑 8：`v0.2-M1: 统一智能体核心与可信底座加固`（GitHub Milestone #1，Issues `#1`–`#5` 全量收官）
+- **交付时间**：2026-11-15
+- **路线图与工程治理 (`docs/ROADMAP_v0.2.md`、`README.md`)**：
+  - 建立 `IntentOS v0.2 — Cognitive Shell` 五层认知壳层路线图、4 个 GitHub 里程碑（`v0.2-M1` 至 `v0.2-M4`）与 16 个结构化架构 Issue（`#1`–`#16`）。
+- **模块化智能体回合运行时与多后端受控 `CapabilityBroker` 桥接 (`backend_bridge/{turn_engine,turn_checkpoint,broker_bridge,providers_http,providers_cli}.rs`，Closes `#1`, `#2`)**：
+  - 将原 4,995 行单文件 `turn_engine.rs` 拆分为 5 个高内聚子模块，`turn_engine.rs` 精简至 **1,303 行**（`< 1,500` 行目标达成），并保留 100% 向后兼容重导出。
+  - 统一 `BackendExecutionMode`（`managed_broker` / `cli_broker_bridged` / `external_chat_only` / `offline_core`）；升级 `ZCode` / `Codex` / `Pi` CLI 后端通过 `<intentos_tool_call>` 受控协议接入 `CapabilityBroker`（最多 4 轮工具闭环），产出真实 `TraceDot`、`changeset_ids` 并与 HTTP 后端共享完全一致的 `PendingApproval` 挂起与 `resume_approved_turn` 续接闭环。
+- **`TurnEffectLedger` 副作用账本与失败回退防重放保证 (`turn_checkpoint.rs`、`turn_engine.rs`，Closes `#3`)**：
+  - 每次能力调用生成确定性 `step_id` 与 canonical JSON SHA-256 `idempotency_key`；当 HTTP/CLI 后端在第 1 轮已提交任意副作用（`effect > Effect::Observe`）后第 2 轮发生网络/5xx 故障时，硬性阻断向次级 CLI 或 `core.submit_intent` 回退重放（`side_effect_replay_prevented: true`），完整保留首轮 `changeset_ids` 供用户一键 `Undo`。
+- **三级隐私会话记忆隔离与全链路 `SensitiveDataGuard` 落盘脱敏 (`security_guard.rs`、`db.rs`、`memory_hub/`、`runtime.rs`、`turn_engine.rs`，Closes `#4`)**：
+  - 引入 `PrivacySessionPolicy`（`Standard` / `EphemeralReadOnly` / `StrictIsolated`），修复 `incognito: true` 泄露 `StateDb::list_active_memories()` 显式偏好的 P0 隐私缺陷，保证 Quick-Chat 与 Core L2 出网消息零偏好泄露、零会话/任务落盘。
+  - 引入 `SensitiveDataGuard` 与 `UnifiedTaskStateMachine`，在 `state.db` 与 `memory_hub.db` SQLite 写入前统一完成密钥/口令/私钥正则脱敏（`[REDACTED_SECRET]`），经磁盘原始字节扫描验证零明文密钥残留。
+- **认知型 L1 结构化目标识别 (`StructuredIntent`) 与复合意图子句完整性 (`intent_engine/{goal_schema,cognitive_parser,compound_splitter}.rs`、`decision.rs`、`router.rs`、`core.rs`，Closes `#5`)**：
+  - 新增 `StructuredIntent` 与 `CognitiveIntentKind`（`DeterministicCommand`、`RelativeAdjustment`、`GoalWorkspace`、`SystemDiagnosis`、`ProceduralOrKnowledge`、`CompoundTask`），使「今天想专心写论文」「电脑最近有点卡」「每日天气穿衣+待办简报」等高层目标自动结构化升级至 L2 规划，并在 `turn_engine.rs` 注入紧凑认知目标提示块。
+  - 修复 `split_compound_intent` 静默丢弃未解析子句缺陷：显式记录 `ClauseResolution` 与 `unresolved_clauses`，在线升级 L2 协同完成全部子句，离线诚实返回 `PartiallyCompleted` 并列出待办子目标；同时修复「查一下内网地址」「开启省电续航」「怎么批量查找日志」等路由盲区。
+- **`v0.2-M1` 全量门禁验证**：
+  - `cargo clippy --workspace --all-targets -- -D warnings`：**0 警告，0 错误**
+  - `cargo test --workspace -- --test-threads=1`：**`142/142` 测试（含新增 `tests/e2e_v0_2_m1.rs` 5 项端到端验收套件）100% 通过**
+  - 325 条基准评测准确率提升至 **`99.7%`（324/325）**，候选延迟 **P50 = `2.79 ms` / P95 = `5.92 ms`**，红队安全门禁 **`16/16` 全通过**。
