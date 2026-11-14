@@ -10,13 +10,16 @@
 //! - `grouped_candidates`: 7-group candidate generator (`direct_intent`, `apps`, `files`, `web`, `settings`, `skills`, `passthrough`) + `Alt+Enter` contextual action menu
 //! - `compound_splitter`: Compound multi-step intent splitter & sequential executor via `core.broker.dispatch`
 
+pub mod cognitive_parser;
 pub mod compound_splitter;
 pub mod context_resolver;
 pub mod fuzzy_scorer;
+pub mod goal_schema;
 pub mod grouped_candidates;
 pub mod pattern_compiler;
 pub mod slot_extractor;
 
+pub use cognitive_parser::{parse_structured_intent, parse_structured_intent_with_llm};
 pub use compound_splitter::{
     CompoundExecutionReport, CompoundPlan, PlannedStep, StepExecutionOutcome, execute_compound,
     split_compound_intent, split_into_clauses,
@@ -26,9 +29,10 @@ pub use context_resolver::{
 };
 pub use fuzzy_scorer::{
     FuzzyScoreBreakdown, MatchTier, ScoredCapabilityMatch, char_bigram_similarity,
-    is_mixed_pinyin_match, jaro_winkler_similarity, levenshtein_distance, rank_capabilities,
+    is_mixed_pinyin_match, jaro_winkler_similarity, levenshtein_distance,
     score_descriptor_entry, score_query_against_term,
 };
+pub use goal_schema::{CognitiveIntentKind, GoalContextHints, StructuredIntent};
 pub use grouped_candidates::{
     CandidateAction, CandidateGroup, GroupedCandidateItem, GroupedCandidateResponse,
     get_candidate_actions, query_grouped_candidates,
@@ -45,8 +49,29 @@ pub use slot_extractor::{
 };
 
 use crate::core::IntentOsCore;
+use crate::db::IndexDb;
+use intentos_protocol::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// Cognitive-aware capability ranking: delegates to `fuzzy_scorer::rank_capabilities` while
+/// capping single-capability confidence when the utterance is a higher-order cognitive goal,
+/// system diagnosis, how-to question, or multi-goal compound task requiring L2 planning.
+pub fn rank_capabilities(
+    query: &str,
+    compiler: &PatternCompiler,
+    index_db: Option<&IndexDb>,
+    limit: usize,
+) -> Vec<ScoredCapabilityMatch> {
+    let mut ranked = fuzzy_scorer::rank_capabilities(query, compiler, index_db, limit);
+    let structured = parse_structured_intent(query, &[]);
+    if structured.should_escalate_to_l2() {
+        for item in &mut ranked {
+            item.confidence = item.confidence.min(0.45);
+        }
+    }
+    ranked
+}
 
 /// Comprehensive intent analysis report returned by `"analyze_intent"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +82,7 @@ pub struct IntentAnalysisReport {
     pub context_resolution: ContextResolutionOutcome,
     pub universal_slots: UniversalSlots,
     pub compound_plan: CompoundPlan,
+    pub structured_intent: StructuredIntent,
     pub top_capabilities: Vec<ScoredCapabilityMatch>,
     pub recommended_capability_id: Option<String>,
     pub recommended_arguments: Value,
@@ -83,11 +109,21 @@ pub fn analyze_intent_full(
     let colloquial = analyze_colloquial_input(&effective_text);
     let universal_slots = extract_universal_slots(&effective_text, &core.resources);
     let compound_plan = split_compound_intent(core, &effective_text, compiler);
+    let owned_descriptors: Vec<CapabilityDescriptor> =
+        core.broker.descriptors().into_iter().cloned().collect();
+    let structured_intent = parse_structured_intent(&effective_text, &owned_descriptors);
     let top_capabilities = rank_capabilities(&effective_text, compiler, Some(&core.index_db), 5);
 
     let (recommended_capability_id, recommended_arguments, confidence, routing_tier) =
         if context_resolution.needs_clarification() {
             (None, json!({}), 0.0, "clarify".to_string())
+        } else if structured_intent.should_escalate_to_l2() {
+            (
+                None,
+                json!({}),
+                structured_intent.confidence,
+                "L2".to_string(),
+            )
         } else if compound_plan.is_compound && !compound_plan.steps.is_empty() {
             let first = &compound_plan.steps[0];
             (
@@ -140,6 +176,7 @@ pub fn analyze_intent_full(
         context_resolution,
         universal_slots,
         compound_plan,
+        structured_intent,
         top_capabilities,
         recommended_capability_id,
         recommended_arguments,
@@ -155,6 +192,7 @@ pub fn analyze_intent_full(
 /// - `"query_grouped_candidates"`
 /// - `"get_candidate_actions"`
 /// - `"analyze_intent"`
+/// - `"parse_structured_intent"`
 /// - `"execute_compound"`
 /// - `"record_candidate_feedback"`
 pub async fn handle_module_rpc(
@@ -183,6 +221,7 @@ pub async fn handle_module_rpc(
                     "query_grouped_candidates",
                     "get_candidate_actions",
                     "analyze_intent",
+                    "parse_structured_intent",
                     "execute_compound",
                     "record_candidate_feedback"
                 ]
@@ -270,6 +309,49 @@ pub async fn handle_module_rpc(
             let report =
                 analyze_intent_full(core, text, session_id, desktop_ctx.as_ref(), &compiler);
             Ok(serde_json::to_value(report)?)
+        }
+
+        "parse_structured_intent" => {
+            let raw_text = payload
+                .get("text")
+                .or_else(|| payload.get("query"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let session_id = payload.get("session_id").and_then(|v| v.as_str());
+            let desktop_ctx: Option<DesktopContext> = payload
+                .get("desktop_context")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let desktop_state_hint = payload
+                .get("desktop_state_hint")
+                .and_then(|v| v.as_str());
+            let use_llm = payload
+                .get("use_llm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let session = session_id.map(|sid| core.sessions.get_or_create(Some(sid)));
+            let ctx_res = resolve_context_references(
+                raw_text,
+                session.as_ref(),
+                Some(&core.state_db),
+                desktop_ctx.as_ref(),
+            );
+            let effective_text = ctx_res.effective_text();
+            let owned_descriptors: Vec<CapabilityDescriptor> =
+                descriptors.into_iter().cloned().collect();
+
+            let structured = if use_llm {
+                parse_structured_intent_with_llm(
+                    &core.gateway,
+                    effective_text,
+                    desktop_state_hint,
+                    &owned_descriptors,
+                )
+                .await
+            } else {
+                parse_structured_intent(effective_text, &owned_descriptors)
+            };
+            Ok(serde_json::to_value(structured)?)
         }
 
         "execute_compound" => {
@@ -625,6 +707,66 @@ mod tests {
                 .and_then(|p| p.get("is_compound"))
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+
+        // 4b. parse_structured_intent RPC action
+        let thesis_goal = handle_module_rpc(
+            &core,
+            "parse_structured_intent",
+            json!({ "text": "今天想专心写论文" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            thesis_goal.get("intent_type").and_then(|v| v.as_str()),
+            Some("goal_workspace")
+        );
+        assert_eq!(
+            thesis_goal.get("goal").and_then(|v| v.as_str()),
+            Some("进入论文写作专注状态")
+        );
+        assert_eq!(
+            thesis_goal.get("requires_planning").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            thesis_goal.get("recommended_route").and_then(|v| v.as_str()),
+            Some("L2")
+        );
+
+        let diag_goal = handle_module_rpc(
+            &core,
+            "parse_structured_intent",
+            json!({ "text": "电脑最近有点卡", "use_llm": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            diag_goal.get("intent_type").and_then(|v| v.as_str()),
+            Some("system_diagnosis")
+        );
+        assert_eq!(
+            diag_goal.get("recommended_route").and_then(|v| v.as_str()),
+            Some("L2")
+        );
+
+        let noisy_rel = handle_module_rpc(
+            &core,
+            "parse_structured_intent",
+            json!({ "text": "声音有点吵" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            noisy_rel.get("intent_type").and_then(|v| v.as_str()),
+            Some("relative_adjustment")
+        );
+        assert_eq!(
+            noisy_rel
+                .get("direct_capability")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str()),
+            Some("sound.volume.set")
         );
 
         // 5. execute_compound

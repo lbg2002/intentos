@@ -309,12 +309,6 @@ impl IntentRouter {
             };
         }
 
-        if looks_multi_step_complex(text) {
-            return RoutedIntent::EscalateL2 {
-                reason: "检测到跨能力多步复合意图，升级至 L2 Agent 循环".into(),
-            };
-        }
-
         // 0. Undo commands
         if matches!(
             lc.as_str(),
@@ -348,6 +342,20 @@ impl IntentRouter {
         // 1b. Explicit Memory ("记住 docx 用 WPS 打开" -> `open_with.docx`, or generic `user.preference`, A22)
         if let Some(routed) = self.try_route_explicit_memory(text) {
             return routed;
+        }
+
+        // 1c. Cognitive Goal, System Diagnosis, Procedural How-To & Multi-Goal Task Escalation (`v0.2-M1`)
+        let structured_goal = crate::intent_engine::parse_structured_intent(text, &[]);
+        if structured_goal.intent_type.requires_agent_planning() {
+            return RoutedIntent::EscalateL2 {
+                reason: structured_goal.escalation_summary(),
+            };
+        }
+
+        if looks_multi_step_complex(text) {
+            return RoutedIntent::EscalateL2 {
+                reason: "检测到跨能力多步复合意图，升级至 L2 Agent 循环".into(),
+            };
         }
 
         // 2. D5 System Settings, Scenes & Control Center Panels
@@ -496,9 +504,9 @@ impl IntentRouter {
         if let Some(caps) = quit_re.captures(t) {
             let target = caps[1].trim().trim_matches(['"', '\'', '“', '”', '「', '」']);
             let setting_words = [
-                "静音", "勿扰", "蓝牙", "wifi", "wi-fi", "无线", "夜灯", "护眼", "动画",
+                "静音", "勿扰", "蓝牙", "wifi", "wi-fi", "无线", "夜灯", "护眼", "防蓝光", "动画",
                 "飞行模式", "自动锁屏", "自然滚动", "轻触点击", "电脑", "深色", "浅色", "暗黑",
-                "省电", "性能", "麦克风", "秒数",
+                "省电", "续航", "性能", "麦克风", "秒数",
             ];
             let tl = target.to_ascii_lowercase();
             if !target.is_empty() && !setting_words.iter().any(|w| tl.contains(w)) {
@@ -715,6 +723,10 @@ impl IntentRouter {
                 reason: "安全策略拒绝模型或未登记指令直接修改任意 gsettings / 代理 / 快捷键（白名单保护 D20）"
                     .into(),
             });
+        }
+
+        if t.starts_with("怎么") || t.starts_with("如何") || t.starts_with("怎样") {
+            return None;
         }
 
         // Composite Scenes (`scene.apply`, §7.8.2 K, A11e)
@@ -1566,7 +1578,10 @@ impl IntentRouter {
                 summary: "查询当前电源模式".into(),
             });
         }
-        if matches!(t, "省电模式" | "开启省电模式" | "切到省电模式") {
+        if matches!(
+            t,
+            "省电模式" | "开启省电模式" | "切到省电模式" | "开启省电续航" | "省电续航"
+        ) {
             return Some(RoutedIntent::ExecuteL0 {
                 capability_id: "power.profile.set".into(),
                 arguments: json!({ "profile": "power-saver" }),
@@ -1772,7 +1787,35 @@ impl IntentRouter {
 
         if matches!(
             lc.as_str(),
-            "我的 ip" | "我的ip" | "本机 ip" | "本机ip" | "查看 ip" | "查看ip地址" | "局域网 ip" | "my ip"
+            "我的 ip"
+                | "我的ip"
+                | "本机 ip"
+                | "本机ip"
+                | "查看 ip"
+                | "查看ip"
+                | "查看ip地址"
+                | "查看 ip 地址"
+                | "局域网 ip"
+                | "局域网ip"
+                | "内网 ip"
+                | "内网ip"
+                | "查看内网ip"
+                | "查看内网 ip"
+                | "查看局域网ip"
+                | "查看局域网 ip"
+                | "查一下内网地址"
+                | "查一下局域网地址"
+                | "查一下内网ip"
+                | "查一下内网 ip"
+                | "查一下本机ip"
+                | "查一下本机 ip"
+                | "查一下ip"
+                | "查一下 ip"
+                | "查一下ip地址"
+                | "内网地址"
+                | "局域网地址"
+                | "本机地址"
+                | "my ip"
         ) {
             return Some(RoutedIntent::ExecuteL0 {
                 capability_id: "network.ip".into(),
@@ -1969,6 +2012,16 @@ impl IntentRouter {
         for (prefix, engine_opt) in search_prefixes {
             if lc.starts_with(prefix) {
                 let query = t[prefix.len()..].trim();
+                if *prefix == "查一下" {
+                    let qlc = query.to_ascii_lowercase();
+                    let is_local_net_query = (query.contains("内网")
+                        || query.contains("局域网")
+                        || query.contains("本机"))
+                        && (query.contains("地址") || qlc.contains("ip"));
+                    if is_local_net_query {
+                        continue;
+                    }
+                }
                 if !query.is_empty() {
                     let eng = engine_opt
                         .unwrap_or(&self.resources.app_config().web.default_search)
@@ -2639,6 +2692,13 @@ fn strip_open_verb(s: &str) -> Option<&str> {
     for p in prefixes {
         if let Some(rest) = s.strip_prefix(p) {
             let trimmed = rest.trim();
+            if (p == "开" || p == "开 ")
+                && (trimmed.starts_with('始')
+                    || trimmed.starts_with('会')
+                    || trimmed.starts_with("组会"))
+            {
+                continue;
+            }
             if !trimmed.is_empty() {
                 return Some(trimmed);
             }
@@ -2796,6 +2856,84 @@ mod tests {
                     assert_eq!(arguments["app_id"], expected_app_id, "query={query}");
                 }
                 other => panic!("expected ExecuteL0 app.launch for {query}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn eval_blind_spots_and_cognitive_goals_route_accurately() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let idx = Arc::new(IndexDb::open_or_rebuild(&tmp.path().join("idx.db")).unwrap());
+        let fs_eng = Arc::new(
+            SafeFsEngine::new(
+                vec![tmp.path().to_path_buf()],
+                vec![],
+                tmp.path().join("undo"),
+                tmp.path().join("trash"),
+            )
+            .unwrap(),
+        );
+        let res = Arc::new(ResourceEngine::new(idx, fs_eng, AppConfig::default()));
+        let router = IntentRouter::new(res);
+
+        // 1. Local LAN / intranet IP queries must route to `network.ip` L0, NEVER `web.search`
+        for ip_query in ["查一下内网地址", "内网地址", "局域网地址", "查看内网IP"] {
+            match router.route_text(ip_query, false) {
+                RoutedIntent::ExecuteL0 { capability_id, .. } => {
+                    assert_eq!(capability_id, "network.ip", "ip_query={ip_query}");
+                }
+                other => panic!("expected ExecuteL0 network.ip for {ip_query}, got {other:?}"),
+            }
+        }
+        // While genuine web search with `查一下` still routes to `web.search`
+        match router.route_text("查一下 Bubblewrap 沙箱参数", false) {
+            RoutedIntent::ExecuteL0 { capability_id, .. } => {
+                assert_eq!(capability_id, "web.search");
+            }
+            other => panic!("expected ExecuteL0 web.search, got {other:?}"),
+        }
+
+        // 2. Power-saver colloquial queries route cleanly to `power.profile.set` (`power-saver`)
+        for pwr_query in ["开启省电续航", "省电续航"] {
+            match router.route_text(pwr_query, false) {
+                RoutedIntent::ExecuteL0 {
+                    capability_id,
+                    arguments,
+                    ..
+                } => {
+                    assert_eq!(capability_id, "power.profile.set", "pwr_query={pwr_query}");
+                    assert_eq!(arguments["profile"], "power-saver", "pwr_query={pwr_query}");
+                }
+                other => {
+                    panic!("expected ExecuteL0 power.profile.set for {pwr_query}, got {other:?}")
+                }
+            }
+        }
+
+        // 3. Procedural how-to & goal-level utterances escalate to L2 with structured goal reason
+        for l2_utterance in [
+            "怎么批量查找最近7天修改过的日志",
+            "怎么批量重命名图片",
+            "如何批量压缩旧日志",
+            "今天想专心写论文",
+            "开始写论文",
+            "进入论文写作状态",
+            "我准备开组会了",
+            "电脑最近有点卡",
+            "系统好慢帮我查查",
+            "我的软件怎么又启动不了了",
+            "下载目录太乱了",
+            "帮我整理下载文件夹",
+            "帮我看下今天的天气，告诉我早上起床穿什么衣服，然后告诉我今天最应该完成哪些任务",
+        ] {
+            match router.route_text(l2_utterance, false) {
+                RoutedIntent::EscalateL2 { reason } => {
+                    assert!(
+                        reason.contains("目标："),
+                        "expected structured goal summary in reason for {l2_utterance}, got: {reason}"
+                    );
+                }
+                other => panic!("expected EscalateL2 for {l2_utterance}, got {other:?}"),
             }
         }
     }
