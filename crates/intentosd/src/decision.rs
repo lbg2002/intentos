@@ -1,23 +1,28 @@
 #![forbid(unsafe_code)]
 
-//! L1 Typed Decision Adapter (`WP10`, §4.2):
+//! L1 Typed Decision Adapter & Empirical Calibration (`WP10`, §4.2, `M1.1-H08`):
 //! - Implements Jev-style typed decision primitives: `binary`, `choice`, and `score`
-//! - Uses Fast LLM structured JSON via `ModelGateway` when configured, with calibrated local lexical-semantic fallback
+//! - Uses progressive L0 → L1 → L2 structured resolution (`resolve_progressive_intent`)
+//! - Tracks honest [`ConfidenceProvenance`] (`HeuristicLexical`, `FastLlmUnverified`, `EmpiricalCalibrated`)
+//!   and down-weights capabilities with repeated user Undo/rejection toward `Clarify` / `EscalateL2`
+//!   while stabilizing confirmed executions
 //! - Enforces the **One-Way Escalation Invariant**: L1 may route to a registered capability, ask for clarification,
 //!   escalate to L2, or raise taint (`LocalUntrusted`), NEVER relax `PolicyEngine` or extract unvalidated shell strings.
 
-use crate::db::StateDb;
+use crate::db::{StateDb, StepExecState};
 use crate::gateway::ModelGateway;
+pub use crate::intent_engine::cognitive_parser::resolve_progressive_intent;
+pub use crate::intent_engine::goal_schema::ConfidenceProvenance;
 use crate::intent_engine::{
     CognitiveIntentKind, StructuredIntent, parse_structured_intent,
     parse_structured_intent_with_llm,
 };
 use intentos_protocol::{
-    CandidateItem, CandidateKind, CapabilityDescriptor, DecisionAnswer, DecisionQuestion,
-    DecisionRequest, Taint,
+    CandidateItem, CandidateKind, CapabilityDescriptor, ChangeSetStatus, DecisionAnswer,
+    DecisionQuestion, DecisionRequest, RouteLayer, Taint, TaskStatus,
 };
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -40,6 +45,239 @@ pub enum L1DecisionOutcome {
     },
 }
 
+/// User outcome signal recorded for empirical decision calibration (`H08`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationFeedbackOutcome {
+    /// Execution succeeded and was kept/confirmed by the user.
+    Confirmed,
+    /// User explicitly reverted the capability's changeset (`undo`).
+    UserUndone,
+    /// User explicitly rejected/denied the pending approval or candidate suggestion.
+    UserRejected,
+}
+
+/// Historical outcome counts aggregated from [`StateDb`] for a capability (`H08`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmpiricalCalibrationStats {
+    pub confirmed_count: u32,
+    pub rejected_or_undone_count: u32,
+}
+
+impl EmpiricalCalibrationStats {
+    pub fn sample_count(self) -> u32 {
+        self.confirmed_count
+            .saturating_add(self.rejected_or_undone_count)
+    }
+}
+
+/// Result of applying empirical Beta-Binomial calibration to a raw score (`H08`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibratedConfidence {
+    pub confidence: f64,
+    pub provenance: ConfidenceProvenance,
+    pub stats: EmpiricalCalibrationStats,
+}
+
+/// Query historical execution, Undo (`ChangeSetStatus::Undone`), approval-denial (`StepExecState::Denied`),
+/// and audit calibration records from [`StateDb`] for `capability_id`.
+///
+/// Deduplicates by `(task_id, capability_id)` so a single task writing both a `ChangeSet` and an
+/// `audit_log` entry is counted once (with `Undone` taking precedence over initial `Applied`).
+pub fn query_empirical_calibration_stats(
+    state_db: &StateDb,
+    capability_id: &str,
+) -> EmpiricalCalibrationStats {
+    let cap = capability_id.trim();
+    if cap.is_empty() {
+        return EmpiricalCalibrationStats::default();
+    }
+
+    let mut stats = EmpiricalCalibrationStats::default();
+    let mut seen_task_caps: HashSet<(String, String)> = HashSet::new();
+
+    // 1. Authoritative ChangeSets: `Undone` = explicit user undo; `Applied` = kept execution.
+    if let Ok(changesets) = state_db.list_changesets(128) {
+        for cs in changesets {
+            if cs.capability_id != cap {
+                continue;
+            }
+            if !cs.task_id.is_empty() && !seen_task_caps.insert((cs.task_id.clone(), cap.into())) {
+                continue;
+            }
+            match cs.status {
+                ChangeSetStatus::Undone => {
+                    stats.rejected_or_undone_count =
+                        stats.rejected_or_undone_count.saturating_add(1);
+                }
+                ChangeSetStatus::Applied => {
+                    stats.confirmed_count = stats.confirmed_count.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Step execution logs on cancelled tasks (`deny_pending` sets `StepExecState::Denied`).
+    if let Ok(tasks) = state_db.list_tasks(64) {
+        for task in tasks {
+            if task.status != TaskStatus::Cancelled {
+                continue;
+            }
+            if let Ok(rows) = state_db.list_step_execution_logs_for_task(&task.id) {
+                for row in rows {
+                    if row.capability_id == cap
+                        && row.exec_state == StepExecState::Denied
+                        && seen_task_caps.insert((task.id.clone(), cap.into()))
+                    {
+                        stats.rejected_or_undone_count =
+                            stats.rejected_or_undone_count.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Recent audit & explicit calibration feedback entries.
+    for entry in state_db.list_recent_audit(200) {
+        let Some(entry_cap) = entry.get("capability_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if entry_cap != cap {
+            continue;
+        }
+        if let Some(tid) = entry.get("task_id").and_then(Value::as_str)
+            && !tid.is_empty()
+            && !seen_task_caps.insert((tid.to_string(), cap.into()))
+        {
+            continue;
+        }
+
+        let decision = entry
+            .get("decision")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if decision == "deny"
+            || matches!(
+                status.as_str(),
+                "denied"
+                    | "rejected"
+                    | "undone"
+                    | "reverted"
+                    | "user_rejected"
+                    | "user_undone"
+                    | "cancelled"
+            )
+        {
+            stats.rejected_or_undone_count = stats.rejected_or_undone_count.saturating_add(1);
+        } else if decision == "allow"
+            && matches!(
+                status.as_str(),
+                "executed" | "verified" | "completed" | "passed" | "accepted" | "confirmed"
+            )
+        {
+            stats.confirmed_count = stats.confirmed_count.saturating_add(1);
+        }
+    }
+
+    stats
+}
+
+/// Apply empirical calibration from [`StateDb`] to a raw heuristic or Fast-LLM confidence score (`H08`).
+///
+/// - When `sample_count == 0`, preserves `raw_provenance` (`HeuristicLexical` or `FastLlmUnverified`)
+///   so uncalibrated scores are never misrepresented as empirically calibrated probabilities.
+/// - When `sample_count > 0`, computes an asymmetric safety-weighted Beta posterior
+///   (`prior_strength = 4.0`, `rejection_weight = 1.6`) and upgrades provenance to
+///   `ConfidenceProvenance::EmpiricalCalibrated { sample_count }`:
+///   - Repeated Undo / rejection down-weights confidence into `Clarify` (`0.50..0.85`) and then `EscalateL2` (`< 0.50`).
+///   - Confirmed executions stabilize confidence above `direct_threshold`.
+pub fn apply_empirical_calibration(
+    state_db: &StateDb,
+    capability_id: &str,
+    raw_confidence: f64,
+    raw_provenance: ConfidenceProvenance,
+) -> CalibratedConfidence {
+    let raw = raw_confidence.clamp(0.0, 0.98);
+    let stats = query_empirical_calibration_stats(state_db, capability_id);
+    let n = stats.sample_count();
+    if n == 0 {
+        let honest_prov = match raw_provenance {
+            ConfidenceProvenance::EmpiricalCalibrated { .. } => {
+                ConfidenceProvenance::HeuristicLexical
+            }
+            other => other,
+        };
+        return CalibratedConfidence {
+            confidence: raw,
+            provenance: honest_prov,
+            stats,
+        };
+    }
+
+    const PRIOR_STRENGTH: f64 = 4.0;
+    const REJECTION_WEIGHT: f64 = 1.6;
+
+    let alpha = PRIOR_STRENGTH * raw + (stats.confirmed_count as f64);
+    let beta =
+        PRIOR_STRENGTH * (1.0 - raw) + REJECTION_WEIGHT * (stats.rejected_or_undone_count as f64);
+    let calibrated = (alpha / (alpha + beta)).clamp(0.05, 0.98);
+
+    CalibratedConfidence {
+        confidence: calibrated,
+        provenance: ConfidenceProvenance::EmpiricalCalibrated { sample_count: n },
+        stats,
+    }
+}
+
+/// Apply empirical calibration in-place to a [`StructuredIntent`] when it targets a concrete single-step capability.
+pub fn apply_empirical_calibration_to_intent(state_db: &StateDb, intent: &mut StructuredIntent) {
+    if intent.intent_type.requires_agent_planning() || intent.requires_planning {
+        return;
+    }
+
+    let target_cap = intent
+        .direct_capability
+        .as_ref()
+        .map(|(id, _)| id.clone())
+        .or_else(|| {
+            if intent.required_capabilities.len() == 1 {
+                intent.required_capabilities.first().cloned()
+            } else {
+                None
+            }
+        });
+
+    let Some(cap_id) = target_cap else {
+        return;
+    };
+
+    let cal = apply_empirical_calibration(
+        state_db,
+        &cap_id,
+        intent.confidence,
+        intent.confidence_provenance,
+    );
+    intent.confidence = cal.confidence;
+    intent.confidence_provenance = cal.provenance;
+
+    if cal.provenance.is_calibrated() {
+        if cal.confidence < 0.50 {
+            intent.recommended_route = RouteLayer::L2;
+            intent.requires_planning = true;
+            intent.direct_capability = None;
+        } else if cal.confidence < 0.85 && intent.recommended_route == RouteLayer::L0 {
+            intent.recommended_route = RouteLayer::L1;
+        }
+    }
+}
+
 pub struct DecisionAdapter {
     gateway: Arc<ModelGateway>,
     state_db: Arc<StateDb>,
@@ -57,6 +295,55 @@ impl DecisionAdapter {
             margin_threshold: 0.30,
             clarify_threshold: 0.50,
         }
+    }
+
+    /// Record explicit user outcome feedback (confirmed execution, undo, or rejection) into [`StateDb`]
+    /// so future L1 decisions empirically calibrate confidence (`H08`).
+    pub fn record_outcome_feedback(
+        &self,
+        query: &str,
+        capability_id: &str,
+        outcome: CalibrationFeedbackOutcome,
+    ) {
+        let (decision, status, cal_action, prob) = match outcome {
+            CalibrationFeedbackOutcome::Confirmed => ("allow", "confirmed", "user_confirmed", 0.95),
+            CalibrationFeedbackOutcome::UserUndone => ("allow", "undone", "user_undone", 0.20),
+            CalibrationFeedbackOutcome::UserRejected => ("deny", "rejected", "user_rejected", 0.10),
+        };
+        self.state_db.record_decision_calibration(
+            query,
+            capability_id,
+            prob,
+            0.0,
+            0.0,
+            0.0,
+            cal_action,
+        );
+        let _ = self.state_db.record_audit(
+            None,
+            capability_id,
+            "decision_calibration",
+            "observe",
+            decision,
+            status,
+            &json!({ "query": query }),
+            Some(cal_action),
+        );
+    }
+
+    /// Query calibrated confidence for `capability_id` against this adapter's [`StateDb`].
+    pub fn apply_empirical_calibration(
+        &self,
+        capability_id: &str,
+        raw_confidence: f64,
+        raw_provenance: ConfidenceProvenance,
+    ) -> CalibratedConfidence {
+        apply_empirical_calibration(
+            &self.state_db,
+            capability_id,
+            raw_confidence,
+            raw_provenance,
+        )
     }
 
     /// Evaluate generic typed decision questions (`binary`, `choice`, `score`, §4.2).
@@ -124,29 +411,55 @@ impl DecisionAdapter {
         Ok(serde_json::from_value(arr)?)
     }
 
-    /// Structured cognitive goal evaluation (`v0.2-M1`): parses `raw_text` into a [`StructuredIntent`],
-    /// separating goal workspaces, system diagnostics, procedural questions, and compound tasks
-    /// from single-capability system settings.
+    /// Structured cognitive goal evaluation (`v0.2-M1` / `H08`): parses `raw_text` into a [`StructuredIntent`]
+    /// and applies empirical calibration from [`StateDb`].
     pub fn evaluate_structured_goal(
         &self,
         raw_text: &str,
         capabilities: &[CapabilityDescriptor],
     ) -> StructuredIntent {
-        parse_structured_intent(raw_text, capabilities)
+        let mut intent = parse_structured_intent(raw_text, capabilities);
+        apply_empirical_calibration_to_intent(&self.state_db, &mut intent);
+        intent
     }
 
-    /// Async Fast-LLM structured cognitive goal evaluation with local deterministic fallback.
+    /// Async Fast-LLM structured cognitive goal evaluation with local deterministic fallback and calibration.
     pub async fn evaluate_structured_goal_with_llm(
         &self,
         raw_text: &str,
         desktop_state_hint: Option<&str>,
         capabilities: &[CapabilityDescriptor],
     ) -> StructuredIntent {
-        parse_structured_intent_with_llm(&self.gateway, raw_text, desktop_state_hint, capabilities)
-            .await
+        let mut intent = parse_structured_intent_with_llm(
+            &self.gateway,
+            raw_text,
+            desktop_state_hint,
+            capabilities,
+        )
+        .await;
+        apply_empirical_calibration_to_intent(&self.state_db, &mut intent);
+        intent
     }
 
-    /// L1 Routing & Calibration step between L0 deterministic grammar and L2 Agent Runtime (§4.1, §4.2).
+    /// Progressive L0 → L1 → L2 cognitive resolution (`H08`), invoking compact Fast LLM only on
+    /// genuinely ambiguous L1 utterances and calibrating confidence against [`StateDb`].
+    pub async fn resolve_progressive_goal(
+        &self,
+        raw_text: &str,
+        context_hint: Option<&str>,
+        capabilities: &[CapabilityDescriptor],
+    ) -> StructuredIntent {
+        resolve_progressive_intent(
+            &self.gateway,
+            Some(&self.state_db),
+            raw_text,
+            context_hint,
+            capabilities,
+        )
+        .await
+    }
+
+    /// L1 Routing & Calibration step between L0 deterministic grammar and L2 Agent Runtime (§4.1, §4.2, `H08`).
     pub fn classify_colloquial_intent(
         &self,
         text: &str,
@@ -162,10 +475,10 @@ impl DecisionAdapter {
 
         let multistep_prob = estimate_multistep_probability(trimmed);
         let owned_caps: Vec<CapabilityDescriptor> = descriptors.iter().copied().cloned().collect();
-        let structured = self.evaluate_structured_goal(trimmed, &owned_caps);
+        let raw_structured = parse_structured_intent(trimmed, &owned_caps);
 
         if matches!(
-            structured.intent_type,
+            raw_structured.intent_type,
             CognitiveIntentKind::GoalWorkspace
                 | CognitiveIntentKind::SystemDiagnosis
                 | CognitiveIntentKind::ProceduralOrKnowledge
@@ -174,14 +487,14 @@ impl DecisionAdapter {
             self.state_db.record_decision_calibration(
                 trimmed,
                 "escalate_l2_structured_goal",
-                structured.confidence,
+                raw_structured.confidence,
                 1.0,
                 multistep_prob.max(0.85),
                 injection_score,
                 "escalate_l2",
             );
             return L1DecisionOutcome::EscalateL2 {
-                reason: structured.escalation_summary(),
+                reason: raw_structured.escalation_summary(),
                 extra_taint,
             };
         }
@@ -202,27 +515,99 @@ impl DecisionAdapter {
             };
         }
 
-        if structured.intent_type == CognitiveIntentKind::RelativeAdjustment
-            && let Some((cap_id, args)) = structured.direct_capability
+        if raw_structured.intent_type == CognitiveIntentKind::RelativeAdjustment
+            && let Some((cap_id, args)) = raw_structured.direct_capability.clone()
             && (descriptors.is_empty() || descriptors.iter().any(|d| d.id == cap_id))
         {
+            let cal = apply_empirical_calibration(
+                &self.state_db,
+                &cap_id,
+                raw_structured.confidence,
+                raw_structured.confidence_provenance,
+            );
+            let prob = cal.confidence;
+
+            if prob >= self.direct_threshold {
+                self.state_db.record_decision_calibration(
+                    trimmed,
+                    &cap_id,
+                    prob,
+                    0.50,
+                    multistep_prob,
+                    injection_score,
+                    "execute_l1",
+                );
+                return L1DecisionOutcome::Execute {
+                    capability_id: cap_id,
+                    arguments: args,
+                    summary: format!(
+                        "L1 状态微调匹配：{} (p={:.2}, prov={})",
+                        raw_structured.goal,
+                        prob,
+                        cal.provenance.as_str()
+                    ),
+                    probability: prob,
+                    extra_taint,
+                };
+            }
+
+            if prob >= self.clarify_threshold {
+                let matched_desc = descriptors.iter().copied().find(|d| d.id == cap_id);
+                let title = matched_desc
+                    .map(|d| d.summary.clone())
+                    .unwrap_or_else(|| raw_structured.goal.clone());
+                let badge = matched_desc
+                    .map(|d| format!("L1·{}", d.max_effect().risk_badge()))
+                    .unwrap_or_else(|| "L1·设置".to_string());
+                let candidate = CandidateItem {
+                    id: format!("l1:{}:{}", cap_id, trimmed),
+                    kind: CandidateKind::Capability,
+                    title,
+                    subtitle: format!(
+                        "能力 `{}` · 校准置信分 {:.0}%（历史撤销/拒绝 {} 次）",
+                        cap_id,
+                        (prob * 100.0).min(99.0),
+                        cal.stats.rejected_or_undone_count
+                    ),
+                    badge,
+                    score: prob * 100.0,
+                    capability_id: Some(cap_id.clone()),
+                    arguments: args,
+                    resource_uri: None,
+                };
+                self.state_db.record_decision_calibration(
+                    trimmed,
+                    &cap_id,
+                    prob,
+                    0.20,
+                    multistep_prob,
+                    injection_score,
+                    "clarify_l1",
+                );
+                return L1DecisionOutcome::Clarify {
+                    prompt: format!(
+                        "该操作此前曾被撤销或拒绝，请确认是否执行（校准 p={:.2}）：",
+                        prob
+                    ),
+                    candidates: vec![candidate],
+                    extra_taint,
+                };
+            }
+
             self.state_db.record_decision_calibration(
                 trimmed,
                 &cap_id,
-                structured.confidence,
-                0.50,
+                prob,
+                0.0,
                 multistep_prob,
                 injection_score,
-                "execute_l1",
+                "escalate_l2",
             );
-            return L1DecisionOutcome::Execute {
-                capability_id: cap_id,
-                arguments: args,
-                summary: format!(
-                    "L1 状态微调匹配：{} (p={:.2})",
-                    structured.goal, structured.confidence
+            return L1DecisionOutcome::EscalateL2 {
+                reason: format!(
+                    "能力 `{}` 经历史反馈校准后置信度降至 {:.2}，升级至 L2 智能体审慎处理",
+                    cap_id, prob
                 ),
-                probability: structured.confidence,
                 extra_taint,
             };
         }
@@ -256,16 +641,23 @@ impl DecisionAdapter {
         let top_raw = raw_scores[0].1;
         let second_raw = raw_scores.get(1).map(|x| x.1).unwrap_or(0.0);
 
-        // Calibrated probability penalized by competing capability ambiguity (§4.2: p >= 0.85 & margin >= 0.30)
+        // Penalize competing capability ambiguity, then apply empirical calibration from StateDb (`H08`)
         let competition_penalty = if second_raw > 0.45 {
             (second_raw - 0.35) * 0.28
         } else {
             second_raw * 0.08
         };
-        let top_prob = (top_raw - competition_penalty).clamp(0.0, 0.98);
+        let uncalibrated_top = (top_raw - competition_penalty).clamp(0.0, 0.98);
+        let best_desc = raw_scores[0].0;
+        let cal = apply_empirical_calibration(
+            &self.state_db,
+            &best_desc.id,
+            uncalibrated_top,
+            ConfidenceProvenance::HeuristicLexical,
+        );
+        let top_prob = cal.confidence;
         let second_prob = second_raw.clamp(0.0, 0.92);
         let margin = (top_prob - second_prob).max(0.0);
-        let best_desc = raw_scores[0].0;
 
         if top_prob >= self.direct_threshold
             && margin >= self.margin_threshold
@@ -283,7 +675,12 @@ impl DecisionAdapter {
             return L1DecisionOutcome::Execute {
                 capability_id: best_desc.id.clone(),
                 arguments: args,
-                summary: format!("L1 决策匹配 {} (p={:.2})", best_desc.summary, top_prob),
+                summary: format!(
+                    "L1 决策匹配 {} (p={:.2}, prov={})",
+                    best_desc.summary,
+                    top_prob,
+                    cal.provenance.as_str()
+                ),
                 probability: top_prob,
                 extra_taint,
             };
@@ -294,18 +691,25 @@ impl DecisionAdapter {
                 .iter()
                 .take(4)
                 .map(|(d, sc)| {
+                    let d_cal = apply_empirical_calibration(
+                        &self.state_db,
+                        &d.id,
+                        *sc,
+                        ConfidenceProvenance::HeuristicLexical,
+                    );
                     let args = fill_deterministic_slots(trimmed, d).unwrap_or_else(|| json!({}));
                     CandidateItem {
                         id: format!("l1:{}:{}", d.id, trimmed),
                         kind: CandidateKind::Capability,
                         title: d.summary.clone(),
                         subtitle: format!(
-                            "能力 `{}` · 置信分 {:.0}%",
+                            "能力 `{}` · 置信分 {:.0}% ({})",
                             d.id,
-                            (sc * 100.0).min(99.0)
+                            (d_cal.confidence * 100.0).min(99.0),
+                            d_cal.provenance.as_str()
                         ),
                         badge: format!("L1·{}", d.max_effect().risk_badge()),
-                        score: *sc * 100.0,
+                        score: d_cal.confidence * 100.0,
                         capability_id: Some(d.id.clone()),
                         arguments: args,
                         resource_uri: None,
@@ -446,7 +850,15 @@ pub fn score_prompt_injection_risk(text: &str) -> f64 {
 
 pub fn estimate_multistep_probability(text: &str) -> f64 {
     let t = text.trim();
-    if t.starts_with("怎么") || t.starts_with("如何") || t.contains("命令是什么") {
+    if t.starts_with("怎么")
+        || t.starts_with("如何")
+        || t.starts_with("为什么")
+        || t.starts_with("什么是")
+        || t.ends_with("是什么")
+        || t.ends_with("是什么？")
+        || t.ends_with("是什么?")
+        || t.contains("命令是什么")
+    {
         return 0.90;
     }
     let connectors = [
@@ -623,7 +1035,8 @@ fn fill_deterministic_slots(text: &str, desc: &CapabilityDescriptor) -> Option<V
 mod tests {
     use super::*;
     use crate::config::BrainConfig;
-    use intentos_protocol::{Effect, ExecutionBackend, RouteLayer, UndoStrategy};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use intentos_protocol::{ChangeSet, Effect, ExecutionBackend, RouteLayer, UndoStrategy};
     use tempfile::tempdir;
 
     fn make_desc(
@@ -715,12 +1128,19 @@ mod tests {
         for (utterance, expected_kind) in [
             ("今天想专心写论文", CognitiveIntentKind::GoalWorkspace),
             ("我准备开组会了", CognitiveIntentKind::GoalWorkspace),
+            ("继续昨天的工作", CognitiveIntentKind::GoalWorkspace),
             ("电脑最近有点卡", CognitiveIntentKind::SystemDiagnosis),
+            ("修复软件启动异常", CognitiveIntentKind::SystemDiagnosis),
             ("下载目录太乱了", CognitiveIntentKind::GoalWorkspace),
             (
                 "怎么批量查找最近7天修改过的日志",
                 CognitiveIntentKind::ProceduralOrKnowledge,
             ),
+            (
+                "为什么蓝牙会自动断开",
+                CognitiveIntentKind::ProceduralOrKnowledge,
+            ),
+            ("Wayland 是什么", CognitiveIntentKind::ProceduralOrKnowledge),
             (
                 "帮我看下今天的天气，告诉我早上起床穿什么衣服，然后告诉我今天最应该完成哪些任务",
                 CognitiveIntentKind::CompoundTask,
@@ -837,6 +1257,134 @@ mod tests {
                 }
                 other => panic!("expected Execute network.ip for {ip_q}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn h08_empirical_calibration_tracks_provenance_and_downweights_undone_or_rejected_intents() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap());
+        let gw = Arc::new(ModelGateway::new(BrainConfig::default(), db.clone()).unwrap());
+        let adapter = DecisionAdapter::new(gw, db.clone());
+
+        let caps = [
+            make_desc(
+                "sound.volume.set",
+                "设置或调整系统音量",
+                &["音量", "声音"],
+                &[],
+            ),
+            make_desc(
+                "power.profile.set",
+                "切换系统电源性能模式",
+                &["省电模式", "性能模式", "平衡模式"],
+                &["profile"],
+            ),
+        ];
+        let refs: Vec<&CapabilityDescriptor> = caps.iter().collect();
+
+        // 1. Fresh DB (0 samples): provenance is honestly HeuristicLexical, NEVER falsely EmpiricalCalibrated!
+        let initial_goal = adapter.evaluate_structured_goal("声音有点吵", &caps);
+        assert_eq!(
+            initial_goal.confidence_provenance,
+            ConfidenceProvenance::HeuristicLexical
+        );
+        assert_eq!(
+            initial_goal.prerequisite_observe_capability.as_deref(),
+            Some("sound.volume.get")
+        );
+
+        // 2. Simulate user Undoing `sound.volume.set` via StateDb ChangeSet (`ChangeSetStatus::Undone`)
+        let now = Utc::now();
+        db.save_changeset(&ChangeSet {
+            id: "cs_undo_vol_1".into(),
+            task_id: "task_undo_vol_1".into(),
+            created_at: now,
+            capability_id: "sound.volume.set".into(),
+            layer: "L1".into(),
+            operations: Vec::new(),
+            backup_bytes: 0,
+            status: ChangeSetStatus::Undone,
+            undo_expires_at: now + ChronoDuration::hours(1),
+            summary: "undone volume down".into(),
+        })
+        .unwrap();
+
+        // After 1 Undo, confidence is empirically calibrated and down-weighted into `Clarify` (< 0.85, >= 0.50)!
+        let after_one_undo = adapter.evaluate_structured_goal("声音有点吵", &caps);
+        assert_eq!(
+            after_one_undo.confidence_provenance,
+            ConfidenceProvenance::EmpiricalCalibrated { sample_count: 1 }
+        );
+        assert!(
+            after_one_undo.confidence < 0.85 && after_one_undo.confidence >= 0.50,
+            "expected down-weighted confidence in Clarify band, got {}",
+            after_one_undo.confidence
+        );
+        match adapter.classify_colloquial_intent("声音有点吵", &refs) {
+            L1DecisionOutcome::Clarify { candidates, .. } => {
+                assert_eq!(
+                    candidates[0].capability_id.as_deref(),
+                    Some("sound.volume.set")
+                );
+            }
+            other => panic!("expected Clarify after 1 Undo, got {other:?}"),
+        }
+
+        // 3. Record two additional explicit user rejections -> confidence drops below 0.50 into `EscalateL2`!
+        adapter.record_outcome_feedback(
+            "声音有点吵",
+            "sound.volume.set",
+            CalibrationFeedbackOutcome::UserRejected,
+        );
+        adapter.record_outcome_feedback(
+            "声音有点吵",
+            "sound.volume.set",
+            CalibrationFeedbackOutcome::UserUndone,
+        );
+
+        let after_repeated_rejections = adapter.evaluate_structured_goal("声音有点吵", &caps);
+        assert_eq!(
+            after_repeated_rejections.confidence_provenance,
+            ConfidenceProvenance::EmpiricalCalibrated { sample_count: 3 }
+        );
+        assert!(
+            after_repeated_rejections.confidence < 0.50,
+            "expected < 0.50 after 3 undone/rejected outcomes, got {}",
+            after_repeated_rejections.confidence
+        );
+        assert_eq!(after_repeated_rejections.recommended_route, RouteLayer::L2);
+        match adapter.classify_colloquial_intent("声音有点吵", &refs) {
+            L1DecisionOutcome::EscalateL2 { reason, .. } => {
+                assert!(reason.contains("sound.volume.set"));
+            }
+            other => panic!("expected EscalateL2 after 3 rejections, got {other:?}"),
+        }
+
+        // 4. Conversely, confirmed executions (`power.profile.set`) stabilize high confidence with EmpiricalCalibrated!
+        for _ in 0..3 {
+            adapter.record_outcome_feedback(
+                "开启省电续航",
+                "power.profile.set",
+                CalibrationFeedbackOutcome::Confirmed,
+            );
+        }
+        let confirmed_goal = adapter.evaluate_structured_goal("开启省电续航", &caps);
+        assert_eq!(
+            confirmed_goal.confidence_provenance,
+            ConfidenceProvenance::EmpiricalCalibrated { sample_count: 3 }
+        );
+        assert!(confirmed_goal.confidence >= 0.95);
+        match adapter.classify_colloquial_intent("开启省电续航", &refs) {
+            L1DecisionOutcome::Execute {
+                capability_id,
+                probability,
+                ..
+            } => {
+                assert_eq!(capability_id, "power.profile.set");
+                assert!(probability >= 0.94);
+            }
+            other => panic!("expected stabilized Execute for confirmed capability, got {other:?}"),
         }
     }
 }
