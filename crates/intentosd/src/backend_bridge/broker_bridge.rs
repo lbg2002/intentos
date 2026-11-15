@@ -351,6 +351,16 @@ pub fn classify_capability_idempotency(
 ) -> ToolIdempotencyPolicy {
     let cap = capability_id.trim();
 
+    if let Some(canon_meta) = crate::meta_tools::normalize_meta_tool_id(cap) {
+        return match canon_meta {
+            crate::meta_tools::META_CAPABILITY_SEARCH
+            | crate::meta_tools::META_CAPABILITY_DESCRIBE => {
+                ToolIdempotencyPolicy::CacheUntilStateChanged
+            }
+            _ => ToolIdempotencyPolicy::AlwaysRefresh,
+        };
+    }
+
     if effect == Effect::Observe
         || ((cap.starts_with("memory_") || cap.starts_with("memory."))
             && !crate::security_guard::is_memory_write_tool(cap))
@@ -437,6 +447,9 @@ pub fn derive_tool_idempotency_policy(
 
 pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> String {
     let trimmed = tool_name.trim();
+    if let Some(canon_meta) = crate::meta_tools::normalize_meta_tool_id(trimmed) {
+        return canon_meta.to_string();
+    }
     if crate::memory_hub::is_memory_tool(trimmed) || crate::app_adapter::is_adapter_tool(trimmed) {
         return trimmed.replace('.', "_");
     }
@@ -444,10 +457,20 @@ pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> 
     if let Some(canonical) = snap.resolve_canonical_id(trimmed) {
         return canonical.to_string();
     }
-    trimmed.replace('_', ".")
+    let norm_us = trimmed.replace('.', "_");
+    let norm_dot = trimmed.replace('_', ".");
+    for spec in core.broker.aios_tool_specs() {
+        if spec.name == trimmed || spec.name == norm_us || spec.name.replace('_', ".") == norm_dot {
+            return spec.name;
+        }
+    }
+    norm_dot
 }
 
 pub fn resolve_capability_effect(core: &IntentOsCore, canonical_tool: &str) -> Effect {
+    if crate::meta_tools::is_meta_tool(canonical_tool) {
+        return Effect::Observe;
+    }
     if crate::security_guard::is_memory_write_tool(canonical_tool) {
         return Effect::Setting;
     }
@@ -639,8 +662,79 @@ pub async fn dispatch_broker_call_transactional(
         effect_ledger.privacy()
     };
 
-    let canonical_tool = resolve_tool_name_to_capability(&call.capability_id, core);
-    let sanitized_input_args = strip_untrusted_step_meta_fields(&call.arguments);
+    let (effective_cap_id, raw_call_args) = match crate::meta_tools::unwrap_capability_invoke(
+        core,
+        &call.capability_id,
+        &call.arguments,
+    ) {
+        crate::meta_tools::UnwrappedInvokeTarget::NotInvoke => {
+            (call.capability_id.clone(), call.arguments.clone())
+        }
+        crate::meta_tools::UnwrappedInvokeTarget::Target {
+            capability_id,
+            arguments,
+        } => (capability_id, arguments),
+        crate::meta_tools::UnwrappedInvokeTarget::Denied { reason } => {
+            if let Err(dim) = effect_ledger.budget_tracker.try_begin_tool_call() {
+                anyhow::bail!(
+                    "达到全局预算上限 ({})，已停止继续执行 capability.invoke",
+                    dim
+                );
+            }
+            let sanitized_deny_args = strip_untrusted_step_meta_fields(&call.arguments);
+            let canonical_args = canonicalize_json_for_dedup(&sanitized_deny_args);
+            let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+                "attempt_1".to_string()
+            } else {
+                step_ctx.attempt_id.trim().to_string()
+            };
+            let step_id = step_ctx
+                .trusted_step_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| effect_ledger.next_step_id());
+            let pre_epoch = effect_ledger.state_epoch();
+            let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+                ToolIdempotencyPolicy::AlwaysRefresh,
+                &step_id,
+                &attempt_id,
+                crate::meta_tools::META_CAPABILITY_INVOKE,
+                &canonical_args,
+                pre_epoch,
+            );
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id: step_id.clone(),
+                    idempotency_key: pre_idem_key,
+                    capability_id: crate::meta_tools::META_CAPABILITY_INVOKE.to_string(),
+                    canonical_args_json: canonical_args,
+                    effect: Effect::Observe,
+                    mutated_state: false,
+                    succeeded: false,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    cached_output: json!({ "error": reason, "was_denied": true }),
+                },
+                StepExecutionMeta {
+                    step_id,
+                    call_id: step_ctx.call_id,
+                    attempt_id,
+                    policy: ToolIdempotencyPolicy::AlwaysRefresh,
+                    pre_state_epoch: pre_epoch,
+                    post_state_epoch: pre_epoch,
+                    exec_state: StepExecState::Denied,
+                    is_error: true,
+                    was_denied: true,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                },
+            );
+            return Ok(BrokerDispatchOutcome::Denied { reason });
+        }
+    };
+
+    let canonical_tool = resolve_tool_name_to_capability(&effective_cap_id, core);
+    let sanitized_input_args = strip_untrusted_step_meta_fields(&raw_call_args);
     let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
         &canonical_tool,
         &sanitized_input_args,
@@ -866,7 +960,41 @@ pub async fn dispatch_broker_call_transactional(
         },
     );
 
-    match core.broker.dispatch(call).await {
+    let dispatch_res =
+        if let Some(canon_meta) = crate::meta_tools::normalize_meta_tool_id(&canonical_tool) {
+            let sess_opt = core.sessions.peek(session_id);
+            let meta_res = crate::meta_tools::execute_non_invoke_meta_tool(
+                core,
+                canon_meta,
+                &step_ctx.call_id,
+                sess_opt.as_ref(),
+                session_id,
+                effective_privacy,
+                &call.arguments,
+                effect_ledger,
+            )
+            .await;
+            if canon_meta == crate::meta_tools::META_RESOURCE_RESOLVE
+                && matches!(
+                    meta_res
+                        .data
+                        .pointer("/resolved/kind")
+                        .and_then(Value::as_str),
+                    Some("file" | "document" | "project")
+                )
+                && let Some(tp) = meta_res
+                    .data
+                    .pointer("/resolved/target")
+                    .and_then(Value::as_str)
+            {
+                effect_ledger.last_resource_path = Some(tp.to_string());
+            }
+            Ok(BrokerDispatchOutcome::Executed(meta_res))
+        } else {
+            core.broker.dispatch(call).await
+        };
+
+    match dispatch_res {
         Ok(BrokerDispatchOutcome::Executed(res)) => {
             let (exec_state, is_ok, was_denied, recovery_hint) =
                 classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
@@ -1203,12 +1331,87 @@ where
         return Ok(QuickChatToolExecOutcome::BudgetExhausted { dimension });
     }
 
-    let canonical_tool = resolve_tool_name_to_capability(fn_name, core);
+    let (effective_fn_name, effective_raw_args) =
+        match crate::meta_tools::unwrap_capability_invoke(core, fn_name, parsed_args) {
+            crate::meta_tools::UnwrappedInvokeTarget::NotInvoke => {
+                (fn_name.to_string(), parsed_args.clone())
+            }
+            crate::meta_tools::UnwrappedInvokeTarget::Target {
+                capability_id,
+                arguments,
+            } => (capability_id, arguments),
+            crate::meta_tools::UnwrappedInvokeTarget::Denied { reason } => {
+                let sanitized_deny_args = strip_untrusted_step_meta_fields(parsed_args);
+                let canonical_args = canonicalize_json_for_dedup(&sanitized_deny_args);
+                let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+                    "attempt_1".to_string()
+                } else {
+                    step_ctx.attempt_id.trim().to_string()
+                };
+                let step_id = step_ctx
+                    .trusted_step_id
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| effect_ledger.next_step_id());
+                let pre_epoch = effect_ledger.state_epoch();
+                let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+                    ToolIdempotencyPolicy::AlwaysRefresh,
+                    &step_id,
+                    &attempt_id,
+                    crate::meta_tools::META_CAPABILITY_INVOKE,
+                    &canonical_args,
+                    pre_epoch,
+                );
+                let err_val = json!({
+                    "error": reason,
+                    "was_denied": true,
+                });
+                effect_ledger.trace_dots.push(TraceDot::tool_err(
+                    crate::meta_tools::META_CAPABILITY_INVOKE,
+                    reason,
+                    0,
+                ));
+                effect_ledger.record_step_with_meta(
+                    StepExecutionRecord {
+                        step_id: step_id.clone(),
+                        idempotency_key: pre_idem_key,
+                        capability_id: crate::meta_tools::META_CAPABILITY_INVOKE.to_string(),
+                        canonical_args_json: canonical_args,
+                        effect: Effect::Observe,
+                        mutated_state: false,
+                        succeeded: false,
+                        changeset_id: None,
+                        verification_status: "Denied".to_string(),
+                        cached_output: err_val.clone(),
+                    },
+                    StepExecutionMeta {
+                        step_id,
+                        call_id: step_ctx.call_id,
+                        attempt_id,
+                        policy: ToolIdempotencyPolicy::AlwaysRefresh,
+                        pre_state_epoch: pre_epoch,
+                        post_state_epoch: pre_epoch,
+                        exec_state: StepExecState::Denied,
+                        is_error: true,
+                        was_denied: true,
+                        verification_status: "Denied".to_string(),
+                        recovery_hint: None,
+                    },
+                );
+                return Ok(QuickChatToolExecOutcome::ToolMessage {
+                    content: serde_json::to_string(&err_val)?,
+                    is_error: true,
+                    duplicate_blocked: false,
+                });
+            }
+        };
+
+    let canonical_tool = resolve_tool_name_to_capability(&effective_fn_name, core);
     let is_mem = crate::memory_hub::is_memory_tool(&canonical_tool);
     let is_adap = crate::app_adapter::is_adapter_tool(&canonical_tool);
 
     // Strip untrusted model-supplied step identity fields and enforce trusted session/privacy (`H05`)
-    let raw_sanitized_args = strip_untrusted_step_meta_fields(parsed_args);
+    let raw_sanitized_args = strip_untrusted_step_meta_fields(&effective_raw_args);
     let effective_args = match crate::security_guard::enforce_trusted_tool_context(
         &canonical_tool,
         &raw_sanitized_args,
@@ -1480,7 +1683,40 @@ where
         },
     );
 
-    match dispatcher(call.clone()).await {
+    let dispatch_res =
+        if let Some(canon_meta) = crate::meta_tools::normalize_meta_tool_id(&canonical_tool) {
+            let meta_res = crate::meta_tools::execute_non_invoke_meta_tool(
+                core,
+                canon_meta,
+                &step_ctx.call_id,
+                Some(session),
+                &session.session_id,
+                effective_privacy,
+                &call.arguments,
+                effect_ledger,
+            )
+            .await;
+            if canon_meta == crate::meta_tools::META_RESOURCE_RESOLVE
+                && matches!(
+                    meta_res
+                        .data
+                        .pointer("/resolved/kind")
+                        .and_then(Value::as_str),
+                    Some("file" | "document" | "project")
+                )
+                && let Some(tp) = meta_res
+                    .data
+                    .pointer("/resolved/target")
+                    .and_then(Value::as_str)
+            {
+                effect_ledger.last_resource_path = Some(tp.to_string());
+            }
+            Ok(BrokerDispatchOutcome::Executed(meta_res))
+        } else {
+            dispatcher(call.clone()).await
+        };
+
+    match dispatch_res {
         Ok(BrokerDispatchOutcome::Executed(mut res)) => {
             let (exec_state, is_ok, was_denied, recovery_hint) =
                 classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
@@ -2874,7 +3110,9 @@ pub fn evaluate_turn_goal_evidence(
         let compound = split_compound_intent(core, trimmed_user, &snap.pattern_compiler);
         let succeeded_caps: Vec<&str> = records
             .iter()
-            .filter(|r| r.succeeded)
+            .filter(|r| {
+                r.succeeded && !crate::meta_tools::is_discovery_only_meta_tool(&r.capability_id)
+            })
             .map(|r| r.capability_id.as_str())
             .collect();
 

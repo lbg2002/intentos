@@ -166,6 +166,10 @@ impl CapabilityBroker {
 
     /// Validate schema, evaluate policy, and either execute, request nonce-bound approval, or deny.
     pub async fn dispatch(&self, call: &CapabilityCall) -> anyhow::Result<BrokerDispatchOutcome> {
+        // M2-A Dynamic Discovery Meta-Tools (`capability.search/describe/invoke`, `app.discover`, `resource.resolve`, `task.verify`)
+        if crate::meta_tools::is_meta_tool(&call.capability_id) {
+            return Box::pin(self.dispatch_meta_tool(call)).await;
+        }
         // Wave 2 AIOS Native Tool Dispatch: `memory_hub` (`memory_*`) & `app_adapter` (`app_adapter_*`)
         if crate::memory_hub::is_memory_tool(&call.capability_id) {
             return self.dispatch_memory_tool(call);
@@ -395,6 +399,123 @@ impl CapabilityBroker {
                     .await
             }
         }
+    }
+
+    async fn dispatch_meta_tool(
+        &self,
+        call: &CapabilityCall,
+    ) -> anyhow::Result<BrokerDispatchOutcome> {
+        let Some(core) = self.core() else {
+            return Ok(BrokerDispatchOutcome::Denied {
+                reason: "meta_tools 尚未完成 Core 绑定".into(),
+            });
+        };
+        let Some(canon_meta) = crate::meta_tools::normalize_meta_tool_id(&call.capability_id)
+        else {
+            return Ok(BrokerDispatchOutcome::Denied {
+                reason: format!("未知元工具: {}", call.capability_id),
+            });
+        };
+
+        let task_policy = self.task_privacy_policy(&call.task_id);
+        let arg_policy = crate::security_guard::PrivacySessionPolicy::resolve(
+            call.arguments
+                .get("privacy_policy")
+                .and_then(|v| v.as_str())
+                .and_then(crate::security_guard::PrivacySessionPolicy::parse_policy_str),
+            call.arguments
+                .get("incognito")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            call.arguments.get("session_id").and_then(|v| v.as_str()),
+        );
+        let policy_rank = |p: crate::security_guard::PrivacySessionPolicy| match p {
+            crate::security_guard::PrivacySessionPolicy::Standard => 0u8,
+            crate::security_guard::PrivacySessionPolicy::EphemeralReadOnly => 1u8,
+            crate::security_guard::PrivacySessionPolicy::StrictIsolated => 2u8,
+        };
+        let effective_policy = if policy_rank(arg_policy) > policy_rank(task_policy) {
+            arg_policy
+        } else {
+            task_policy
+        };
+
+        if canon_meta == crate::meta_tools::META_CAPABILITY_INVOKE {
+            match crate::meta_tools::unwrap_capability_invoke(
+                &core,
+                &call.capability_id,
+                &call.arguments,
+            ) {
+                crate::meta_tools::UnwrappedInvokeTarget::Target {
+                    capability_id,
+                    arguments,
+                } => {
+                    let session_id = call
+                        .arguments
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&call.task_id);
+                    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
+                        &capability_id,
+                        &arguments,
+                        session_id,
+                        effective_policy,
+                    ) {
+                        Ok(a) => a,
+                        Err(reason) => return Ok(BrokerDispatchOutcome::Denied { reason }),
+                    };
+                    let mut inner_call = call.clone();
+                    inner_call.capability_id = capability_id;
+                    inner_call.arguments = trusted_args;
+                    return Box::pin(self.dispatch(&inner_call)).await;
+                }
+                crate::meta_tools::UnwrappedInvokeTarget::Denied { reason } => {
+                    self.record_audit_if_persistent(
+                        &call.task_id,
+                        crate::meta_tools::META_CAPABILITY_INVOKE,
+                        &format!("{:?}", call.origin),
+                        "observe",
+                        "deny",
+                        "denied",
+                        &call.arguments,
+                        Some(&reason),
+                    );
+                    return Ok(BrokerDispatchOutcome::Denied { reason });
+                }
+                crate::meta_tools::UnwrappedInvokeTarget::NotInvoke => {}
+            }
+        }
+
+        let session_id = call
+            .arguments
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&call.task_id);
+        let sess_opt = core.sessions.peek(session_id);
+        let temp_ledger =
+            crate::backend_bridge::turn_checkpoint::TurnEffectLedger::new(&call.task_id);
+        let res = crate::meta_tools::execute_non_invoke_meta_tool(
+            &core,
+            canon_meta,
+            &call.request_id,
+            sess_opt.as_ref(),
+            session_id,
+            effective_policy,
+            &call.arguments,
+            &temp_ledger,
+        )
+        .await;
+        self.record_audit_if_persistent(
+            &call.task_id,
+            canon_meta,
+            &format!("{:?}", call.origin),
+            "observe",
+            "allow",
+            &format!("{:?}", res.status),
+            &call.arguments,
+            Some(&res.message),
+        );
+        Ok(BrokerDispatchOutcome::Executed(res))
     }
 
     fn dispatch_memory_tool(&self, call: &CapabilityCall) -> anyhow::Result<BrokerDispatchOutcome> {

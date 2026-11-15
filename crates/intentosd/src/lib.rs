@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod intent_engine;
 pub mod ipc;
 pub mod memory_hub;
+pub mod meta_tools;
 pub mod policy;
 pub mod resource;
 pub mod router;

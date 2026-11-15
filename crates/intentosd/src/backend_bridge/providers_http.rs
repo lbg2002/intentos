@@ -390,7 +390,7 @@ pub async fn run_openai_tool_calling_turn_with_policy(
     }
     messages.push(json!({ "role": "user", "content": user_text }));
 
-    let openai_tools = if allow_broker_tools {
+    let mut openai_tools = if allow_broker_tools {
         build_quick_chat_openai_tools_with_policy(core, user_text, effective_privacy)
     } else {
         Vec::new()
@@ -623,7 +623,10 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                                         as usize,
                                     paused_call_id: call_id,
                                     paused_canonical_tool: canonical_tool,
-                                    paused_parsed_args: parsed_args,
+                                    paused_parsed_args: crate::meta_tools::effective_checkpoint_tool_args(
+                                        fn_name,
+                                        &parsed_args,
+                                    ),
                                     remaining_tool_calls: parse_remaining_openai_tool_calls(
                                         &tool_calls[tc_idx + 1..],
                                     ),
@@ -665,6 +668,16 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                             ));
                         }
                         QuickChatToolExecOutcome::ToolMessage { content, .. } => {
+                            let unlocked =
+                                crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                    fn_name, &content,
+                                );
+                            let _ = crate::meta_tools::merge_unlocked_openai_tools(
+                                &core.broker,
+                                effective_privacy,
+                                &unlocked,
+                                &mut openai_tools,
+                            );
                             messages.push(json!({
                                 "role": "tool",
                                 "tool_call_id": call_id,
@@ -821,7 +834,7 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
     }
     push_alternating(&mut anthropic_messages, "user", user_text);
 
-    let anthropic_tools = if allow_broker_tools {
+    let mut anthropic_tools = if allow_broker_tools {
         let openai_tools =
             build_quick_chat_openai_tools_with_policy(core, user_text, effective_privacy);
         build_quick_chat_anthropic_tools(&openai_tools)
@@ -991,7 +1004,10 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                                     as usize,
                                 paused_call_id: call_id.clone(),
                                 paused_canonical_tool: canonical_tool,
-                                paused_parsed_args: input_args.clone(),
+                                paused_parsed_args:
+                                    crate::meta_tools::effective_checkpoint_tool_args(
+                                        fn_name, input_args,
+                                    ),
                                 remaining_tool_calls: tool_uses[tu_idx + 1..].to_vec(),
                                 effect_ledger: effect_ledger.clone(),
                                 dialect: SuspendedDialectState::Anthropic {
@@ -1030,6 +1046,16 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                     QuickChatToolExecOutcome::ToolMessage {
                         content, is_error, ..
                     } => {
+                        let unlocked =
+                            crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                fn_name, &content,
+                            );
+                        let _ = crate::meta_tools::merge_unlocked_anthropic_tools(
+                            &core.broker,
+                            effective_privacy,
+                            &unlocked,
+                            &mut anthropic_tools,
+                        );
                         tool_result_blocks.push(json!({
                             "type": "tool_result",
                             "tool_use_id": call_id,
@@ -1067,10 +1093,15 @@ pub async fn continue_resumed_openai_turn(
     cp: &mut SuspendedTurnCheckpoint,
     eff_opts: &DiscoveryOptions,
     mut messages: Vec<Value>,
-    openai_tools: Vec<Value>,
+    mut openai_tools: Vec<Value>,
     approved_tool_content: String,
 ) -> anyhow::Result<TurnExecutionOutcome> {
     let allow_broker_tools = !openai_tools.is_empty();
+    let effective_privacy = if cp.incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        cp.effect_ledger.privacy()
+    };
     let execution_mode = if allow_broker_tools {
         BackendExecutionMode::ManagedBrokerTools
     } else {
@@ -1127,7 +1158,9 @@ pub async fn continue_resumed_openai_turn(
                             rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
-                            paused_parsed_args: rem_args.clone(),
+                            paused_parsed_args: crate::meta_tools::effective_checkpoint_tool_args(
+                                rem_name, rem_args,
+                            ),
                             remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
                             effect_ledger: cp.effect_ledger.clone(),
                             dialect: SuspendedDialectState::OpenAi {
@@ -1164,6 +1197,16 @@ pub async fn continue_resumed_openai_turn(
                     ));
                 }
                 QuickChatToolExecOutcome::ToolMessage { content, .. } => {
+                    let unlocked =
+                        crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                            rem_name, &content,
+                        );
+                    let _ = crate::meta_tools::merge_unlocked_openai_tools(
+                        &core.broker,
+                        effective_privacy,
+                        &unlocked,
+                        &mut openai_tools,
+                    );
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": rem_id,
@@ -1424,7 +1467,11 @@ pub async fn continue_resumed_openai_turn(
                                         as usize,
                                     paused_call_id: call_id,
                                     paused_canonical_tool: canonical_tool,
-                                    paused_parsed_args: parsed_args,
+                                    paused_parsed_args:
+                                        crate::meta_tools::effective_checkpoint_tool_args(
+                                            fn_name,
+                                            &parsed_args,
+                                        ),
                                     remaining_tool_calls: parse_remaining_openai_tool_calls(
                                         &tool_calls[tc_idx + 1..],
                                     ),
@@ -1478,6 +1525,16 @@ pub async fn continue_resumed_openai_turn(
                             break;
                         }
                         QuickChatToolExecOutcome::ToolMessage { content, .. } => {
+                            let unlocked =
+                                crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                    fn_name, &content,
+                                );
+                            let _ = crate::meta_tools::merge_unlocked_openai_tools(
+                                &core.broker,
+                                effective_privacy,
+                                &unlocked,
+                                &mut openai_tools,
+                            );
                             messages.push(json!({
                                 "role": "tool",
                                 "tool_call_id": call_id,
@@ -1551,11 +1608,16 @@ pub async fn continue_resumed_anthropic_turn(
     trust: ProviderTrust,
     mut messages: Vec<Value>,
     mut prior_tool_results: Vec<Value>,
-    anthropic_tools: Vec<Value>,
+    mut anthropic_tools: Vec<Value>,
     approved_tool_content: String,
     approved_is_err: bool,
 ) -> anyhow::Result<TurnExecutionOutcome> {
     let allow_broker_tools = !anthropic_tools.is_empty();
+    let effective_privacy = if cp.incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        cp.effect_ledger.privacy()
+    };
     let execution_mode = if allow_broker_tools {
         BackendExecutionMode::ManagedBrokerTools
     } else {
@@ -1613,7 +1675,9 @@ pub async fn continue_resumed_anthropic_turn(
                             rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
-                            paused_parsed_args: rem_args.clone(),
+                            paused_parsed_args: crate::meta_tools::effective_checkpoint_tool_args(
+                                rem_name, rem_args,
+                            ),
                             remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
                             effect_ledger: cp.effect_ledger.clone(),
                             dialect: SuspendedDialectState::Anthropic {
@@ -1656,6 +1720,16 @@ pub async fn continue_resumed_anthropic_turn(
                 QuickChatToolExecOutcome::ToolMessage {
                     content, is_error, ..
                 } => {
+                    let unlocked =
+                        crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                            rem_name, &content,
+                        );
+                    let _ = crate::meta_tools::merge_unlocked_anthropic_tools(
+                        &core.broker,
+                        effective_privacy,
+                        &unlocked,
+                        &mut anthropic_tools,
+                    );
                     prior_tool_results.push(json!({
                         "type": "tool_result",
                         "tool_use_id": rem_id,
@@ -1847,7 +1921,8 @@ pub async fn continue_resumed_anthropic_turn(
                                     as usize,
                                 paused_call_id: cid.clone(),
                                 paused_canonical_tool: canonical_tool,
-                                paused_parsed_args: iargs.clone(),
+                                paused_parsed_args:
+                                    crate::meta_tools::effective_checkpoint_tool_args(fname, iargs),
                                 remaining_tool_calls: tool_uses[tu_idx + 1..].to_vec(),
                                 effect_ledger: cp.effect_ledger.clone(),
                                 dialect: SuspendedDialectState::Anthropic {
@@ -1894,6 +1969,16 @@ pub async fn continue_resumed_anthropic_turn(
                     QuickChatToolExecOutcome::ToolMessage {
                         content, is_error, ..
                     } => {
+                        let unlocked =
+                            crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                fname, &content,
+                            );
+                        let _ = crate::meta_tools::merge_unlocked_anthropic_tools(
+                            &core.broker,
+                            effective_privacy,
+                            &unlocked,
+                            &mut anthropic_tools,
+                        );
                         next_results.push(json!({
                             "type": "tool_result",
                             "tool_use_id": cid,

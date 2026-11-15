@@ -884,9 +884,13 @@ pub fn build_cli_broker_protocol_prompt_with_policy(
     privacy: crate::security_guard::PrivacySessionPolicy,
 ) -> String {
     let openai_tools = build_quick_chat_openai_tools_with_policy(core, user_text, privacy);
+    build_cli_broker_protocol_prompt_from_tools(&openai_tools)
+}
+
+fn build_cli_broker_protocol_prompt_from_tools(openai_tools: &[Value]) -> String {
     let mut tool_lines: Vec<String> = Vec::with_capacity(openai_tools.len());
 
-    for t in &openai_tools {
+    for t in openai_tools {
         let Some(f) = t.get("function") else { continue };
         let Some(name) = f.get("name").and_then(|v| v.as_str()) else {
             continue;
@@ -938,7 +942,8 @@ pub fn build_cli_broker_protocol_prompt_with_policy(
         2) 当需要读取或修改 IntentOS 系统设置、文件、窗口、桌面软件或个人记忆时，请输出如下受控工具调用标签（支持单轮输出一个或多个，内部必须是合法 JSON）：\n\
         <intentos_tool_call>{{\"name\":\"<tool_name>\",\"arguments\":{{...}}}}</intentos_tool_call>\n\
         3) 输出 `<intentos_tool_call>` 后请立即结束本轮输出，等待系统通过 `CapabilityBroker` 安全执行并回传 `<intentos_tool_result>` 后再做总结。\n\
-        4) 若用户仅作日常问答且无需调用系统能力，请直接用自然语言回复，不要输出任何 `<intentos_tool_call>` 标签。\n\
+        4) 若所需能力未直接出现在下方首轮精简列表中，可调用 `capability_search` / `capability_describe` 动态解锁完整工具签名，或通过 `capability_invoke` 按规范 ID 安全执行，多步变更后用 `task_verify` 校验。\n\
+        5) 若用户仅作日常问答且无需调用系统能力，请直接用自然语言回复，不要输出任何 `<intentos_tool_call>` 标签。\n\
         可用 Broker 工具列表：\n{}",
         tool_lines.join("\n")
     )
@@ -1528,16 +1533,22 @@ pub async fn run_cli_backend_turn_with_policy(
         effective_privacy,
     );
 
+    let mut active_cli_tools = if effective_allow_broker_tools {
+        build_quick_chat_openai_tools_with_policy(core, user_text, effective_privacy)
+    } else {
+        Vec::new()
+    };
     let mut base_sections: Vec<String> = vec![sys_text.clone()];
-    if effective_allow_broker_tools {
-        base_sections.push(build_cli_broker_protocol_prompt_with_policy(
-            core,
-            user_text,
-            effective_privacy,
+    let protocol_section_idx = if effective_allow_broker_tools {
+        let idx = base_sections.len();
+        base_sections.push(build_cli_broker_protocol_prompt_from_tools(
+            &active_cli_tools,
         ));
+        Some(idx)
     } else {
         base_sections.push(CLI_CHAT_ONLY_PROMPT_NOTE.to_string());
-    }
+        None
+    };
     if let Some(ref anchor) = compressed_history.ancient_summary_anchor
         && !anchor.trim().is_empty()
     {
@@ -1674,7 +1685,11 @@ pub async fn run_cli_backend_turn_with_policy(
                                 rounds_used: round_num,
                                 paused_call_id: call_id,
                                 paused_canonical_tool: canonical_tool,
-                                paused_parsed_args: parsed_args.clone(),
+                                paused_parsed_args:
+                                    crate::meta_tools::effective_checkpoint_tool_args(
+                                        fn_name,
+                                        parsed_args,
+                                    ),
                                 remaining_tool_calls,
                                 effect_ledger: effect_ledger.clone(),
                                 dialect: SuspendedDialectState::Cli {
@@ -1715,6 +1730,21 @@ pub async fn run_cli_backend_turn_with_policy(
                     } => {
                         if !duplicate_blocked {
                             all_duplicates = false;
+                        }
+                        let unlocked =
+                            crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                fn_name, &content,
+                            );
+                        if crate::meta_tools::merge_unlocked_openai_tools(
+                            &core.broker,
+                            effective_privacy,
+                            &unlocked,
+                            &mut active_cli_tools,
+                        ) > 0
+                            && let Some(p_idx) = protocol_section_idx
+                        {
+                            base_sections[p_idx] =
+                                build_cli_broker_protocol_prompt_from_tools(&active_cli_tools);
                         }
                         round_tool_results.push(format!(
                             "<intentos_tool_result call_id=\"{}\" name=\"{}\" is_error=\"{}\">{}</intentos_tool_result>",
@@ -1816,6 +1846,32 @@ pub async fn continue_resumed_cli_turn(
         BackendExecutionMode::ExternalChatOnly
     };
 
+    let effective_privacy = if cp.incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        cp.effect_ledger.privacy()
+    };
+    let mut active_cli_tools = if effective_allow_broker_tools {
+        let mut init =
+            build_quick_chat_openai_tools_with_policy(core, &cp.user_text, effective_privacy);
+        for rec in cp.effect_ledger.records() {
+            if crate::meta_tools::is_discovery_only_meta_tool(&rec.capability_id) {
+                let unlocked = crate::meta_tools::extract_unlocked_capability_ids_from_value(
+                    &rec.cached_output,
+                );
+                let _ = crate::meta_tools::merge_unlocked_openai_tools(
+                    &core.broker,
+                    effective_privacy,
+                    &unlocked,
+                    &mut init,
+                );
+            }
+        }
+        init
+    } else {
+        Vec::new()
+    };
+
     prior_round_tool_results.push(format!(
         "<intentos_tool_result call_id=\"{}\" name=\"{}\" is_error=\"{}\">{}</intentos_tool_result>",
         cp.paused_call_id,
@@ -1868,7 +1924,9 @@ pub async fn continue_resumed_cli_turn(
                             rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
-                            paused_parsed_args: rem_args.clone(),
+                            paused_parsed_args: crate::meta_tools::effective_checkpoint_tool_args(
+                                rem_name, rem_args,
+                            ),
                             remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
                             effect_ledger: cp.effect_ledger.clone(),
                             dialect: SuspendedDialectState::Cli {
@@ -1909,6 +1967,16 @@ pub async fn continue_resumed_cli_turn(
                 QuickChatToolExecOutcome::ToolMessage {
                     content, is_error, ..
                 } => {
+                    let unlocked =
+                        crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                            rem_name, &content,
+                        );
+                    let _ = crate::meta_tools::merge_unlocked_openai_tools(
+                        &core.broker,
+                        effective_privacy,
+                        &unlocked,
+                        &mut active_cli_tools,
+                    );
                     prior_round_tool_results.push(format!(
                         "<intentos_tool_result call_id=\"{}\" name=\"{}\" is_error=\"{}\">{}</intentos_tool_result>",
                         rem_id,
@@ -1927,15 +1995,16 @@ pub async fn continue_resumed_cli_turn(
     ));
 
     let mut base_sections: Vec<String> = vec![cp.sys_text.clone()];
-    if effective_allow_broker_tools {
-        base_sections.push(build_cli_broker_protocol_prompt_with_policy(
-            core,
-            &cp.user_text,
-            cp.effect_ledger.privacy(),
+    let protocol_section_idx = if effective_allow_broker_tools {
+        let idx = base_sections.len();
+        base_sections.push(build_cli_broker_protocol_prompt_from_tools(
+            &active_cli_tools,
         ));
+        Some(idx)
     } else {
         base_sections.push(CLI_CHAT_ONLY_PROMPT_NOTE.to_string());
-    }
+        None
+    };
     base_sections.push(format!("User: {}", cp.user_text));
 
     loop {
@@ -2052,7 +2121,11 @@ pub async fn continue_resumed_cli_turn(
                                 rounds_used: round_num,
                                 paused_call_id: call_id,
                                 paused_canonical_tool: canonical_tool,
-                                paused_parsed_args: parsed_args.clone(),
+                                paused_parsed_args:
+                                    crate::meta_tools::effective_checkpoint_tool_args(
+                                        fn_name,
+                                        parsed_args,
+                                    ),
                                 remaining_tool_calls: rem_calls,
                                 effect_ledger: cp.effect_ledger.clone(),
                                 dialect: SuspendedDialectState::Cli {
@@ -2101,6 +2174,21 @@ pub async fn continue_resumed_cli_turn(
                     } => {
                         if !duplicate_blocked {
                             all_duplicates = false;
+                        }
+                        let unlocked =
+                            crate::meta_tools::extract_unlocked_capability_ids_from_tool_message(
+                                fn_name, &content,
+                            );
+                        if crate::meta_tools::merge_unlocked_openai_tools(
+                            &core.broker,
+                            effective_privacy,
+                            &unlocked,
+                            &mut active_cli_tools,
+                        ) > 0
+                            && let Some(p_idx) = protocol_section_idx
+                        {
+                            base_sections[p_idx] =
+                                build_cli_broker_protocol_prompt_from_tools(&active_cli_tools);
                         }
                         next_results.push(format!(
                             "<intentos_tool_result call_id=\"{}\" name=\"{}\" is_error=\"{}\">{}</intentos_tool_result>",
