@@ -1460,7 +1460,12 @@ impl IntentOsCore {
                 let budget = TaskBudget {
                     max_tool_calls: self.brain_config.runtime_limits.max_tool_calls,
                     max_runtime_seconds: self.brain_config.runtime_limits.max_runtime_seconds,
-                    max_cost: None,
+                    max_wall_time_ms: self
+                        .brain_config
+                        .runtime_limits
+                        .max_runtime_seconds
+                        .saturating_mul(1_000),
+                    ..TaskBudget::default()
                 };
                 let exec_ctx = ExecutionContext::new(
                     session.session_id.clone(),

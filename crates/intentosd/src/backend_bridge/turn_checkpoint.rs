@@ -13,8 +13,9 @@
 //!    OpenAI HTTP, Anthropic HTTP, and Controlled CLI backends when `CapabilityBroker` issues `PendingApproval`.
 
 use crate::backend_bridge::broker_bridge::{
-    BackendExecutionMode, TraceDot, extract_approval_grant_target,
-    record_approved_step_into_ledger, supplement_approved_dir_file_search,
+    BackendExecutionMode, TraceDot, apply_outcome_status_fields, derive_completed_steps_summary,
+    evaluate_turn_goal_evidence, extract_approval_grant_target, record_approved_step_into_ledger,
+    supplement_approved_dir_file_search, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, lookup_ephemeral_backend_key,
@@ -391,6 +392,250 @@ pub enum IdempotencyDecision<'a> {
     },
 }
 
+/// Multi-dimensional per-turn global execution budget tracker (`H07`).
+///
+/// Separates `max_model_rounds`, `max_tool_calls` (counted per individual tool invocation),
+/// `max_wall_time_ms` (pausing during `WaitingApproval` so human review time never burns
+/// active execution budget while checkpoint `expires_at` still enforces overall wall-clock TTL),
+/// `max_input_tokens`, `max_output_tokens`, `max_retries`, and `max_cost_usd`.
+/// Persisted inside `TurnEffectLedger` and `SuspendedTurnCheckpoint` so backend fallbacks and
+/// approval resumptions share remaining budget without `.max(2)` round resets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnBudgetTracker {
+    pub budget: TaskBudget,
+    pub used_model_rounds: u32,
+    pub used_tool_calls: u32,
+    pub active_execution_ms: u64,
+    pub used_input_tokens: u64,
+    pub used_output_tokens: u64,
+    pub used_retries: u32,
+    pub accumulated_cost_usd: f64,
+    pub budget_exhausted: bool,
+    pub exhausted_dimension: Option<String>,
+    #[serde(skip)]
+    active_segment_started_at: Option<Instant>,
+}
+
+impl Default for TurnBudgetTracker {
+    fn default() -> Self {
+        Self::new(TaskBudget::default())
+    }
+}
+
+impl TurnBudgetTracker {
+    pub fn new(budget: TaskBudget) -> Self {
+        Self {
+            budget,
+            used_model_rounds: 0,
+            used_tool_calls: 0,
+            active_execution_ms: 0,
+            used_input_tokens: 0,
+            used_output_tokens: 0,
+            used_retries: 0,
+            accumulated_cost_usd: 0.0,
+            budget_exhausted: false,
+            exhausted_dimension: None,
+            active_segment_started_at: None,
+        }
+    }
+
+    /// Start or resume measuring active execution wall-time.
+    pub fn start_active_execution(&mut self) {
+        if self.active_segment_started_at.is_none() {
+            self.active_segment_started_at = Some(Instant::now());
+        }
+    }
+
+    /// Flush active execution time and pause timer while waiting for human approval (`WaitingApproval`).
+    pub fn pause_for_approval(&mut self) {
+        if let Some(started) = self.active_segment_started_at.take() {
+            self.active_execution_ms = self
+                .active_execution_ms
+                .saturating_add(started.elapsed().as_millis() as u64);
+        }
+    }
+
+    /// Finalize active execution timing when a turn completes or halts.
+    pub fn finish_active_execution(&mut self) {
+        self.pause_for_approval();
+    }
+
+    pub fn is_paused_for_approval(&self) -> bool {
+        self.active_segment_started_at.is_none()
+    }
+
+    /// Total active execution milliseconds accumulated so far (excluding approval wait pauses).
+    pub fn current_active_execution_ms(&self) -> u64 {
+        let live_ms = self
+            .active_segment_started_at
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        self.active_execution_ms.saturating_add(live_ms)
+    }
+
+    /// Manually advance `active_execution_ms` (useful for deterministic unit tests).
+    pub fn add_active_execution_ms(&mut self, delta_ms: u64) {
+        self.active_execution_ms = self.active_execution_ms.saturating_add(delta_ms);
+    }
+
+    pub fn mark_exhausted(&mut self, dimension: impl Into<String>) -> String {
+        let dim = dimension.into();
+        self.budget_exhausted = true;
+        if self.exhausted_dimension.is_none() {
+            self.exhausted_dimension = Some(dim.clone());
+        }
+        self.exhausted_dimension.clone().unwrap_or(dim)
+    }
+
+    pub fn check_wall_time_and_tokens(&mut self, starting_new_round: bool) -> Result<(), String> {
+        if self.budget_exhausted {
+            return Err(self
+                .exhausted_dimension
+                .clone()
+                .unwrap_or_else(|| "budget_exhausted".to_string()));
+        }
+        let wall_limit = self.budget.effective_wall_time_ms();
+        if self.current_active_execution_ms() >= wall_limit {
+            return Err(self.mark_exhausted("max_wall_time_ms"));
+        }
+        if let Some(max_in) = self.budget.max_input_tokens
+            && ((starting_new_round && self.used_input_tokens >= max_in)
+                || self.used_input_tokens > max_in)
+        {
+            return Err(self.mark_exhausted("max_input_tokens"));
+        }
+        if let Some(max_out) = self.budget.max_output_tokens
+            && ((starting_new_round && self.used_output_tokens >= max_out)
+                || self.used_output_tokens > max_out)
+        {
+            return Err(self.mark_exhausted("max_output_tokens"));
+        }
+        if let Some(max_cost) = self.budget.effective_max_cost_usd()
+            && ((starting_new_round && self.accumulated_cost_usd >= max_cost)
+                || self.accumulated_cost_usd > max_cost)
+        {
+            return Err(self.mark_exhausted("max_cost_usd"));
+        }
+        Ok(())
+    }
+
+    /// Attempt to start one model inference round.
+    pub fn try_begin_model_round(&mut self) -> Result<u32, String> {
+        self.check_wall_time_and_tokens(true)?;
+        if self.used_model_rounds >= self.budget.max_model_rounds {
+            return Err(self.mark_exhausted("max_model_rounds"));
+        }
+        self.used_model_rounds += 1;
+        Ok(self.used_model_rounds)
+    }
+
+    /// Attempt to invoke a single tool call (counted per individual tool call, never per round).
+    pub fn try_begin_tool_call(&mut self) -> Result<u32, String> {
+        self.check_wall_time_and_tokens(false)?;
+        if self.used_tool_calls >= self.budget.max_tool_calls {
+            return Err(self.mark_exhausted("max_tool_calls"));
+        }
+        self.used_tool_calls += 1;
+        Ok(self.used_tool_calls)
+    }
+
+    /// Refund an unexecuted tool call that suspended into `PendingApproval` before running.
+    pub fn refund_paused_tool_call(&mut self) {
+        self.used_tool_calls = self.used_tool_calls.saturating_sub(1);
+    }
+
+    /// Charge the approved tool call once it actually executes on `resume_approved_turn`.
+    pub fn record_approved_tool_execution(&mut self) {
+        self.used_tool_calls = self.used_tool_calls.saturating_add(1);
+    }
+
+    /// Record provider-reported token and optional USD cost usage after a model call.
+    /// Returns `Some(dimension)` if a token or cost limit was strictly exceeded.
+    pub fn record_token_usage(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+    ) -> Option<String> {
+        self.used_input_tokens = self.used_input_tokens.saturating_add(input_tokens);
+        self.used_output_tokens = self.used_output_tokens.saturating_add(output_tokens);
+        if let Some(c) = cost_usd
+            && c.is_finite()
+            && c > 0.0
+        {
+            self.accumulated_cost_usd += c;
+        }
+        if let Some(max_in) = self.budget.max_input_tokens
+            && self.used_input_tokens > max_in
+        {
+            return Some(self.mark_exhausted("max_input_tokens"));
+        }
+        if let Some(max_out) = self.budget.max_output_tokens
+            && self.used_output_tokens > max_out
+        {
+            return Some(self.mark_exhausted("max_output_tokens"));
+        }
+        if let Some(max_cost) = self.budget.effective_max_cost_usd()
+            && self.accumulated_cost_usd > max_cost
+        {
+            return Some(self.mark_exhausted("max_cost_usd"));
+        }
+        None
+    }
+
+    /// Attempt to record a transient upstream retry or pre-side-effect backend fallback.
+    pub fn try_record_retry(&mut self) -> Result<u32, String> {
+        self.check_wall_time_and_tokens(false)?;
+        if self.used_retries >= self.budget.max_retries {
+            return Err(self.mark_exhausted("max_retries"));
+        }
+        self.used_retries += 1;
+        Ok(self.used_retries)
+    }
+
+    pub fn remaining_model_rounds(&self) -> usize {
+        if self.budget_exhausted {
+            0
+        } else {
+            self.budget
+                .max_model_rounds
+                .saturating_sub(self.used_model_rounds) as usize
+        }
+    }
+
+    pub fn remaining_tool_calls(&self) -> usize {
+        if self.budget_exhausted {
+            0
+        } else {
+            self.budget
+                .max_tool_calls
+                .saturating_sub(self.used_tool_calls) as usize
+        }
+    }
+
+    pub fn summary_json(&self) -> Value {
+        json!({
+            "used_model_rounds": self.used_model_rounds,
+            "max_model_rounds": self.budget.max_model_rounds,
+            "used_tool_calls": self.used_tool_calls,
+            "max_tool_calls": self.budget.max_tool_calls,
+            "active_execution_ms": self.current_active_execution_ms(),
+            "max_wall_time_ms": self.budget.effective_wall_time_ms(),
+            "used_input_tokens": self.used_input_tokens,
+            "max_input_tokens": self.budget.max_input_tokens,
+            "used_output_tokens": self.used_output_tokens,
+            "max_output_tokens": self.budget.max_output_tokens,
+            "used_retries": self.used_retries,
+            "max_retries": self.budget.max_retries,
+            "accumulated_cost_usd": self.accumulated_cost_usd,
+            "max_cost_usd": self.budget.effective_max_cost_usd(),
+            "budget_exhausted": self.budget_exhausted,
+            "exhausted_dimension": self.exhausted_dimension,
+        })
+    }
+}
+
 /// Per-turn side-effect ledger and runtime progress buffer.
 ///
 /// Tracks every tool invocation's trusted `step_id`, `attempt_id`, `state_epoch`, and
@@ -420,6 +665,13 @@ pub struct TurnEffectLedger {
     pub(crate) pending_approval_step_id: Option<String>,
     #[serde(skip)]
     state_db: Option<Arc<StateDb>>,
+
+    #[serde(default)]
+    pub budget_tracker: TurnBudgetTracker,
+    #[serde(default)]
+    pub budget_skipped_steps: Vec<String>,
+    #[serde(default)]
+    pub chat_only_blocked_tools: Vec<String>,
 
     // Runtime progress buffers preserved across mid-turn backend failures and checkpoints:
     #[serde(default)]
@@ -453,6 +705,9 @@ impl TurnEffectLedger {
             bound_session_id: None,
             pending_approval_step_id: None,
             state_db: None,
+            budget_tracker: TurnBudgetTracker::default(),
+            budget_skipped_steps: Vec::new(),
+            chat_only_blocked_tools: Vec::new(),
             trace_dots: Vec::new(),
             adapter_actions: Vec::new(),
             tool_steps_json: Vec::new(),
@@ -461,6 +716,15 @@ impl TurnEffectLedger {
             accumulated_thoughts: Vec::new(),
             last_resource_path: None,
         }
+    }
+
+    pub fn with_budget(mut self, budget: TaskBudget) -> Self {
+        self.budget_tracker.budget = budget;
+        self
+    }
+
+    pub fn set_budget(&mut self, budget: TaskBudget) {
+        self.budget_tracker.budget = budget;
     }
 
     pub fn with_privacy(mut self, privacy: PrivacySessionPolicy) -> Self {
@@ -958,6 +1222,7 @@ impl TurnEffectLedger {
             "has_uncertain_or_committed_side_effects": self.has_uncertain_or_committed_side_effects(),
             "has_committed_side_effects": self.has_committed_side_effects(),
             "committed_changeset_ids": self.committed_changeset_ids(),
+            "budget_usage": self.budget_tracker.summary_json(),
             "steps": self.records,
             "step_metadata": self.step_metadata,
         })
@@ -1767,10 +2032,19 @@ pub(crate) fn build_cancelled_turn_response(
     session_id: &str,
     trace_dots: Vec<TraceDot>,
 ) -> Value {
+    let default_budget = TurnBudgetTracker::default();
     json!({
         "turn_id": turn_id,
         "session_id": session_id,
         "status": "cancelled",
+        "request_status": "cancelled",
+        "task_status": "cancelled",
+        "completed_steps": [],
+        "unresolved_goals": ["用户已取消当前对话回合"],
+        "recovery_required": false,
+        "budget_exhausted": false,
+        "exhausted_dimension": Value::Null,
+        "budget_usage": default_budget.summary_json(),
         "cancelled": true,
         "backend_used": "cancelled",
         "model_used": "none",
@@ -2161,13 +2435,15 @@ pub fn save_suspended_checkpoint_with_db(
     mut cp: SuspendedTurnCheckpoint,
     privacy: PrivacySessionPolicy,
 ) -> anyhow::Result<bool> {
+    cp.effect_ledger.budget_tracker.pause_for_approval();
     cp.effect_ledger.set_privacy(privacy);
     let persisted = persist_checkpoint_to_db(state_db, &cp, privacy)?;
     insert_in_memory_suspended_checkpoint(cp);
     Ok(persisted)
 }
 
-pub fn save_suspended_checkpoint(cp: SuspendedTurnCheckpoint) {
+pub fn save_suspended_checkpoint(mut cp: SuspendedTurnCheckpoint) {
+    cp.effect_ledger.budget_tracker.pause_for_approval();
     let effective_privacy = if cp.incognito {
         PrivacySessionPolicy::StrictIsolated
     } else if cp.effect_ledger.privacy_explicit {
@@ -2570,7 +2846,7 @@ pub async fn resume_persisted_checkpoint_across_restart(
         _ => None,
     };
 
-    let cp = load_and_verify_persisted_checkpoint(
+    let mut cp = load_and_verify_persisted_checkpoint(
         core,
         &approval_id,
         req_session_id,
@@ -2645,6 +2921,7 @@ pub async fn resume_persisted_checkpoint_across_restart(
     }
 
     approve_non_forbidden_paths_for_resume(core, &pa.arguments);
+    cp.effect_ledger.budget_tracker.start_active_execution();
 
     let exec_res = if crate::app_adapter::is_adapter_tool(&pa.capability_id) {
         let call = CapabilityCall {
@@ -2759,7 +3036,7 @@ pub async fn resume_persisted_checkpoint_across_restart(
             handoff_command: None,
             taint: cp.taints.clone(),
             data_class: cp.data_class,
-            budget: TaskBudget::default(),
+            budget: cp.effect_ledger.budget_tracker.budget.clone(),
             created_at: now_exec,
             updated_at: now_exec,
         });
@@ -2817,6 +3094,7 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
     paused_args_val: &Value,
     approved_changeset_ids: &[String],
 ) -> anyhow::Result<Value> {
+    cp.effect_ledger.budget_tracker.start_active_execution();
     let fallback_privacy =
         PrivacySessionPolicy::from_session(cp.incognito, Some(&cp.session.session_id));
     cp.effect_ledger.ensure_persistence_context(
@@ -2850,9 +3128,6 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
     ));
     *resume_handle.task_id.lock().unwrap() = Some(cp.task_id.clone());
 
-    let max_rounds = core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize;
-    let remaining_llm_rounds = max_rounds.saturating_sub(cp.rounds_used).max(2);
-
     let eff_opts = if opts.include_system_paths && !cp.discovery_opts.include_system_paths {
         cp.discovery_opts.clone()
     } else {
@@ -2869,7 +3144,6 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
                 messages,
                 tools,
                 approved_tool_content,
-                remaining_llm_rounds,
             )
             .await?
         }
@@ -2901,7 +3175,6 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
                 tools,
                 approved_tool_content,
                 approved_is_err,
-                remaining_llm_rounds,
             )
             .await?
         }
@@ -2927,6 +3200,10 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
         }
     };
 
+    if outcome.pending_approval.is_none() {
+        cp.effect_ledger.budget_tracker.finish_active_execution();
+    }
+
     let mut final_dots: Vec<TraceDot> = Vec::new();
     if let Some(ref think_str) = outcome.thinking
         && !think_str.trim().is_empty()
@@ -2938,7 +3215,7 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
     {
         final_dots.push(mdot);
     }
-    final_dots.extend(outcome.trace_dots);
+    final_dots.extend(outcome.trace_dots.clone());
 
     if !cp.incognito
         && cp.effect_ledger.privacy().allows_memory_write()
@@ -2987,7 +3264,212 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
         "pending_approval": outcome.pending_approval,
         "context_compression": cp.context_compression,
     });
+    apply_outcome_status_fields(&mut response, &outcome, &cp.effect_ledger);
     scrub_json_secrets(&mut response);
+    Ok(response)
+}
+
+pub(crate) fn resolve_turn_budget_from_payload(core: &IntentOsCore, payload: &Value) -> TaskBudget {
+    let mut budget = TaskBudget::default();
+    if core.brain_config.runtime_limits.max_tool_calls != 30 {
+        budget.max_tool_calls = core.brain_config.runtime_limits.max_tool_calls;
+    }
+    if core.brain_config.runtime_limits.max_runtime_seconds != 180 {
+        budget.max_runtime_seconds = core.brain_config.runtime_limits.max_runtime_seconds;
+        budget.max_wall_time_ms = core
+            .brain_config
+            .runtime_limits
+            .max_runtime_seconds
+            .saturating_mul(1000);
+    }
+    if core.brain_config.runtime_limits.daily_cost_limit > 0.0 {
+        budget.max_cost_usd = Some(core.brain_config.runtime_limits.daily_cost_limit);
+    }
+
+    if let Some(obj) = payload.get("budget").and_then(|v| v.as_object()) {
+        if let Some(v) = obj.get("max_model_rounds").and_then(|v| v.as_u64()) {
+            budget.max_model_rounds = v as u32;
+        }
+        if let Some(v) = obj.get("max_tool_calls").and_then(|v| v.as_u64()) {
+            budget.max_tool_calls = v as u32;
+        }
+        if let Some(v) = obj.get("max_runtime_seconds").and_then(|v| v.as_u64()) {
+            budget.max_runtime_seconds = v;
+            if !obj.contains_key("max_wall_time_ms") {
+                budget.max_wall_time_ms = v.saturating_mul(1000);
+            }
+        }
+        if let Some(v) = obj.get("max_wall_time_ms").and_then(|v| v.as_u64()) {
+            budget.max_wall_time_ms = v;
+        }
+        if let Some(v) = obj.get("max_input_tokens").and_then(|v| v.as_u64()) {
+            budget.max_input_tokens = Some(v);
+        }
+        if let Some(v) = obj.get("max_output_tokens").and_then(|v| v.as_u64()) {
+            budget.max_output_tokens = Some(v);
+        }
+        if let Some(v) = obj.get("max_retries").and_then(|v| v.as_u64()) {
+            budget.max_retries = v as u32;
+        }
+        if let Some(v) = obj
+            .get("max_cost_usd")
+            .or_else(|| obj.get("max_cost"))
+            .and_then(|v| v.as_f64())
+        {
+            budget.max_cost_usd = Some(v);
+            budget.max_cost = Some(v);
+        }
+    }
+    budget
+}
+
+pub(crate) fn finalize_non_checkpoint_approved_turn(
+    core: &IntentOsCore,
+    payload: &Value,
+    mut approved_task: Task,
+    resume_turn_id: &str,
+    step: &TaskStep,
+    paused_args_val: &Value,
+) -> anyhow::Result<Value> {
+    let task_privacy = core.task_privacy_policy(&approved_task.id);
+    let sid = approved_task
+        .session_id
+        .clone()
+        .or_else(|| {
+            payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| {
+            if task_privacy.allows_memory_write() {
+                core.sessions.get_or_create(None).session_id
+            } else {
+                crate::security_guard::ExecutionContext::fallback_session_id(task_privacy)
+            }
+        });
+    let effective_privacy = PrivacySessionPolicy::resolve(
+        Some(task_privacy),
+        !task_privacy.allows_memory_read(),
+        Some(&sid),
+    );
+    let rich_reply =
+        synthesize_rich_approved_step_markdown(&approved_task.goal, std::slice::from_ref(step));
+
+    let mut fallback_ledger = TurnEffectLedger::new(resume_turn_id);
+    fallback_ledger.set_budget(approved_task.budget.clone());
+    fallback_ledger.bind_persistence(
+        core.state_db.clone(),
+        approved_task.id.clone(),
+        sid.clone(),
+        effective_privacy,
+    );
+    record_approved_step_into_ledger(
+        core,
+        &mut fallback_ledger,
+        step,
+        paused_args_val,
+        &approved_task.changeset_ids,
+    );
+    fallback_ledger.budget_tracker.finish_active_execution();
+    let final_dots = fallback_ledger.trace_dots.clone();
+
+    let (_, task_status, completed_steps, unresolved_goals, recovery_required) =
+        evaluate_turn_goal_evidence(
+            core,
+            &approved_task.goal,
+            BackendExecutionMode::OfflineCore,
+            Some(approved_task.status),
+            &fallback_ledger,
+        );
+
+    if effective_privacy.allows_task_persistence() {
+        approved_task.session_id = Some(sid.clone());
+        approved_task.assistant_message = Some(rich_reply.clone());
+        approved_task.result_summary = Some(rich_reply.clone());
+        let _ = core.state_db.upsert_task(&approved_task);
+    }
+    if effective_privacy.allows_memory_write() {
+        core.sessions.append_turn(
+            &sid,
+            &approved_task.goal,
+            &rich_reply,
+            fallback_ledger.last_resource_path.clone(),
+        );
+
+        let dots_val = serde_json::to_value(&final_dots)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let _ = crate::memory_hub::record_conversation_turn_with_policy(
+            core,
+            &crate::memory_hub::RecordTurnInput {
+                session_id: Some(sid.clone()),
+                user_text: approved_task.goal.clone(),
+                assistant_text: rich_reply.clone(),
+                thinking: None,
+                tool_steps: fallback_ledger.tool_steps_json.clone(),
+                trace_dots: dots_val,
+                incognito: false,
+            },
+            effective_privacy,
+        );
+    }
+
+    let session_obj = if effective_privacy.allows_memory_write() {
+        core.sessions.get_or_create(Some(&sid))
+    } else {
+        core.sessions.peek(&sid).unwrap_or(SessionState {
+            session_id: sid.clone(),
+            messages: Vec::new(),
+            last_resource_path: None,
+            updated_at: Utc::now(),
+        })
+    };
+    let cc_stats = crate::memory_hub::build_compressed_session_history_with_policy(
+        core,
+        &session_obj,
+        effective_privacy,
+    )
+    .stats;
+
+    let mut response = json!({
+        "turn_id": resume_turn_id,
+        "task_id": approved_task.id,
+        "session_id": sid,
+        "status": "completed",
+        "request_status": "finished",
+        "task_status": task_status,
+        "completed_steps": completed_steps,
+        "unresolved_goals": unresolved_goals,
+        "recovery_required": recovery_required,
+        "budget_exhausted": fallback_ledger.budget_tracker.budget_exhausted,
+        "exhausted_dimension": fallback_ledger.budget_tracker.exhausted_dimension,
+        "budget_usage": fallback_ledger.budget_tracker.summary_json(),
+        "approval_resolved": "approved",
+        "execution_mode": BackendExecutionMode::OfflineCore,
+        "side_effect_replay_prevented": false,
+        "effect_ledger": fallback_ledger.summary_json(),
+        "backend_used": "fallback",
+        "provider_used": "intentos-core",
+        "model_used": format!("{:?}", approved_task.route).to_ascii_lowercase(),
+        "reasoning_effort": "default",
+        "thinking": Value::Null,
+        "reply_markdown": rich_reply,
+        "reply": rich_reply,
+        "trace_dots": final_dots,
+        "tool_steps": fallback_ledger.tool_steps_json,
+        "memory_hits": [],
+        "adapter_actions": [],
+        "changeset_ids": approved_task.changeset_ids,
+        "handoff_command": approved_task.handoff_command,
+        "pending_approval": Value::Null,
+        "context_compression": cc_stats,
+    });
+    scrub_json_secrets(&mut response);
+    SensitiveDataGuard::redact_json(&mut response);
     Ok(response)
 }
 
@@ -3012,7 +3494,22 @@ pub(crate) fn build_denied_resume_response(
     let session_reply_text = "已按您的指令拒绝执行该敏感操作，未产生任何修改。";
     let display_reply_text = "已拒绝执行该敏感受控操作，未产生任何系统修改。";
 
-    if let Some(cp) = checkpoint {
+    if let Some(mut cp) = checkpoint {
+        cp.effect_ledger.budget_tracker.finish_active_execution();
+        let completed_steps = derive_completed_steps_summary(&cp.effect_ledger);
+        let mut unresolved_goals = vec![format!("用户已拒绝执行受控能力 `{}`", cap_id)];
+        for (_, rem_name, _) in &cp.remaining_tool_calls {
+            unresolved_goals.push(format!("未执行后续排队工具调用 `{}`", rem_name));
+        }
+        let recovery_required = cp.effect_ledger.has_uncertain_side_effects();
+        let task_status = if recovery_required {
+            "recovery_required"
+        } else if !completed_steps.is_empty() {
+            "partially_completed"
+        } else {
+            "cancelled"
+        };
+
         let exec_mode = match cp.dialect {
             SuspendedDialectState::Cli {
                 allow_broker_tools, ..
@@ -3078,6 +3575,14 @@ pub(crate) fn build_denied_resume_response(
             "task_id": cp.task_id,
             "session_id": cp.session.session_id,
             "status": "completed",
+            "request_status": "finished",
+            "task_status": task_status,
+            "completed_steps": completed_steps,
+            "unresolved_goals": unresolved_goals,
+            "recovery_required": recovery_required,
+            "budget_exhausted": cp.effect_ledger.budget_tracker.budget_exhausted,
+            "exhausted_dimension": cp.effect_ledger.budget_tracker.exhausted_dimension,
+            "budget_usage": cp.effect_ledger.budget_tracker.summary_json(),
             "approval_resolved": "denied",
             "execution_mode": exec_mode,
             "side_effect_replay_prevented": false,
@@ -3154,6 +3659,14 @@ pub(crate) fn build_denied_resume_response(
         "task_id": denied_task.as_ref().map(|t| t.id.clone()).unwrap_or_default(),
         "session_id": sid,
         "status": "completed",
+        "request_status": "finished",
+        "task_status": "cancelled",
+        "completed_steps": [],
+        "unresolved_goals": [format!("用户已拒绝执行受控能力 `{}`", cap_id)],
+        "recovery_required": false,
+        "budget_exhausted": false,
+        "exhausted_dimension": Value::Null,
+        "budget_usage": empty_ledger.budget_tracker.summary_json(),
         "approval_resolved": "denied",
         "execution_mode": BackendExecutionMode::OfflineCore,
         "side_effect_replay_prevented": false,
@@ -3928,6 +4441,61 @@ mod tests {
             .await
             .is_err(),
             "consumed checkpoint must never replay a second time"
+        );
+    }
+
+    #[test]
+    fn h07_budget_tracker_separates_rounds_and_tools_and_pauses_wall_time_during_approval() {
+        let budget = TaskBudget {
+            max_model_rounds: 3,
+            max_tool_calls: 4,
+            max_wall_time_ms: 80,
+            max_runtime_seconds: 1,
+            max_input_tokens: Some(500),
+            max_output_tokens: Some(200),
+            max_retries: 1,
+            max_cost_usd: Some(0.05),
+            max_cost: Some(0.05),
+        };
+        let mut ledger = TurnEffectLedger::new("turn_h07_unit").with_budget(budget);
+        ledger.budget_tracker.start_active_execution();
+
+        // 1 model round emitting 4 individual tool calls:
+        assert!(ledger.budget_tracker.try_begin_model_round().is_ok());
+        for _ in 0..4 {
+            assert!(ledger.budget_tracker.try_begin_tool_call().is_ok());
+        }
+        assert_eq!(ledger.budget_tracker.used_model_rounds, 1);
+        assert_eq!(ledger.budget_tracker.used_tool_calls, 4);
+        assert!(!ledger.budget_tracker.budget_exhausted);
+
+        // Pause for human approval for 110ms (> 80ms max_wall_time_ms): must NOT burn active_execution_ms!
+        ledger.budget_tracker.pause_for_approval();
+        std::thread::sleep(Duration::from_millis(110));
+        assert!(
+            ledger.budget_tracker.current_active_execution_ms() < 60,
+            "WaitingApproval pause must freeze active_execution_ms, got {}ms",
+            ledger.budget_tracker.current_active_execution_ms()
+        );
+
+        // Persist & reload ledger JSON (as in SuspendedTurnCheckpoint) — remaining budget is preserved!
+        let serialized = serde_json::to_string(&ledger).unwrap();
+        let mut reloaded: TurnEffectLedger = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reloaded.budget_tracker.used_model_rounds, 1);
+        assert_eq!(reloaded.budget_tracker.used_tool_calls, 4);
+        assert_eq!(reloaded.budget_tracker.remaining_model_rounds(), 2);
+        assert_eq!(reloaded.budget_tracker.remaining_tool_calls(), 0);
+
+        reloaded.budget_tracker.start_active_execution();
+        let err_dim = reloaded
+            .budget_tracker
+            .try_begin_tool_call()
+            .expect_err("5th tool call must halt at max_tool_calls == 4");
+        assert_eq!(err_dim, "max_tool_calls");
+        assert!(reloaded.budget_tracker.budget_exhausted);
+        assert_eq!(
+            reloaded.budget_tracker.exhausted_dimension.as_deref(),
+            Some("max_tool_calls")
         );
     }
 }

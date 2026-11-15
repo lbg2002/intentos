@@ -12,14 +12,14 @@ pub use crate::backend_bridge::broker_bridge::{BackendExecutionMode, TraceDot};
 pub use crate::backend_bridge::providers_cli::ScopedZcodeRuntimeOverride;
 pub use crate::backend_bridge::turn_checkpoint::{
     ActiveTurnHandle, StepExecutionRecord, SuspendedDialectState, SuspendedTurnCheckpoint,
-    TurnEffectLedger, cancel_turn,
+    TurnBudgetTracker, TurnEffectLedger, cancel_turn,
 };
 
 use crate::backend_bridge::broker_bridge::{
-    TurnExecutionOutcome, build_halted_side_effect_outcome, convert_core_task_to_turn_outcome,
+    TurnExecutionOutcome, apply_outcome_status_fields, build_budget_exhausted_turn_outcome,
+    build_halted_side_effect_outcome, convert_core_task_to_turn_outcome,
     extract_approval_grant_target, prepare_turn_context_blocks_with_policy,
-    record_approved_step_into_ledger, supplement_approved_dir_file_search,
-    synthesize_rich_approved_step_markdown,
+    supplement_approved_dir_file_search,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, BackendsCatalog, CatalogBackends, DiscoveryOptions,
@@ -34,7 +34,8 @@ use crate::backend_bridge::providers_http::{
 };
 use crate::backend_bridge::turn_checkpoint::{
     TurnIdentity, TurnRegistrationOutcome, abort_turn_atomic, build_cancelled_turn_response,
-    build_denied_resume_response, complete_turn_atomic, register_or_join_turn,
+    build_denied_resume_response, complete_turn_atomic, finalize_non_checkpoint_approved_turn,
+    register_or_join_turn, resolve_turn_budget_from_payload,
     resume_persisted_checkpoint_across_restart, resume_suspended_checkpoint_and_finalize,
     take_suspended_checkpoint,
 };
@@ -47,7 +48,7 @@ use crate::security_guard::{ExecutionContext, PrivacySessionPolicy, SensitiveDat
 use chrono::Utc;
 use intentos_protocol::{
     ContextBlock, DataClass, ExecutionStatus, IntentRequest, PROTOCOL_VERSION, PendingApproval,
-    Taint, TaskBudget, TaskStep,
+    Taint, TaskStep,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -762,6 +763,7 @@ pub async fn send_quick_chat_turn_with_options(
     core.register_task_privacy_policy(&task_id, privacy);
     *turn_handle.task_id.lock().unwrap() = Some(task_id.clone());
 
+    let turn_budget = resolve_turn_budget_from_payload(core, payload);
     let (_, ctx_taints, ctx_data_class) =
         prepare_turn_context_blocks_with_policy(core, &extra_blocks, privacy);
     let exec_ctx = ExecutionContext::new(
@@ -771,16 +773,18 @@ pub async fn send_quick_chat_turn_with_options(
         privacy,
         ctx_taints,
         ctx_data_class,
-        TaskBudget::default(),
+        turn_budget.clone(),
     );
 
     let mut effect_ledger = TurnEffectLedger::new(&turn_id);
+    effect_ledger.set_budget(turn_budget);
     effect_ledger.bind_persistence(
         core.state_db.clone(),
         exec_ctx.task_id.clone(),
         exec_ctx.session_id.clone(),
         exec_ctx.privacy,
     );
+    effect_ledger.budget_tracker.start_active_execution();
 
     let execution_outcome = execute_selected_backend_or_fallback(
         core,
@@ -831,6 +835,22 @@ pub async fn send_quick_chat_turn_with_options(
                     &mut effect_ledger,
                     &scrubbed_err,
                 )
+            } else if effect_ledger.budget_tracker.budget_exhausted
+                || effect_ledger.budget_tracker.try_record_retry().is_err()
+            {
+                build_budget_exhausted_turn_outcome(
+                    core,
+                    &active,
+                    BackendExecutionMode::OfflineCore,
+                    &exec_ctx.task_id,
+                    &session,
+                    &text,
+                    strict_incognito,
+                    exec_ctx.taints.clone(),
+                    exec_ctx.data_class,
+                    String::new(),
+                    &mut effect_ledger,
+                )
             } else {
                 tracing::warn!(
                     "Quick-Chat backend error ({}), falling back to submit_intent",
@@ -848,6 +868,10 @@ pub async fn send_quick_chat_turn_with_options(
             }
         }
     };
+
+    if outcome.pending_approval.is_none() {
+        effect_ledger.budget_tracker.finish_active_execution();
+    }
 
     let mut final_dots: Vec<TraceDot> = Vec::new();
     if let Some(ref think_str) = outcome.thinking
@@ -885,8 +909,6 @@ pub async fn send_quick_chat_turn_with_options(
 
     let turn_status = if outcome.pending_approval.is_some() {
         "awaiting_approval"
-    } else if effect_ledger.has_uncertain_side_effects() {
-        "recovery_required"
     } else {
         "completed"
     };
@@ -917,6 +939,7 @@ pub async fn send_quick_chat_turn_with_options(
         "pending_approval": outcome.pending_approval,
         "context_compression": compressed_history.stats,
     });
+    apply_outcome_status_fields(&mut response, &outcome, &effect_ledger);
     scrub_json_secrets(&mut response);
     SensitiveDataGuard::redact_json(&mut response);
 
@@ -1052,6 +1075,23 @@ async fn execute_selected_backend_or_fallback(
                         &scrubbed_err,
                     ));
                 }
+                if effect_ledger.budget_tracker.budget_exhausted
+                    || effect_ledger.budget_tracker.try_record_retry().is_err()
+                {
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        active,
+                        BackendExecutionMode::ManagedBrokerTools,
+                        task_id,
+                        session,
+                        user_text,
+                        strict_incognito,
+                        exec_ctx.taints.clone(),
+                        exec_ctx.data_class,
+                        String::new(),
+                        effect_ledger,
+                    ));
+                }
                 tracing::warn!(
                     "Direct HTTP turn on {}:{} failed before side-effects ({}), attempting CLI or submit_intent fallback",
                     active.backend,
@@ -1110,6 +1150,23 @@ async fn execute_selected_backend_or_fallback(
                         exec_ctx.data_class,
                         effect_ledger,
                         &scrubbed_err,
+                    ));
+                }
+                if effect_ledger.budget_tracker.budget_exhausted
+                    || effect_ledger.budget_tracker.try_record_retry().is_err()
+                {
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        active,
+                        BackendExecutionMode::CliBrokerBridged,
+                        task_id,
+                        session,
+                        user_text,
+                        strict_incognito,
+                        exec_ctx.taints.clone(),
+                        exec_ctx.data_class,
+                        String::new(),
+                        effect_ledger,
                     ));
                 }
                 tracing::warn!(
@@ -1236,7 +1293,7 @@ pub async fn resume_approved_turn_with_options(
         .unwrap_or(60)
         .clamp(1, 24 * 60);
 
-    let checkpoint = take_suspended_checkpoint(&approval_id);
+    let mut checkpoint = take_suspended_checkpoint(&approval_id);
     let policy_pa = core.policy.peek_pending_approval(&approval_id);
     if checkpoint.is_none()
         && policy_pa.is_none()
@@ -1266,6 +1323,18 @@ pub async fn resume_approved_turn_with_options(
             pa_ref,
             checkpoint,
         );
+    }
+
+    if let Some(ref pa) = pa_ref
+        && Utc::now() > pa.expires_at
+    {
+        let _ = core.state_db.delete_suspended_checkpoint_row(&approval_id);
+        let _ = core.deny_pending(&approval_id);
+        anyhow::bail!("审批请求已过期 (expires_at={})", pa.expires_at);
+    }
+
+    if let Some(ref mut cp) = checkpoint {
+        cp.effect_ledger.budget_tracker.start_active_execution();
     }
 
     let eff_nonce = req_nonce
@@ -1353,126 +1422,12 @@ pub async fn resume_approved_turn_with_options(
         .await;
     }
 
-    // No `SuspendedTurnCheckpoint` (e.g. L0/L1 task from `submit_intent`)
-    let task_privacy = core.task_privacy_policy(&approved_task.id);
-    let sid = approved_task
-        .session_id
-        .clone()
-        .or_else(|| {
-            payload
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| {
-            if task_privacy.allows_memory_write() {
-                core.sessions.get_or_create(None).session_id
-            } else {
-                ExecutionContext::fallback_session_id(task_privacy)
-            }
-        });
-    let effective_privacy = PrivacySessionPolicy::resolve(
-        Some(task_privacy),
-        !task_privacy.allows_memory_read(),
-        Some(&sid),
-    );
-    let rich_reply =
-        synthesize_rich_approved_step_markdown(&approved_task.goal, std::slice::from_ref(&step));
-
-    let mut fallback_ledger = TurnEffectLedger::new(&resume_turn_id);
-    fallback_ledger.bind_persistence(
-        core.state_db.clone(),
-        approved_task.id.clone(),
-        sid.clone(),
-        effective_privacy,
-    );
-    record_approved_step_into_ledger(
+    finalize_non_checkpoint_approved_turn(
         core,
-        &mut fallback_ledger,
+        payload,
+        approved_task,
+        &resume_turn_id,
         &step,
         &paused_args_val,
-        &approved_task.changeset_ids,
-    );
-    let final_dots = fallback_ledger.trace_dots.clone();
-
-    if effective_privacy.allows_task_persistence() {
-        approved_task.session_id = Some(sid.clone());
-        approved_task.assistant_message = Some(rich_reply.clone());
-        approved_task.result_summary = Some(rich_reply.clone());
-        let _ = core.state_db.upsert_task(&approved_task);
-    }
-    if effective_privacy.allows_memory_write() {
-        core.sessions.append_turn(
-            &sid,
-            &approved_task.goal,
-            &rich_reply,
-            fallback_ledger.last_resource_path.clone(),
-        );
-
-        let dots_val = serde_json::to_value(&final_dots)
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
-        let _ = crate::memory_hub::record_conversation_turn_with_policy(
-            core,
-            &crate::memory_hub::RecordTurnInput {
-                session_id: Some(sid.clone()),
-                user_text: approved_task.goal.clone(),
-                assistant_text: rich_reply.clone(),
-                thinking: None,
-                tool_steps: fallback_ledger.tool_steps_json.clone(),
-                trace_dots: dots_val,
-                incognito: false,
-            },
-            effective_privacy,
-        );
-    }
-
-    let session_obj = if effective_privacy.allows_memory_write() {
-        core.sessions.get_or_create(Some(&sid))
-    } else {
-        core.sessions.peek(&sid).unwrap_or(SessionState {
-            session_id: sid.clone(),
-            messages: Vec::new(),
-            last_resource_path: None,
-            updated_at: Utc::now(),
-        })
-    };
-    let cc_stats = crate::memory_hub::build_compressed_session_history_with_policy(
-        core,
-        &session_obj,
-        effective_privacy,
     )
-    .stats;
-
-    let mut response = json!({
-        "turn_id": resume_turn_id,
-        "task_id": approved_task.id,
-        "session_id": sid,
-        "status": "completed",
-        "approval_resolved": "approved",
-        "execution_mode": BackendExecutionMode::OfflineCore,
-        "side_effect_replay_prevented": false,
-        "effect_ledger": fallback_ledger.summary_json(),
-        "backend_used": "fallback",
-        "provider_used": "intentos-core",
-        "model_used": format!("{:?}", approved_task.route).to_ascii_lowercase(),
-        "reasoning_effort": "default",
-        "thinking": Value::Null,
-        "reply_markdown": rich_reply,
-        "reply": rich_reply,
-        "trace_dots": final_dots,
-        "tool_steps": fallback_ledger.tool_steps_json,
-        "memory_hits": [],
-        "adapter_actions": [],
-        "changeset_ids": approved_task.changeset_ids,
-        "handoff_command": approved_task.handoff_command,
-        "pending_approval": Value::Null,
-        "context_compression": cc_stats,
-    });
-    scrub_json_secrets(&mut response);
-    SensitiveDataGuard::redact_json(&mut response);
-    Ok(response)
 }

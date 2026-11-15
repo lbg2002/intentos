@@ -11,18 +11,18 @@
 
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
-    build_quick_chat_anthropic_tools, build_quick_chat_openai_tools_with_policy,
-    execute_quick_chat_tool_call, finalize_completed_turn_outcome,
-    prepare_system_prompt_and_context_with_policy, prepare_turn_context_blocks,
-    synthesize_rich_approved_step_markdown,
+    build_budget_exhausted_turn_outcome, build_quick_chat_anthropic_tools,
+    build_quick_chat_openai_tools_with_policy, execute_quick_chat_tool_call,
+    finalize_completed_turn_outcome, prepare_system_prompt_and_context_with_policy,
+    prepare_turn_context_blocks, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, BackendsCatalog, DiscoveryOptions, discover_backends_catalog,
     is_anthropic_endpoint, lookup_ephemeral_backend_key,
 };
 use crate::backend_bridge::turn_checkpoint::{
-    ActiveTurnHandle, SuspendedDialectState, SuspendedTurnCheckpoint, TurnEffectLedger,
-    save_suspended_checkpoint,
+    ActiveTurnHandle, SuspendedDialectState, SuspendedTurnCheckpoint, TurnBudgetTracker,
+    TurnEffectLedger, save_suspended_checkpoint,
 };
 use crate::backend_bridge::turn_engine::extract_thinking_and_clean_reply;
 use crate::config::{EgressVerdict, check_egress_matrix};
@@ -131,6 +131,17 @@ fn format_chat_only_tool_rejection(
     blocked_names: &[String],
     effect_ledger: &mut TurnEffectLedger,
 ) -> String {
+    if blocked_names.is_empty() {
+        effect_ledger
+            .chat_only_blocked_tools
+            .push("unknown_tool".to_string());
+    } else {
+        for name in blocked_names {
+            if !effect_ledger.chat_only_blocked_tools.contains(name) {
+                effect_ledger.chat_only_blocked_tools.push(name.clone());
+            }
+        }
+    }
     let joined = if blocked_names.is_empty() {
         "unknown_tool".to_string()
     } else {
@@ -151,6 +162,54 @@ fn format_chat_only_tool_rejection(
     } else {
         format!("{}\n\n> {}", cleaned_content.trim(), security_note)
     }
+}
+
+fn record_openai_response_usage(
+    resp: &Value,
+    effect_ledger: &mut TurnEffectLedger,
+) -> Option<String> {
+    let usage = resp.get("usage")?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cost_usd = usage
+        .get("cost_usd")
+        .or_else(|| usage.get("total_cost_usd"))
+        .or_else(|| usage.get("cost"))
+        .and_then(|v| v.as_f64());
+    effect_ledger
+        .budget_tracker
+        .record_token_usage(input_tokens, output_tokens, cost_usd)
+}
+
+fn record_anthropic_response_usage(
+    resp: &Value,
+    effect_ledger: &mut TurnEffectLedger,
+) -> Option<String> {
+    let usage = resp.get("usage")?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cost_usd = usage
+        .get("cost_usd")
+        .or_else(|| usage.get("total_cost_usd"))
+        .or_else(|| usage.get("cost"))
+        .and_then(|v| v.as_f64());
+    effect_ledger
+        .budget_tracker
+        .record_token_usage(input_tokens, output_tokens, cost_usd)
 }
 
 fn parse_remaining_openai_tool_calls(tool_calls: &[Value]) -> Vec<(String, String, Value)> {
@@ -335,23 +394,35 @@ pub async fn run_openai_tool_calling_turn_with_policy(
     } else {
         Vec::new()
     };
-    let max_rounds = if allow_broker_tools {
-        core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize
-    } else {
-        1
-    };
+    effect_ledger.budget_tracker.start_active_execution();
 
     let result: anyhow::Result<TurnExecutionOutcome> = async {
-        for round_idx in 0..max_rounds {
+        loop {
             if turn_handle.is_cancelled() {
                 anyhow::bail!("turn_cancelled");
             }
 
-            let resp = tokio::select! {
+            if let Err(_dim) = effect_ledger.budget_tracker.try_begin_model_round() {
+                return Ok(build_budget_exhausted_turn_outcome(
+                    core,
+                    active,
+                    execution_mode,
+                    task_id,
+                    session,
+                    user_text,
+                    incognito,
+                    taints,
+                    data_class,
+                    String::new(),
+                    effect_ledger,
+                ));
+            }
+
+            let call_res = tokio::select! {
                 _ = turn_handle.wait_cancelled() => {
                     anyhow::bail!("turn_cancelled");
                 }
-                r = call_openai_upstream(
+                r = call_openai_upstream_with_budget(
                     core,
                     &transport,
                     data_class,
@@ -359,8 +430,31 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                     &active.reasoning_effort,
                     &messages,
                     &openai_tools,
-                ) => r?,
+                    Some(&mut effect_ledger.budget_tracker),
+                ) => r,
             };
+            let resp = match call_res {
+                Ok(v) => v,
+                Err(err) => {
+                    if effect_ledger.budget_tracker.budget_exhausted {
+                        return Ok(build_budget_exhausted_turn_outcome(
+                            core,
+                            active,
+                            execution_mode,
+                            task_id,
+                            session,
+                            user_text,
+                            incognito,
+                            taints,
+                            data_class,
+                            String::new(),
+                            effect_ledger,
+                        ));
+                    }
+                    return Err(err);
+                }
+            };
+            record_openai_response_usage(&resp, effect_ledger);
 
             let choice = resp
                 .get("choices")
@@ -414,6 +508,40 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                         taints,
                         data_class,
                         rejected_md,
+                        effect_ledger,
+                    ));
+                }
+
+                if effect_ledger.budget_tracker.budget_exhausted {
+                    let dim = effect_ledger
+                        .budget_tracker
+                        .exhausted_dimension
+                        .clone()
+                        .unwrap_or_else(|| "token_or_cost".to_string());
+                    for tc in tool_calls {
+                        if let Some(n) = tc
+                            .pointer("/function/name")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                n, dim
+                            ));
+                        }
+                    }
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        active,
+                        execution_mode,
+                        task_id,
+                        session,
+                        user_text,
+                        incognito,
+                        taints,
+                        data_class,
+                        cleaned_content,
                         effect_ledger,
                     ));
                 }
@@ -476,7 +604,8 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                                     memory_hits: memory_hits.to_vec(),
                                     memory_dot: memory_dot.cloned(),
                                     context_compression: compressed_history.stats.clone(),
-                                    rounds_used: round_idx + 1,
+                                    rounds_used: effect_ledger.budget_tracker.used_model_rounds
+                                        as usize,
                                     paused_call_id: call_id,
                                     paused_canonical_tool: canonical_tool,
                                     paused_parsed_args: parsed_args,
@@ -491,6 +620,34 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                                 });
                             }
                             return Ok(*outcome);
+                        }
+                        QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                            for rem_tc in &tool_calls[tc_idx..] {
+                                if let Some(n) = rem_tc
+                                    .pointer("/function/name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    effect_ledger.budget_skipped_steps.push(format!(
+                                        "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                        n, dimension
+                                    ));
+                                }
+                            }
+                            return Ok(build_budget_exhausted_turn_outcome(
+                                core,
+                                active,
+                                execution_mode,
+                                task_id,
+                                session,
+                                user_text,
+                                incognito,
+                                taints,
+                                data_class,
+                                cleaned_content,
+                                effect_ledger,
+                            ));
                         }
                         QuickChatToolExecOutcome::ToolMessage { content, .. } => {
                             messages.push(json!({
@@ -517,24 +674,6 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                 ));
             }
         }
-
-        if !effect_ledger.trace_dots.is_empty() || !effect_ledger.task_steps.is_empty() {
-            return Ok(finalize_completed_turn_outcome(
-                core,
-                active,
-                execution_mode,
-                task_id,
-                session,
-                user_text,
-                incognito,
-                taints,
-                data_class,
-                String::new(),
-                effect_ledger,
-            ));
-        }
-
-        anyhow::bail!("达到单回合工具调用轮数上限")
     }
     .await;
 
@@ -674,15 +813,27 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
     } else {
         Vec::new()
     };
-    let max_rounds = if allow_broker_tools {
-        core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize
-    } else {
-        1
-    };
+    effect_ledger.budget_tracker.start_active_execution();
 
-    for round_idx in 0..max_rounds {
+    loop {
         if turn_handle.is_cancelled() {
             anyhow::bail!("turn_cancelled");
+        }
+
+        if let Err(_dim) = effect_ledger.budget_tracker.try_begin_model_round() {
+            return Ok(build_budget_exhausted_turn_outcome(
+                core,
+                active,
+                execution_mode,
+                task_id,
+                session,
+                user_text,
+                incognito,
+                taints,
+                data_class,
+                String::new(),
+                effect_ledger,
+            ));
         }
 
         let resp = tokio::select! {
@@ -700,6 +851,7 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                 &anthropic_tools,
             ) => r?,
         };
+        record_anthropic_response_usage(&resp, effect_ledger);
 
         let content_blocks = resp
             .get("content")
@@ -732,6 +884,33 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                     taints,
                     data_class,
                     rejected_md,
+                    effect_ledger,
+                ));
+            }
+
+            if effect_ledger.budget_tracker.budget_exhausted {
+                let dim = effect_ledger
+                    .budget_tracker
+                    .exhausted_dimension
+                    .clone()
+                    .unwrap_or_else(|| "token_or_cost".to_string());
+                for (_, n, _) in &tool_uses {
+                    effect_ledger.budget_skipped_steps.push(format!(
+                        "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                        n, dim
+                    ));
+                }
+                return Ok(build_budget_exhausted_turn_outcome(
+                    core,
+                    active,
+                    execution_mode,
+                    task_id,
+                    session,
+                    user_text,
+                    incognito,
+                    taints,
+                    data_class,
+                    cleaned_content,
                     effect_ledger,
                 ));
             }
@@ -785,7 +964,8 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                                 memory_hits: memory_hits.to_vec(),
                                 memory_dot: memory_dot.cloned(),
                                 context_compression: compressed_history.stats.clone(),
-                                rounds_used: round_idx + 1,
+                                rounds_used: effect_ledger.budget_tracker.used_model_rounds
+                                    as usize,
                                 paused_call_id: call_id.clone(),
                                 paused_canonical_tool: canonical_tool,
                                 paused_parsed_args: input_args.clone(),
@@ -802,6 +982,27 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
                             });
                         }
                         return Ok(*outcome);
+                    }
+                    QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                        for (_, rem_name, _) in &tool_uses[tu_idx..] {
+                            effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                rem_name, dimension
+                            ));
+                        }
+                        return Ok(build_budget_exhausted_turn_outcome(
+                            core,
+                            active,
+                            execution_mode,
+                            task_id,
+                            session,
+                            user_text,
+                            incognito,
+                            taints,
+                            data_class,
+                            cleaned_content,
+                            effect_ledger,
+                        ));
                     }
                     QuickChatToolExecOutcome::ToolMessage {
                         content, is_error, ..
@@ -836,24 +1037,6 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
             ));
         }
     }
-
-    if !effect_ledger.trace_dots.is_empty() || !effect_ledger.task_steps.is_empty() {
-        return Ok(finalize_completed_turn_outcome(
-            core,
-            active,
-            execution_mode,
-            task_id,
-            session,
-            user_text,
-            incognito,
-            taints,
-            data_class,
-            String::new(),
-            effect_ledger,
-        ));
-    }
-
-    anyhow::bail!("达到单回合工具调用轮数上限")
 }
 
 pub async fn continue_resumed_openai_turn(
@@ -863,7 +1046,6 @@ pub async fn continue_resumed_openai_turn(
     mut messages: Vec<Value>,
     openai_tools: Vec<Value>,
     approved_tool_content: String,
-    remaining_llm_rounds: usize,
 ) -> anyhow::Result<TurnExecutionOutcome> {
     let allow_broker_tools = !openai_tools.is_empty();
     let execution_mode = if allow_broker_tools {
@@ -919,7 +1101,7 @@ pub async fn continue_resumed_openai_turn(
                             memory_hits: cp.memory_hits.clone(),
                             memory_dot: cp.memory_dot.clone(),
                             context_compression: cp.context_compression.clone(),
-                            rounds_used: cp.rounds_used,
+                            rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
                             paused_parsed_args: rem_args.clone(),
@@ -932,6 +1114,31 @@ pub async fn continue_resumed_openai_turn(
                         });
                     }
                     return Ok(*outcome);
+                }
+                QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                    for (_, skipped_name, _) in &cp.remaining_tool_calls[rem_idx..] {
+                        cp.effect_ledger.budget_skipped_steps.push(format!(
+                            "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                            skipped_name, dimension
+                        ));
+                    }
+                    let partial_md = synthesize_rich_approved_step_markdown(
+                        &cp.user_text,
+                        &cp.effect_ledger.task_steps,
+                    );
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        &cp.active,
+                        execution_mode,
+                        &cp.task_id,
+                        &cp.session,
+                        &cp.user_text,
+                        cp.incognito,
+                        cp.taints.clone(),
+                        cp.data_class,
+                        partial_md,
+                        &mut cp.effect_ledger,
+                    ));
                 }
                 QuickChatToolExecOutcome::ToolMessage { content, .. } => {
                     messages.push(json!({
@@ -957,8 +1164,29 @@ pub async fn continue_resumed_openai_turn(
 
     if let Some(transport) = maybe_transport {
         let mut loop_outcome: Option<TurnExecutionOutcome> = None;
-        for r_offset in 0..remaining_llm_rounds {
-            let call_res = call_openai_upstream(
+        loop {
+            if let Err(_dim) = cp.effect_ledger.budget_tracker.try_begin_model_round() {
+                let partial_md = synthesize_rich_approved_step_markdown(
+                    &cp.user_text,
+                    &cp.effect_ledger.task_steps,
+                );
+                loop_outcome = Some(build_budget_exhausted_turn_outcome(
+                    core,
+                    &cp.active,
+                    execution_mode,
+                    &cp.task_id,
+                    &cp.session,
+                    &cp.user_text,
+                    cp.incognito,
+                    cp.taints.clone(),
+                    cp.data_class,
+                    partial_md,
+                    &mut cp.effect_ledger,
+                ));
+                break;
+            }
+
+            let call_res = call_openai_upstream_with_budget(
                 core,
                 &transport,
                 cp.data_class,
@@ -966,19 +1194,41 @@ pub async fn continue_resumed_openai_turn(
                 &cp.active.reasoning_effort,
                 &messages,
                 &openai_tools,
+                Some(&mut cp.effect_ledger.budget_tracker),
             )
             .await;
 
             let resp = match call_res {
                 Ok(v) => v,
                 Err(err) => {
-                    tracing::warn!(
-                        "Resumed OpenAI upstream failed ({}), synthesizing rich fallback reply",
-                        err
-                    );
+                    if cp.effect_ledger.budget_tracker.budget_exhausted {
+                        let partial_md = synthesize_rich_approved_step_markdown(
+                            &cp.user_text,
+                            &cp.effect_ledger.task_steps,
+                        );
+                        loop_outcome = Some(build_budget_exhausted_turn_outcome(
+                            core,
+                            &cp.active,
+                            execution_mode,
+                            &cp.task_id,
+                            &cp.session,
+                            &cp.user_text,
+                            cp.incognito,
+                            cp.taints.clone(),
+                            cp.data_class,
+                            partial_md,
+                            &mut cp.effect_ledger,
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "Resumed OpenAI upstream failed ({}), synthesizing rich fallback reply",
+                            err
+                        );
+                    }
                     break;
                 }
             };
+            record_openai_response_usage(&resp, &mut cp.effect_ledger);
 
             let Some(msg) = resp
                 .get("choices")
@@ -1030,6 +1280,50 @@ pub async fn continue_resumed_openai_turn(
                         cp.taints.clone(),
                         cp.data_class,
                         rejected_md,
+                        &mut cp.effect_ledger,
+                    ));
+                    break;
+                }
+
+                if cp.effect_ledger.budget_tracker.budget_exhausted {
+                    let dim = cp
+                        .effect_ledger
+                        .budget_tracker
+                        .exhausted_dimension
+                        .clone()
+                        .unwrap_or_else(|| "token_or_cost".to_string());
+                    for tc in tool_calls {
+                        if let Some(n) = tc
+                            .pointer("/function/name")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            cp.effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                n, dim
+                            ));
+                        }
+                    }
+                    let partial_md = if cleaned_content.trim().is_empty() {
+                        synthesize_rich_approved_step_markdown(
+                            &cp.user_text,
+                            &cp.effect_ledger.task_steps,
+                        )
+                    } else {
+                        cleaned_content
+                    };
+                    loop_outcome = Some(build_budget_exhausted_turn_outcome(
+                        core,
+                        &cp.active,
+                        execution_mode,
+                        &cp.task_id,
+                        &cp.session,
+                        &cp.user_text,
+                        cp.incognito,
+                        cp.taints.clone(),
+                        cp.data_class,
+                        partial_md,
                         &mut cp.effect_ledger,
                     ));
                     break;
@@ -1091,7 +1385,8 @@ pub async fn continue_resumed_openai_turn(
                                     memory_hits: cp.memory_hits.clone(),
                                     memory_dot: cp.memory_dot.clone(),
                                     context_compression: cp.context_compression.clone(),
-                                    rounds_used: cp.rounds_used + r_offset + 1,
+                                    rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds
+                                        as usize,
                                     paused_call_id: call_id,
                                     paused_canonical_tool: canonical_tool,
                                     paused_parsed_args: parsed_args,
@@ -1106,6 +1401,44 @@ pub async fn continue_resumed_openai_turn(
                                 });
                             }
                             loop_outcome = Some(*outcome);
+                            inner_paused = true;
+                            break;
+                        }
+                        QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                            for rem_tc in &tool_calls[tc_idx..] {
+                                if let Some(n) = rem_tc
+                                    .pointer("/function/name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    cp.effect_ledger.budget_skipped_steps.push(format!(
+                                        "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                        n, dimension
+                                    ));
+                                }
+                            }
+                            let partial_md = if cleaned_content.trim().is_empty() {
+                                synthesize_rich_approved_step_markdown(
+                                    &cp.user_text,
+                                    &cp.effect_ledger.task_steps,
+                                )
+                            } else {
+                                cleaned_content.clone()
+                            };
+                            loop_outcome = Some(build_budget_exhausted_turn_outcome(
+                                core,
+                                &cp.active,
+                                execution_mode,
+                                &cp.task_id,
+                                &cp.session,
+                                &cp.user_text,
+                                cp.incognito,
+                                cp.taints.clone(),
+                                cp.data_class,
+                                partial_md,
+                                &mut cp.effect_ledger,
+                            ));
                             inner_paused = true;
                             break;
                         }
@@ -1186,7 +1519,6 @@ pub async fn continue_resumed_anthropic_turn(
     anthropic_tools: Vec<Value>,
     approved_tool_content: String,
     approved_is_err: bool,
-    remaining_llm_rounds: usize,
 ) -> anyhow::Result<TurnExecutionOutcome> {
     let allow_broker_tools = !anthropic_tools.is_empty();
     let execution_mode = if allow_broker_tools {
@@ -1243,7 +1575,7 @@ pub async fn continue_resumed_anthropic_turn(
                             memory_hits: cp.memory_hits.clone(),
                             memory_dot: cp.memory_dot.clone(),
                             context_compression: cp.context_compression.clone(),
-                            rounds_used: cp.rounds_used,
+                            rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
                             paused_parsed_args: rem_args.clone(),
@@ -1260,6 +1592,31 @@ pub async fn continue_resumed_anthropic_turn(
                         });
                     }
                     return Ok(*outcome);
+                }
+                QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                    for (_, skipped_name, _) in &cp.remaining_tool_calls[rem_idx..] {
+                        cp.effect_ledger.budget_skipped_steps.push(format!(
+                            "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                            skipped_name, dimension
+                        ));
+                    }
+                    let partial_md = synthesize_rich_approved_step_markdown(
+                        &cp.user_text,
+                        &cp.effect_ledger.task_steps,
+                    );
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        &cp.active,
+                        execution_mode,
+                        &cp.task_id,
+                        &cp.session,
+                        &cp.user_text,
+                        cp.incognito,
+                        cp.taints.clone(),
+                        cp.data_class,
+                        partial_md,
+                        &mut cp.effect_ledger,
+                    ));
                 }
                 QuickChatToolExecOutcome::ToolMessage {
                     content, is_error, ..
@@ -1280,7 +1637,25 @@ pub async fn continue_resumed_anthropic_turn(
         "content": prior_tool_results,
     }));
 
-    for r_offset in 0..remaining_llm_rounds {
+    loop {
+        if let Err(_dim) = cp.effect_ledger.budget_tracker.try_begin_model_round() {
+            let partial_md =
+                synthesize_rich_approved_step_markdown(&cp.user_text, &cp.effect_ledger.task_steps);
+            return Ok(build_budget_exhausted_turn_outcome(
+                core,
+                &cp.active,
+                execution_mode,
+                &cp.task_id,
+                &cp.session,
+                &cp.user_text,
+                cp.incognito,
+                cp.taints.clone(),
+                cp.data_class,
+                partial_md,
+                &mut cp.effect_ledger,
+            ));
+        }
+
         let call_res = call_anthropic_upstream(
             &base_url,
             api_key.as_deref(),
@@ -1303,6 +1678,7 @@ pub async fn continue_resumed_anthropic_turn(
                 break;
             }
         };
+        record_anthropic_response_usage(&resp, &mut cp.effect_ledger);
 
         let Some(content_blocks) = resp.get("content").and_then(|c| c.as_array()) else {
             break;
@@ -1334,6 +1710,42 @@ pub async fn continue_resumed_anthropic_turn(
                     cp.taints.clone(),
                     cp.data_class,
                     rejected_md,
+                    &mut cp.effect_ledger,
+                ));
+            }
+
+            if cp.effect_ledger.budget_tracker.budget_exhausted {
+                let dim = cp
+                    .effect_ledger
+                    .budget_tracker
+                    .exhausted_dimension
+                    .clone()
+                    .unwrap_or_else(|| "token_or_cost".to_string());
+                for (_, n, _) in &tool_uses {
+                    cp.effect_ledger.budget_skipped_steps.push(format!(
+                        "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                        n, dim
+                    ));
+                }
+                let partial_md = if cleaned_content.trim().is_empty() {
+                    synthesize_rich_approved_step_markdown(
+                        &cp.user_text,
+                        &cp.effect_ledger.task_steps,
+                    )
+                } else {
+                    cleaned_content
+                };
+                return Ok(build_budget_exhausted_turn_outcome(
+                    core,
+                    &cp.active,
+                    execution_mode,
+                    &cp.task_id,
+                    &cp.session,
+                    &cp.user_text,
+                    cp.incognito,
+                    cp.taints.clone(),
+                    cp.data_class,
+                    partial_md,
                     &mut cp.effect_ledger,
                 ));
             }
@@ -1383,7 +1795,8 @@ pub async fn continue_resumed_anthropic_turn(
                                 memory_hits: cp.memory_hits.clone(),
                                 memory_dot: cp.memory_dot.clone(),
                                 context_compression: cp.context_compression.clone(),
-                                rounds_used: cp.rounds_used + r_offset + 1,
+                                rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds
+                                    as usize,
                                 paused_call_id: cid.clone(),
                                 paused_canonical_tool: canonical_tool,
                                 paused_parsed_args: iargs.clone(),
@@ -1400,6 +1813,35 @@ pub async fn continue_resumed_anthropic_turn(
                             });
                         }
                         return Ok(*outcome);
+                    }
+                    QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                        for (_, rem_name, _) in &tool_uses[tu_idx..] {
+                            cp.effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                rem_name, dimension
+                            ));
+                        }
+                        let partial_md = if cleaned_content.trim().is_empty() {
+                            synthesize_rich_approved_step_markdown(
+                                &cp.user_text,
+                                &cp.effect_ledger.task_steps,
+                            )
+                        } else {
+                            cleaned_content
+                        };
+                        return Ok(build_budget_exhausted_turn_outcome(
+                            core,
+                            &cp.active,
+                            execution_mode,
+                            &cp.task_id,
+                            &cp.session,
+                            &cp.user_text,
+                            cp.incognito,
+                            cp.taints.clone(),
+                            cp.data_class,
+                            partial_md,
+                            &mut cp.effect_ledger,
+                        ));
                     }
                     QuickChatToolExecOutcome::ToolMessage {
                         content, is_error, ..
@@ -1550,6 +1992,30 @@ pub async fn call_openai_upstream(
     messages: &[Value],
     tools: &[Value],
 ) -> anyhow::Result<Value> {
+    call_openai_upstream_with_budget(
+        core,
+        transport,
+        data_class,
+        model,
+        reasoning_effort,
+        messages,
+        tools,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn call_openai_upstream_with_budget(
+    core: &IntentOsCore,
+    transport: &UpstreamTransport,
+    data_class: DataClass,
+    model: &str,
+    reasoning_effort: &str,
+    messages: &[Value],
+    tools: &[Value],
+    budget_tracker: Option<&mut TurnBudgetTracker>,
+) -> anyhow::Result<Value> {
     let mapped_effort = match reasoning_effort {
         "fast" => Some("low"),
         "medium" => Some("medium"),
@@ -1584,6 +2050,11 @@ pub async fn call_openai_upstream(
                     if mapped_effort.is_some()
                         && (es.contains("reasoning_effort") || es.contains("400"))
                     {
+                        if let Some(bt) = budget_tracker
+                            && let Err(dim) = bt.try_record_retry()
+                        {
+                            anyhow::bail!("budget_exhausted:{}", dim);
+                        }
                         Ok(core
                             .gateway
                             .proxy_chat_completion(run_token, build_body(false, true))
@@ -1651,6 +2122,11 @@ pub async fn call_openai_upstream(
             }
 
             if status.as_u16() == 400 && mapped_effort.is_some() {
+                if let Some(bt) = budget_tracker
+                    && let Err(dim) = bt.try_record_retry()
+                {
+                    anyhow::bail!("budget_exhausted:{}", dim);
+                }
                 let retry_resp = send_once(build_body(false, true)).await?;
                 let retry_status = retry_resp.status();
                 let retry_text = retry_resp.text().await?;

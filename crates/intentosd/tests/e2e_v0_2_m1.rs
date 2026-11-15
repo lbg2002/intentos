@@ -228,6 +228,11 @@ async fn m1_test1_turn_engine_modularized_and_cli_broker_bridge_unifies_executio
     .unwrap();
 
     assert_eq!(http_res["status"], "completed");
+    assert_eq!(http_res["request_status"], "finished");
+    assert_eq!(http_res["task_status"], "succeeded");
+    assert_eq!(http_res["recovery_required"], false);
+    assert_eq!(http_res["budget_usage"]["used_model_rounds"], 2);
+    assert_eq!(http_res["budget_usage"]["used_tool_calls"], 1);
     assert_eq!(http_res["execution_mode"], "managed_broker");
     assert_eq!(http_res["changeset_ids"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -337,6 +342,8 @@ esac
     .unwrap();
 
     assert_eq!(cli_paused["status"], "awaiting_approval");
+    assert_eq!(cli_paused["request_status"], "awaiting_approval");
+    assert_eq!(cli_paused["task_status"], "awaiting_approval");
     assert_eq!(cli_paused["execution_mode"], "cli_broker_bridged");
     let pa = &cli_paused["pending_approval"];
     assert_eq!(pa["capability_id"], "file.search");
@@ -353,6 +360,8 @@ esac
     .unwrap();
 
     assert_eq!(cli_resumed["status"], "completed");
+    assert_eq!(cli_resumed["request_status"], "finished");
+    assert_eq!(cli_resumed["task_status"], "succeeded");
     assert_eq!(cli_resumed["approval_resolved"], "approved");
     assert_eq!(cli_resumed["execution_mode"], "cli_broker_bridged");
     assert!(
@@ -491,7 +500,26 @@ async fn m1_test2_effect_ledger_prevents_duplicate_side_effect_on_backend_fallba
     .unwrap();
 
     assert_eq!(srv_state.rounds.load(Ordering::SeqCst), 2);
+    // H07: Transport `request_status` is separated from goal `task_status`!
+    // Legacy `"status"` stays `"completed"` for GTK/GNOME/Web frontend compatibility, while
+    // `"request_status"` is `"finished"`, `"task_status"` is `"partially_completed"`, and
+    // `"recovery_required"` is `true`.
     assert_eq!(res["status"], "completed");
+    assert_eq!(res["request_status"], "finished");
+    assert_eq!(res["task_status"], "partially_completed");
+    assert_eq!(res["recovery_required"], true);
+    assert_eq!(res["completed_steps"].as_array().unwrap().len(), 1);
+    assert!(
+        !res["unresolved_goals"].as_array().unwrap().is_empty(),
+        "Mid-turn 502 after round-1 mutation must report unresolved_goals, got: {:?}",
+        res["unresolved_goals"]
+    );
+    let persisted_502_task = core
+        .state_db
+        .get_task(res["task_id"].as_str().unwrap())
+        .unwrap()
+        .expect("halted task must be persisted in state_db");
+    assert_eq!(persisted_502_task.status, TaskStatus::PartiallyCompleted);
     assert_eq!(res["side_effect_replay_prevented"], true);
     assert_eq!(res["execution_mode"], "managed_broker");
     assert!(
@@ -1061,4 +1089,639 @@ async fn m1_test5_cognitive_l1_structured_goal_recognition_and_eval_fixes() {
             .route_text("怎么批量查找最近7天修改过的日志", false),
         RoutedIntent::EscalateL2 { .. }
     ));
+}
+
+// =============================================================================
+// Test 6 (H07-a): 1 Model Round With 4 Tool Calls Counts Each Tool Call
+//                 Individually (`used_tool_calls += 4`, `used_model_rounds += 1`)
+//                 and Halts Cleanly at `max_tool_calls` Preserving `changeset_ids`
+// =============================================================================
+
+#[derive(Clone)]
+struct H07FourToolsState {
+    upstream_calls: Arc<AtomicUsize>,
+    target_vol: i64,
+}
+
+async fn mock_h07_four_tools_in_one_round(
+    State(state): State<H07FourToolsState>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    state.upstream_calls.fetch_add(1, Ordering::SeqCst);
+    let has_tool_msg = body["messages"]
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|m| m["role"] == "tool"));
+
+    if !has_tool_msg {
+        Json(json!({
+            "id": "chatcmpl_h07_4tools_r1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "<think>单轮并行发出 4 个受控工具调用</think>",
+                    "tool_calls": [
+                        {
+                            "id": "call_h07_1",
+                            "type": "function",
+                            "function": {
+                                "name": "network_ip",
+                                "arguments": "{}"
+                            }
+                        },
+                        {
+                            "id": "call_h07_2",
+                            "type": "function",
+                            "function": {
+                                "name": "display_brightness_set",
+                                "arguments": "{\"value\":52}"
+                            }
+                        },
+                        {
+                            "id": "call_h07_3",
+                            "type": "function",
+                            "function": {
+                                "name": "power_profile_set",
+                                "arguments": "{\"profile\":\"balanced\"}"
+                            }
+                        },
+                        {
+                            "id": "call_h07_4",
+                            "type": "function",
+                            "function": {
+                                "name": "sound_volume_set",
+                                "arguments": json!({ "value": state.target_vol }).to_string()
+                            }
+                        }
+                    ]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 45
+            }
+        }))
+    } else {
+        Json(json!({
+            "id": "chatcmpl_h07_4tools_r2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "已完成网络检查、亮度、电源模式与音量四项设置。"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 210,
+                "completion_tokens": 22
+            }
+        }))
+    }
+}
+
+#[tokio::test]
+async fn h07_single_round_four_tool_calls_counts_individually_and_halts_at_max_tool_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let core = init_m1_core(tmp.path(), &ws, "native");
+
+    let (initial_vol_val, _) = core.settings.read_setting_value("sound.volume").unwrap();
+    let initial_vol = initial_vol_val.as_f64().unwrap().round() as i64;
+    let target_vol = if initial_vol == 67 { 43 } else { 67 };
+
+    let srv_state = H07FourToolsState {
+        upstream_calls: Arc::new(AtomicUsize::new(0)),
+        target_vol,
+    };
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(mock_h07_four_tools_in_one_round),
+        )
+        .with_state(srv_state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mock_home = tmp.path().join("mock_home_h07_4t");
+    std::fs::create_dir_all(&mock_home).unwrap();
+    let opts = DiscoveryOptions::isolated_for_test(mock_home);
+
+    set_active_backend_with_options(
+        &core,
+        &json!({
+            "backend": "openai",
+            "provider": "h07-4t-prov",
+            "model": "gpt-5.4",
+            "base_url": format!("http://{}/v1", addr),
+            "api_key": "sk-h07-4tools-test-key-123456"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    // Case A: `max_model_rounds: 1, max_tool_calls: 12` -> Round 1 executes all 4 tool calls
+    // (`used_model_rounds == 1`, `used_tool_calls == 4`) and halts before Round 2!
+    let res_r1_all4 = send_quick_chat_turn_with_options(
+        &core,
+        &json!({
+            "session_id": "ses_h07_all4",
+            "text": "请配置会议环境参数",
+            "budget": {
+                "max_model_rounds": 1,
+                "max_tool_calls": 12
+            }
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(srv_state.upstream_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(res_r1_all4["budget_usage"]["used_model_rounds"], 1);
+    assert_eq!(res_r1_all4["budget_usage"]["used_tool_calls"], 4);
+    assert_eq!(res_r1_all4["completed_steps"].as_array().unwrap().len(), 4);
+    assert_eq!(res_r1_all4["budget_exhausted"], true);
+    assert_eq!(res_r1_all4["exhausted_dimension"], "max_model_rounds");
+    let (vol_after_a, _) = core.settings.read_setting_value("sound.volume").unwrap();
+    assert_eq!(vol_after_a.as_f64().unwrap().round() as i64, target_vol);
+    for csid in res_r1_all4["changeset_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+    {
+        core.undo(csid.as_str()).unwrap();
+    }
+
+    let (prior_vol, _) = core.settings.read_setting_value("sound.volume").unwrap();
+    let baseline_vol = prior_vol.as_f64().unwrap().round() as i64;
+    assert_eq!(baseline_vol, initial_vol);
+    assert_ne!(baseline_vol, target_vol);
+    srv_state.upstream_calls.store(0, Ordering::SeqCst);
+
+    // Case B: `max_model_rounds: 6, max_tool_calls: 3` -> Round 1 emits 4 tool calls,
+    // executes 3, halts on the 4th (`sound_volume_set`) WITHOUT calling upstream Round 2!
+    let res_capped = send_quick_chat_turn_with_options(
+        &core,
+        &json!({
+            "session_id": "ses_h07_cap3",
+            "text": "请查询系统状态并设置亮度、电源模式和音量",
+            "budget": {
+                "max_model_rounds": 6,
+                "max_tool_calls": 3
+            }
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        srv_state.upstream_calls.load(Ordering::SeqCst),
+        1,
+        "Must halt immediately when max_tool_calls is exhausted without entering Round 2"
+    );
+    assert_eq!(res_capped["status"], "completed");
+    assert_eq!(res_capped["request_status"], "finished");
+    assert_eq!(res_capped["task_status"], "partially_completed");
+    assert_eq!(res_capped["budget_exhausted"], true);
+    assert_eq!(res_capped["exhausted_dimension"], "max_tool_calls");
+    assert_eq!(res_capped["budget_usage"]["used_model_rounds"], 1);
+    assert_eq!(res_capped["budget_usage"]["used_tool_calls"], 3);
+    assert_eq!(res_capped["budget_usage"]["used_input_tokens"], 120);
+    assert_eq!(res_capped["budget_usage"]["used_output_tokens"], 45);
+    assert_eq!(res_capped["completed_steps"].as_array().unwrap().len(), 3);
+    assert!(
+        res_capped["unresolved_goals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g.as_str().unwrap_or("").contains("sound_volume_set")),
+        "unresolved_goals must report skipped 4th tool call, got: {:?}",
+        res_capped["unresolved_goals"]
+    );
+    assert!(
+        !res_capped["changeset_ids"].as_array().unwrap().is_empty(),
+        "Already-committed changeset_ids must be preserved on mid-turn budget halt"
+    );
+    let (vol_after, _) = core.settings.read_setting_value("sound.volume").unwrap();
+    assert_eq!(
+        vol_after.as_f64().unwrap().round() as i64,
+        baseline_vol,
+        "4th tool call past max_tool_calls=3 MUST NOT execute!"
+    );
+    for csid in res_capped["changeset_ids"].as_array().unwrap().iter().rev() {
+        core.undo(csid.as_str()).unwrap();
+    }
+}
+
+// =============================================================================
+// Test 7 (H07-b): Budget Persists Across Multiple Approval Pauses Without
+//                 `.max(2)` Reset, While Human Approval Review Time Does NOT
+//                 Burn `active_execution_ms`, and `expires_at` Is Enforced
+// =============================================================================
+
+#[derive(Clone)]
+struct H07MultiApprovalState {
+    upstream_calls: Arc<AtomicUsize>,
+    vault_a: PathBuf,
+    vault_b: PathBuf,
+}
+
+async fn mock_h07_multi_approval_completions(
+    State(state): State<H07MultiApprovalState>,
+    Json(_body): Json<Value>,
+) -> Json<Value> {
+    let idx = state.upstream_calls.fetch_add(1, Ordering::SeqCst);
+    match idx {
+        0 => Json(json!({
+            "id": "chatcmpl_h07_pa_1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "<think>第一轮检索受限目录 A</think>",
+                    "tool_calls": [{
+                        "id": "call_pa_vault_a",
+                        "type": "function",
+                        "function": {
+                            "name": "file_search",
+                            "arguments": json!({
+                                "directory": state.vault_a.to_string_lossy(),
+                                "query": "alpha"
+                            }).to_string()
+                        }
+                    }]
+                }
+            }]
+        })),
+        1 => Json(json!({
+            "id": "chatcmpl_h07_pa_2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "<think>第二轮检索受限目录 B</think>",
+                    "tool_calls": [{
+                        "id": "call_pa_vault_b",
+                        "type": "function",
+                        "function": {
+                            "name": "file_search",
+                            "arguments": json!({
+                                "directory": state.vault_b.to_string_lossy(),
+                                "query": "beta"
+                            }).to_string()
+                        }
+                    }]
+                }
+            }]
+        })),
+        _ => Json(json!({
+            "id": "chatcmpl_h07_pa_illegal_r3",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "ILLEGAL_ROUND_3_AFTER_MAX_MODEL_ROUNDS_2"
+                }
+            }]
+        })),
+    }
+}
+
+#[tokio::test]
+async fn h07_budget_persists_across_multiple_approvals_without_reset_and_pauses_wall_timer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let vault_a = tmp.path().join("restricted_vault_a");
+    let vault_b = tmp.path().join("restricted_vault_b");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&vault_a).unwrap();
+    std::fs::create_dir_all(&vault_b).unwrap();
+    std::fs::write(vault_a.join("alpha_report.txt"), "alpha ok\n").unwrap();
+    std::fs::write(vault_b.join("beta_report.txt"), "beta ok\n").unwrap();
+
+    let core = init_m1_core(tmp.path(), &ws, "native");
+
+    let srv_state = H07MultiApprovalState {
+        upstream_calls: Arc::new(AtomicUsize::new(0)),
+        vault_a: vault_a.clone(),
+        vault_b: vault_b.clone(),
+    };
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(mock_h07_multi_approval_completions),
+        )
+        .with_state(srv_state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mock_home = tmp.path().join("mock_home_h07_pa");
+    std::fs::create_dir_all(&mock_home).unwrap();
+    let opts = DiscoveryOptions::isolated_for_test(mock_home);
+
+    set_active_backend_with_options(
+        &core,
+        &json!({
+            "backend": "openai",
+            "provider": "h07-pa-prov",
+            "model": "gpt-5.4",
+            "base_url": format!("http://{}/v1", addr),
+            "api_key": "sk-h07-pa-test-key-123456"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    // Start turn with `max_model_rounds: 2` and `max_wall_time_ms: 2500`.
+    let paused_1 = send_quick_chat_turn_with_options(
+        &core,
+        &json!({
+            "session_id": "ses_h07_multi_approval",
+            "text": "依次检索两个外部归档目录中的报告",
+            "budget": {
+                "max_model_rounds": 2,
+                "max_tool_calls": 6,
+                "max_wall_time_ms": 2500
+            }
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(paused_1["status"], "awaiting_approval");
+    assert_eq!(paused_1["request_status"], "awaiting_approval");
+    assert_eq!(paused_1["task_status"], "awaiting_approval");
+    assert_eq!(paused_1["budget_usage"]["used_model_rounds"], 1);
+    assert_eq!(paused_1["budget_usage"]["used_tool_calls"], 0);
+
+    // Simulate 1,500ms human review delay during Approval #1 (does NOT consume execution budget!)
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let paused_2 = resume_approved_turn_with_options(
+        &core,
+        &json!({
+            "approval_id": paused_1["pending_approval"]["approval_id"],
+            "decision": "once"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        paused_2["status"], "awaiting_approval",
+        "Expected second approval pause on Round 2, got: {}",
+        paused_2
+    );
+    assert_eq!(paused_2["request_status"], "awaiting_approval");
+    assert_eq!(paused_2["task_status"], "awaiting_approval");
+    assert_eq!(paused_2["budget_usage"]["used_model_rounds"], 2);
+    assert_eq!(paused_2["budget_usage"]["used_tool_calls"], 1);
+
+    // Simulate ANOTHER 1,500ms human review delay during Approval #2 (3,000ms total wait > 2,500ms max_wall_time_ms!)
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let final_res = resume_approved_turn_with_options(
+        &core,
+        &json!({
+            "approval_id": paused_2["pending_approval"]["approval_id"],
+            "decision": "once"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    // CRITICAL assertions:
+    // 1) `.max(2)` NEVER reset remaining rounds: Round 3 upstream call was NOT made (`upstream_calls == 2`)!
+    assert_eq!(
+        srv_state.upstream_calls.load(Ordering::SeqCst),
+        2,
+        "Resume #2 MUST NOT reset remaining rounds via .max(2) — Round 3 upstream call is forbidden!"
+    );
+    // 2) `max_model_rounds` (NOT `max_wall_time_ms`) halted Round 3, proving 3,000ms approval wait was paused!
+    assert_eq!(final_res["status"], "completed");
+    assert_eq!(final_res["request_status"], "finished");
+    assert_eq!(final_res["budget_exhausted"], true);
+    assert_eq!(final_res["exhausted_dimension"], "max_model_rounds");
+    assert_eq!(final_res["budget_usage"]["used_model_rounds"], 2);
+    assert_eq!(final_res["budget_usage"]["used_tool_calls"], 2);
+    assert!(
+        final_res["budget_usage"]["active_execution_ms"]
+            .as_u64()
+            .unwrap()
+            < 2500,
+        "Human approval wait (3,000ms) must NOT burn active_execution_ms, got: {}",
+        final_res["budget_usage"]["active_execution_ms"]
+    );
+    assert_eq!(final_res["completed_steps"].as_array().unwrap().len(), 2);
+}
+
+// =============================================================================
+// Test 8 (H07-c): Evidence-Based `task_status` Never Reports `"succeeded"`
+//                 Simply Because the LLM Produced Polite Text When Sub-Goals
+//                 Were Unexecuted or Tool Calls Were Denied
+// =============================================================================
+
+#[derive(Clone)]
+struct H07PoliteHallucinationState {
+    mode: &'static str,
+}
+
+async fn mock_h07_polite_hallucination_completions(
+    State(state): State<H07PoliteHallucinationState>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let has_tool_msg = body["messages"]
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|m| m["role"] == "tool"));
+
+    match (state.mode, has_tool_msg) {
+        ("compound_skip_second", false) => Json(json!({
+            "id": "chatcmpl_h07_comp_1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_only_vol",
+                        "type": "function",
+                        "function": {
+                            "name": "sound_volume_set",
+                            "arguments": "{\"value\":38}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        ("compound_skip_second", true) => Json(json!({
+            "id": "chatcmpl_h07_comp_2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "已经为您把音量调到 38%，并且把屏幕亮度调到了 62%，全部操作顺利完成！"
+                }
+            }]
+        })),
+        ("denied_ssh", false) => Json(json!({
+            "id": "chatcmpl_h07_deny_1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_forbidden_ssh",
+                        "type": "function",
+                        "function": {
+                            "name": "file_search",
+                            "arguments": "{\"directory\":\"/root/.ssh\",\"query\":\"id_rsa\"}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        _ => Json(json!({
+            "id": "chatcmpl_h07_deny_2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "好的，已经为您圆满完成查询任务！"
+                }
+            }]
+        })),
+    }
+}
+
+#[tokio::test]
+async fn h07_evidence_based_task_status_rejects_polite_llm_hallucination_on_failed_or_unresolved_goals()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let core = init_m1_core(tmp.path(), &ws, "native");
+
+    // Subcase A: Compound command where LLM executes 1 of 2 sub-goals and politely claims both succeeded
+    let app_a = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(mock_h07_polite_hallucination_completions),
+        )
+        .with_state(H07PoliteHallucinationState {
+            mode: "compound_skip_second",
+        });
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = listener_a.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener_a, app_a).await.unwrap();
+    });
+
+    let mock_home = tmp.path().join("mock_home_h07_ev");
+    std::fs::create_dir_all(&mock_home).unwrap();
+    let opts = DiscoveryOptions::isolated_for_test(mock_home);
+
+    set_active_backend_with_options(
+        &core,
+        &json!({
+            "backend": "openai",
+            "provider": "h07-ev-prov",
+            "model": "gpt-5.4",
+            "base_url": format!("http://{}/v1", addr_a),
+            "api_key": "sk-h07-ev-test-key-123456"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    let comp_res = send_quick_chat_turn_with_options(
+        &core,
+        &json!({
+            "session_id": "ses_h07_ev_comp",
+            "text": "把音量调到 38%，然后把屏幕亮度调到 62%"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(comp_res["status"], "completed");
+    assert_eq!(comp_res["request_status"], "finished");
+    assert_ne!(
+        comp_res["task_status"], "succeeded",
+        "Must NEVER report task_status == 'succeeded' when second compound sub-goal was unexecuted!"
+    );
+    assert_eq!(comp_res["task_status"], "partially_completed");
+    assert_eq!(comp_res["completed_steps"].as_array().unwrap().len(), 1);
+    assert!(
+        comp_res["unresolved_goals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g.as_str().unwrap_or("").contains("display.brightness.set")),
+        "unresolved_goals must flag missing display.brightness.set evidence, got: {:?}",
+        comp_res["unresolved_goals"]
+    );
+    for csid in comp_res["changeset_ids"].as_array().unwrap() {
+        let _ = core.undo(csid.as_str());
+    }
+
+    // Subcase B: Denied tool call + polite LLM reply -> `request_status == "finished"`, `task_status == "failed"`
+    let app_b = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(mock_h07_polite_hallucination_completions),
+        )
+        .with_state(H07PoliteHallucinationState { mode: "denied_ssh" });
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = listener_b.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener_b, app_b).await.unwrap();
+    });
+
+    set_active_backend_with_options(
+        &core,
+        &json!({
+            "backend": "openai",
+            "provider": "h07-ev-prov",
+            "model": "gpt-5.4",
+            "base_url": format!("http://{}/v1", addr_b),
+            "api_key": "sk-h07-ev-test-key-123456"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    let deny_res = send_quick_chat_turn_with_options(
+        &core,
+        &json!({
+            "session_id": "ses_h07_ev_deny",
+            "text": "帮我检索 /root/.ssh 下的密钥"
+        }),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(deny_res["status"], "completed");
+    assert_eq!(deny_res["request_status"], "finished");
+    assert_eq!(deny_res["task_status"], "failed");
+    assert!(deny_res["completed_steps"].as_array().unwrap().is_empty());
+    assert!(!deny_res["unresolved_goals"].as_array().unwrap().is_empty());
 }

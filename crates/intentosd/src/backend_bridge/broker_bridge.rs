@@ -17,14 +17,18 @@ use crate::backend_bridge::turn_checkpoint::{
 use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
 use crate::db::StepExecutionLogRow;
+use crate::intent_engine::PatternCompiler;
+use crate::intent_engine::cognitive_parser::parse_structured_intent;
+use crate::intent_engine::compound_splitter::split_compound_intent;
+use crate::intent_engine::goal_schema::CognitiveIntentKind;
 use crate::runtime::{SessionState, build_context_blocks};
 use crate::security_guard::PrivacySessionPolicy;
 use chrono::Utc;
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
     CapabilityCall, CapabilityResult, ContextBlock, DataClass, Effect, ExecutionStatus,
-    InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskBudget, TaskStatus, TaskStep,
-    TaskTrigger, ToolSpec, VerificationReport, VerificationState,
+    InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskStatus, TaskStep, TaskTrigger,
+    ToolSpec, VerificationReport, VerificationState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -234,6 +238,13 @@ pub struct TurnExecutionOutcome {
     pub model_used: String,
     pub execution_mode: BackendExecutionMode,
     pub side_effect_replay_prevented: bool,
+    pub request_status: String,
+    pub task_status: String,
+    pub completed_steps: Vec<Value>,
+    pub unresolved_goals: Vec<String>,
+    pub recovery_required: bool,
+    pub budget_exhausted: bool,
+    pub exhausted_dimension: Option<String>,
     pub thinking: Option<String>,
     pub reply_markdown: String,
     pub trace_dots: Vec<TraceDot>,
@@ -254,6 +265,9 @@ pub enum QuickChatToolExecOutcome {
     PausedForApproval {
         outcome: Box<TurnExecutionOutcome>,
         canonical_tool: String,
+    },
+    BudgetExhausted {
+        dimension: String,
     },
 }
 
@@ -887,6 +901,14 @@ pub async fn dispatch_broker_call_transactional(
         }
     }
 
+    if let Err(dim) = effect_ledger.budget_tracker.try_begin_tool_call() {
+        anyhow::bail!(
+            "达到全局预算上限 ({})，已停止继续执行 '{}'",
+            dim,
+            canonical_tool
+        );
+    }
+
     let step_id = step_ctx
         .trusted_step_id
         .clone()
@@ -1004,6 +1026,8 @@ pub async fn dispatch_broker_call_transactional(
             Ok(BrokerDispatchOutcome::Executed(res))
         }
         Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            effect_ledger.budget_tracker.refund_paused_tool_call();
+            effect_ledger.budget_tracker.pause_for_approval();
             effect_ledger.pending_approval_step_id = Some(step_id.clone());
             if effect > Effect::Observe {
                 let prep_row = StepExecutionLogRow {
@@ -1223,6 +1247,10 @@ where
     } else {
         effect_ledger.privacy()
     };
+
+    if let Err(dimension) = effect_ledger.budget_tracker.try_begin_tool_call() {
+        return Ok(QuickChatToolExecOutcome::BudgetExhausted { dimension });
+    }
 
     let canonical_tool = resolve_tool_name_to_capability(fn_name, core);
     let is_mem = crate::memory_hub::is_memory_tool(&canonical_tool);
@@ -1804,6 +1832,8 @@ where
         }
 
         Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            effect_ledger.budget_tracker.refund_paused_tool_call();
+            effect_ledger.budget_tracker.pause_for_approval();
             effect_ledger.pending_approval_step_id = Some(step_id.clone());
             if effect > Effect::Observe {
                 let prep_row = StepExecutionLogRow {
@@ -1845,7 +1875,7 @@ where
                 handoff_command: None,
                 taint: taints.to_vec(),
                 data_class,
-                budget: TaskBudget::default(),
+                budget: effect_ledger.budget_tracker.budget.clone(),
                 created_at: now,
                 updated_at: now,
             };
@@ -1859,6 +1889,11 @@ where
             };
             let mut outcome_dots = effect_ledger.trace_dots.clone();
             outcome_dots.push(TraceDot::approval(&pa));
+            let completed_steps = derive_completed_steps_summary(effect_ledger);
+            let unresolved_goals = vec![format!(
+                "待用户审批确认能力 `{}` ({})",
+                pa.capability_id, pa.summary
+            )];
 
             Ok(QuickChatToolExecOutcome::PausedForApproval {
                 outcome: Box::new(TurnExecutionOutcome {
@@ -1868,6 +1903,13 @@ where
                     model_used: active.model.clone(),
                     execution_mode,
                     side_effect_replay_prevented: false,
+                    request_status: "awaiting_approval".to_string(),
+                    task_status: "awaiting_approval".to_string(),
+                    completed_steps,
+                    unresolved_goals,
+                    recovery_required: false,
+                    budget_exhausted: false,
+                    exhausted_dimension: None,
                     thinking: combined_thinking,
                     reply_markdown: format!("操作需要确认审批：{}", pa.summary),
                     trace_dots: outcome_dots,
@@ -2044,6 +2086,9 @@ pub fn record_approved_step_into_ledger(
     paused_args_val: &Value,
     task_changeset_ids: &[String],
 ) {
+    effect_ledger
+        .budget_tracker
+        .record_approved_tool_execution();
     let step_id = effect_ledger
         .pending_approval_step_id
         .take()
@@ -2700,6 +2745,497 @@ pub fn prepare_system_prompt_and_context_with_policy(
     (sys_text, taints, data_class)
 }
 
+fn push_unique_goal(list: &mut Vec<String>, item: impl Into<String>) {
+    let s = item.into();
+    let trimmed = s.trim();
+    if !trimmed.is_empty() && !list.iter().any(|existing| existing == trimmed) {
+        list.push(trimmed.to_string());
+    }
+}
+
+fn clause_is_pure_conversational_synthesis(clause: &str) -> bool {
+    let t = clause.trim();
+    let has_text_verb = t.contains("总结")
+        || t.contains("汇总")
+        || t.contains("告诉我")
+        || t.contains("解释")
+        || t.contains("建议")
+        || t.contains("写一")
+        || t.contains("起草");
+    let has_os_mutation_verb = t.contains("打开")
+        || t.contains("启动")
+        || t.contains("删除")
+        || t.contains("移动")
+        || t.contains("整理")
+        || t.contains("重构")
+        || t.contains("修改")
+        || t.contains("设置")
+        || t.contains("安装")
+        || t.contains("关闭");
+    has_text_verb && !has_os_mutation_verb
+}
+
+/// Build verified completed step summaries from `TurnEffectLedger` (`H07`).
+pub fn derive_completed_steps_summary(effect_ledger: &TurnEffectLedger) -> Vec<Value> {
+    effect_ledger
+        .records()
+        .iter()
+        .enumerate()
+        .filter(|(_, rec)| rec.succeeded)
+        .map(|(idx, rec)| {
+            let exec_state = effect_ledger
+                .step_metadata()
+                .get(idx)
+                .map(|m| m.exec_state)
+                .unwrap_or(StepExecState::Verified);
+            json!({
+                "step_id": rec.step_id,
+                "capability_id": rec.capability_id,
+                "effect": rec.effect.as_str(),
+                "exec_state": exec_state,
+                "verified": exec_state == StepExecState::Verified,
+                "mutated_state": rec.mutated_state,
+                "verification_status": rec.verification_status,
+                "changeset_id": rec.changeset_id,
+            })
+        })
+        .collect()
+}
+
+/// Evaluate final goal `task_status`, `completed_steps`, `unresolved_goals`, and `recovery_required`
+/// strictly from verified execution evidence (`H07`), never from polite model text alone.
+pub fn evaluate_turn_goal_evidence(
+    core: &IntentOsCore,
+    user_text: &str,
+    execution_mode: BackendExecutionMode,
+    core_task_status_hint: Option<TaskStatus>,
+    effect_ledger: &TurnEffectLedger,
+) -> (TaskStatus, String, Vec<Value>, Vec<String>, bool) {
+    let completed_steps = derive_completed_steps_summary(effect_ledger);
+    let mut unresolved_goals: Vec<String> = Vec::new();
+    let has_uncertain = effect_ledger.has_uncertain_side_effects()
+        || core_task_status_hint == Some(TaskStatus::RecoveryRequired);
+
+    for skipped in &effect_ledger.budget_skipped_steps {
+        push_unique_goal(&mut unresolved_goals, skipped.clone());
+    }
+    if effect_ledger.budget_tracker.budget_exhausted
+        && effect_ledger.budget_skipped_steps.is_empty()
+    {
+        let dim = effect_ledger
+            .budget_tracker
+            .exhausted_dimension
+            .as_deref()
+            .unwrap_or("budget");
+        push_unique_goal(
+            &mut unresolved_goals,
+            format!("全局预算维度 `{}` 已耗尽，后续模型/工具步骤已中止", dim),
+        );
+    }
+
+    for blocked in &effect_ledger.chat_only_blocked_tools {
+        push_unique_goal(
+            &mut unresolved_goals,
+            format!("仅对话模式已拦截系统工具调用 `{}`", blocked),
+        );
+    }
+
+    let records = effect_ledger.records();
+    let mut has_unrecovered_step_failure = false;
+    for (idx, rec) in records.iter().enumerate() {
+        if !rec.succeeded {
+            let meta = effect_ledger.step_metadata().get(idx);
+            let uncertain = meta.is_some_and(|m| m.exec_state.is_uncertain_or_recovery());
+            let recovered_later = records[idx + 1..]
+                .iter()
+                .any(|later| later.capability_id == rec.capability_id && later.succeeded);
+            if uncertain || !recovered_later {
+                has_unrecovered_step_failure = true;
+                let reason = if rec.was_denied() {
+                    "安全策略拒绝"
+                } else if uncertain {
+                    "副作用状态未确认 (unknown / recovery_required)"
+                } else {
+                    "工具执行失败"
+                };
+                push_unique_goal(
+                    &mut unresolved_goals,
+                    format!(
+                        "步骤 `{}` (`{}`) 未完成：{}",
+                        rec.step_id, rec.capability_id, reason
+                    ),
+                );
+            }
+        }
+    }
+
+    let trimmed_user = user_text.trim();
+    if !trimmed_user.is_empty() && !trimmed_user.starts_with('$') {
+        let desc_refs = core.broker.descriptors();
+        let owned_descs: Vec<intentos_protocol::CapabilityDescriptor> =
+            desc_refs.iter().copied().cloned().collect();
+        let structured = parse_structured_intent(trimmed_user, &owned_descs);
+        let compiler = PatternCompiler::compile_from_descriptors(&desc_refs);
+        let compound = split_compound_intent(core, trimmed_user, &compiler);
+        let succeeded_caps: Vec<&str> = records
+            .iter()
+            .filter(|r| r.succeeded)
+            .map(|r| r.capability_id.as_str())
+            .collect();
+
+        if structured.intent_type != CognitiveIntentKind::ProceduralOrKnowledge {
+            if compound.is_compound {
+                let mut matched_compound_steps = 0usize;
+                for step in &compound.steps {
+                    if succeeded_caps.contains(&step.capability_id.as_str()) {
+                        matched_compound_steps += 1;
+                    } else {
+                        push_unique_goal(
+                            &mut unresolved_goals,
+                            format!(
+                                "子目标未执行：{} (缺少能力 `{}` 的执行证据)",
+                                step.raw_segment, step.capability_id
+                            ),
+                        );
+                    }
+                }
+                let extra_agent_steps = succeeded_caps.len().saturating_sub(matched_compound_steps);
+                for uc in &compound.unresolved_clauses {
+                    let unresolved_in_mode = match execution_mode {
+                        BackendExecutionMode::OfflineCore
+                        | BackendExecutionMode::ExternalChatOnly => true,
+                        BackendExecutionMode::ManagedBrokerTools
+                        | BackendExecutionMode::CliBrokerBridged => {
+                            if matches!(uc.kind.as_str(), "unsupported" | "ambiguous") {
+                                extra_agent_steps == 0
+                            } else {
+                                extra_agent_steps == 0
+                                    && !clause_is_pure_conversational_synthesis(&uc.raw_clause)
+                            }
+                        }
+                    };
+                    if unresolved_in_mode {
+                        push_unique_goal(
+                            &mut unresolved_goals,
+                            format!("未决子目标：{} ({})", uc.raw_clause, uc.reason),
+                        );
+                    }
+                }
+            } else if !compound.steps.is_empty() && succeeded_caps.is_empty() {
+                for step in &compound.steps {
+                    push_unique_goal(
+                        &mut unresolved_goals,
+                        format!(
+                            "目标未执行：{} (缺少能力 `{}` 的执行证据)",
+                            step.raw_segment, step.capability_id
+                        ),
+                    );
+                }
+            }
+
+            if matches!(
+                structured.intent_type,
+                CognitiveIntentKind::SystemDiagnosis
+                    | CognitiveIntentKind::GoalWorkspace
+                    | CognitiveIntentKind::CompoundTask
+            ) && succeeded_caps.is_empty()
+                && structured
+                    .required_capabilities
+                    .iter()
+                    .any(|cap| owned_descs.iter().any(|d| &d.id == cap))
+            {
+                if !structured.sub_goals.is_empty() {
+                    for sg in &structured.sub_goals {
+                        push_unique_goal(&mut unresolved_goals, sg.clone());
+                    }
+                } else {
+                    push_unique_goal(
+                        &mut unresolved_goals,
+                        format!("目标缺少工具执行证据：{}", structured.goal),
+                    );
+                }
+            }
+        }
+    }
+
+    if core_task_status_hint == Some(TaskStatus::Cancelled) {
+        return (
+            TaskStatus::Cancelled,
+            "cancelled".to_string(),
+            completed_steps,
+            unresolved_goals,
+            has_uncertain,
+        );
+    }
+    if core_task_status_hint == Some(TaskStatus::AwaitingApproval) {
+        return (
+            TaskStatus::AwaitingApproval,
+            "awaiting_approval".to_string(),
+            completed_steps,
+            unresolved_goals,
+            false,
+        );
+    }
+    if has_uncertain {
+        return (
+            TaskStatus::RecoveryRequired,
+            "recovery_required".to_string(),
+            completed_steps,
+            unresolved_goals,
+            true,
+        );
+    }
+    if effect_ledger.budget_tracker.budget_exhausted {
+        let recovery_req = effect_ledger.has_uncertain_or_committed_side_effects();
+        if !completed_steps.is_empty() {
+            return (
+                TaskStatus::PartiallyCompleted,
+                "partially_completed".to_string(),
+                completed_steps,
+                unresolved_goals,
+                recovery_req,
+            );
+        }
+        return (
+            TaskStatus::Failed,
+            "failed".to_string(),
+            completed_steps,
+            unresolved_goals,
+            recovery_req,
+        );
+    }
+    if core_task_status_hint == Some(TaskStatus::PartiallyCompleted) {
+        return (
+            TaskStatus::PartiallyCompleted,
+            "partially_completed".to_string(),
+            completed_steps,
+            unresolved_goals,
+            false,
+        );
+    }
+    if core_task_status_hint == Some(TaskStatus::Failed)
+        || has_unrecovered_step_failure
+        || !effect_ledger.chat_only_blocked_tools.is_empty()
+        || !unresolved_goals.is_empty()
+    {
+        if !completed_steps.is_empty() {
+            return (
+                TaskStatus::PartiallyCompleted,
+                "partially_completed".to_string(),
+                completed_steps,
+                unresolved_goals,
+                false,
+            );
+        }
+        return (
+            TaskStatus::Failed,
+            "failed".to_string(),
+            completed_steps,
+            unresolved_goals,
+            false,
+        );
+    }
+
+    (
+        TaskStatus::Completed,
+        "succeeded".to_string(),
+        completed_steps,
+        unresolved_goals,
+        false,
+    )
+}
+
+/// Attach separated `request_status`, `task_status`, `completed_steps`, `unresolved_goals`,
+/// `recovery_required`, and `budget_usage` fields onto a turn response JSON (`H07`).
+pub fn apply_outcome_status_fields(
+    response: &mut Value,
+    outcome: &TurnExecutionOutcome,
+    effect_ledger: &TurnEffectLedger,
+) {
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("request_status".to_string(), json!(outcome.request_status));
+        obj.insert("task_status".to_string(), json!(outcome.task_status));
+        obj.insert(
+            "completed_steps".to_string(),
+            json!(outcome.completed_steps),
+        );
+        obj.insert(
+            "unresolved_goals".to_string(),
+            json!(outcome.unresolved_goals),
+        );
+        obj.insert(
+            "recovery_required".to_string(),
+            json!(outcome.recovery_required),
+        );
+        obj.insert(
+            "budget_exhausted".to_string(),
+            json!(outcome.budget_exhausted),
+        );
+        obj.insert(
+            "exhausted_dimension".to_string(),
+            json!(outcome.exhausted_dimension),
+        );
+        obj.insert(
+            "budget_usage".to_string(),
+            effect_ledger.budget_tracker.summary_json(),
+        );
+    }
+}
+
+/// Build an honest partial/failed `TurnExecutionOutcome` when any dimension of `TurnBudgetTracker`
+/// is exhausted mid-turn (`H07`), preserving already-completed steps and `changeset_ids` without
+/// triggering secondary fallback replay.
+#[allow(clippy::too_many_arguments)]
+pub fn build_budget_exhausted_turn_outcome(
+    core: &IntentOsCore,
+    active: &ActiveBackendSelection,
+    execution_mode: BackendExecutionMode,
+    task_id: &str,
+    session: &SessionState,
+    user_text: &str,
+    incognito: bool,
+    taints: Vec<Taint>,
+    data_class: DataClass,
+    partial_content: String,
+    effect_ledger: &mut TurnEffectLedger,
+) -> TurnExecutionOutcome {
+    effect_ledger.budget_tracker.finish_active_execution();
+    let dim = effect_ledger
+        .budget_tracker
+        .exhausted_dimension
+        .clone()
+        .unwrap_or_else(|| "budget".to_string());
+    if !effect_ledger.budget_tracker.budget_exhausted {
+        effect_ledger.budget_tracker.mark_exhausted(dim.clone());
+    }
+
+    let changeset_ids = effect_ledger.committed_changeset_ids();
+    let mut lines: Vec<String> = Vec::new();
+    if !partial_content.trim().is_empty() {
+        lines.push(partial_content.trim().to_string());
+    }
+    if effect_ledger.records().iter().any(|r| r.succeeded) {
+        lines.push(format!(
+            "已达到全局执行预算上限（`{}`），为保证系统受控已安全停止后续模型/工具循环；已完成步骤保留如下：",
+            dim
+        ));
+        for rec in effect_ledger.records().iter().filter(|r| r.succeeded) {
+            if let Some(ref csid) = rec.changeset_id {
+                lines.push(format!(
+                    "- **{}** (`{}`)：已完成（撤销凭证：`{}`）",
+                    rec.step_id, rec.capability_id, csid
+                ));
+            } else {
+                lines.push(format!(
+                    "- **{}** (`{}`)：已完成",
+                    rec.step_id, rec.capability_id
+                ));
+            }
+        }
+    } else {
+        lines.push(format!(
+            "已达到全局执行预算上限（`{}`），当前任务在完成有效步骤前已安全停止。",
+            dim
+        ));
+    }
+    if !changeset_ids.is_empty() {
+        lines.push(format!(
+            "如需回滚已执行的系统变更，可使用撤销凭证（`{}`）一键撤销。",
+            changeset_ids.join("`, `")
+        ));
+    }
+    let final_reply = lines.join("\n");
+
+    let handoff_command = effect_ledger.task_steps.iter().find_map(|st| {
+        st.data
+            .get("handoff_command")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+
+    let fallback_privacy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
+    effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        task_id,
+        &session.session_id,
+        fallback_privacy,
+    );
+    let effective_privacy = if incognito {
+        PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+
+    let (task_status_enum, task_status_str, completed_steps, unresolved_goals, recovery_required) =
+        evaluate_turn_goal_evidence(core, user_text, execution_mode, None, effect_ledger);
+    let task_steps = std::mem::take(&mut effect_ledger.task_steps);
+    let last_resource_path = effect_ledger.last_resource_path.take();
+
+    if effective_privacy.allows_task_persistence() {
+        let now = Utc::now();
+        let partial_task = Task {
+            id: task_id.to_string(),
+            goal: user_text.to_string(),
+            session_id: Some(session.session_id.clone()),
+            project_id: None,
+            trigger: TaskTrigger::User,
+            route: RouteLayer::L2,
+            status: task_status_enum,
+            steps: task_steps,
+            changeset_ids: changeset_ids.clone(),
+            pending_approval: None,
+            candidates_for_disambiguation: Vec::new(),
+            assistant_message: Some(final_reply.clone()),
+            result_summary: Some(final_reply.clone()),
+            handoff_command: handoff_command.clone(),
+            taint: taints,
+            data_class,
+            budget: effect_ledger.budget_tracker.budget.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let _ = core.state_db.upsert_task(&partial_task);
+    }
+    if effective_privacy.allows_memory_write() {
+        core.sessions.append_turn(
+            &session.session_id,
+            user_text,
+            &final_reply,
+            last_resource_path,
+        );
+    }
+
+    let combined_thinking = if effect_ledger.accumulated_thoughts.is_empty() {
+        None
+    } else {
+        Some(std::mem::take(&mut effect_ledger.accumulated_thoughts).join("\n\n"))
+    };
+
+    TurnExecutionOutcome {
+        task_id: task_id.to_string(),
+        backend_used: active.backend.clone(),
+        provider_used: active.provider.clone(),
+        model_used: active.model.clone(),
+        execution_mode,
+        side_effect_replay_prevented: effect_ledger.has_uncertain_or_committed_side_effects(),
+        request_status: "finished".to_string(),
+        task_status: task_status_str,
+        completed_steps,
+        unresolved_goals,
+        recovery_required,
+        budget_exhausted: true,
+        exhausted_dimension: effect_ledger.budget_tracker.exhausted_dimension.clone(),
+        thinking: combined_thinking,
+        reply_markdown: final_reply,
+        trace_dots: std::mem::take(&mut effect_ledger.trace_dots),
+        adapter_actions: std::mem::take(&mut effect_ledger.adapter_actions),
+        tool_steps_json: std::mem::take(&mut effect_ledger.tool_steps_json),
+        changeset_ids,
+        handoff_command,
+        pending_approval: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_completed_turn_outcome(
     core: &IntentOsCore,
@@ -2714,6 +3250,7 @@ pub fn finalize_completed_turn_outcome(
     cleaned_content: String,
     effect_ledger: &mut TurnEffectLedger,
 ) -> TurnExecutionOutcome {
+    effect_ledger.budget_tracker.finish_active_execution();
     let final_reply = if cleaned_content.is_empty() {
         if let Some(last_step) = effect_ledger.task_steps.last() {
             last_step.message.clone()
@@ -2746,14 +3283,11 @@ pub fn finalize_completed_turn_outcome(
         effect_ledger.privacy()
     };
 
+    let (task_status, task_status_str, completed_steps, unresolved_goals, recovery_required) =
+        evaluate_turn_goal_evidence(core, user_text, execution_mode, None, effect_ledger);
     let changeset_ids = effect_ledger.committed_changeset_ids();
     let task_steps = std::mem::take(&mut effect_ledger.task_steps);
     let last_resource_path = effect_ledger.last_resource_path.take();
-    let task_status = if effect_ledger.has_uncertain_side_effects() {
-        TaskStatus::RecoveryRequired
-    } else {
-        TaskStatus::Completed
-    };
 
     if effective_privacy.allows_task_persistence() {
         let now = Utc::now();
@@ -2774,7 +3308,7 @@ pub fn finalize_completed_turn_outcome(
             handoff_command: handoff_command.clone(),
             taint: taints,
             data_class,
-            budget: TaskBudget::default(),
+            budget: effect_ledger.budget_tracker.budget.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -2802,6 +3336,13 @@ pub fn finalize_completed_turn_outcome(
         model_used: active.model.clone(),
         execution_mode,
         side_effect_replay_prevented: false,
+        request_status: "finished".to_string(),
+        task_status: task_status_str,
+        completed_steps,
+        unresolved_goals,
+        recovery_required,
+        budget_exhausted: effect_ledger.budget_tracker.budget_exhausted,
+        exhausted_dimension: effect_ledger.budget_tracker.exhausted_dimension.clone(),
         thinking: combined_thinking,
         reply_markdown: final_reply,
         trace_dots: std::mem::take(&mut effect_ledger.trace_dots),
@@ -2843,6 +3384,7 @@ pub fn convert_core_task_to_turn_outcome(
     let mut trace_dots = Vec::new();
     let mut tool_steps_json = Vec::new();
     for step in &task.steps {
+        let _ = effect_ledger.budget_tracker.try_begin_tool_call();
         let step_id = effect_ledger.next_step_id();
         let idempotency_key =
             effect_ledger.compute_idempotency_key(&step.capability_id, &step.arguments_summary);
@@ -2923,14 +3465,46 @@ pub fn convert_core_task_to_turn_outcome(
     }
 
     if let Some(ref pa) = task.pending_approval {
+        effect_ledger.budget_tracker.pause_for_approval();
         trace_dots.push(TraceDot::approval(pa));
-    } else if task.status == TaskStatus::Failed && task.steps.is_empty() {
-        trace_dots.push(TraceDot::tool_err(
-            "intent.router",
-            reply_markdown.clone(),
-            0,
-        ));
+    } else {
+        effect_ledger.budget_tracker.finish_active_execution();
+        if task.status == TaskStatus::Failed && task.steps.is_empty() {
+            trace_dots.push(TraceDot::tool_err(
+                "intent.router",
+                reply_markdown.clone(),
+                0,
+            ));
+        }
     }
+
+    let hint_status = if task.pending_approval.is_some() {
+        TaskStatus::AwaitingApproval
+    } else {
+        task.status
+    };
+    let (_, mut task_status_str, completed_steps, mut unresolved_goals, recovery_required) =
+        evaluate_turn_goal_evidence(
+            core,
+            &task.goal,
+            BackendExecutionMode::OfflineCore,
+            Some(hint_status),
+            effect_ledger,
+        );
+    let request_status = if task.pending_approval.is_some() {
+        task_status_str = "awaiting_approval".to_string();
+        if let Some(ref pa) = task.pending_approval {
+            push_unique_goal(
+                &mut unresolved_goals,
+                format!("待用户审批确认能力 `{}` ({})", pa.capability_id, pa.summary),
+            );
+        }
+        "awaiting_approval".to_string()
+    } else if task.status == TaskStatus::Cancelled {
+        "cancelled".to_string()
+    } else {
+        "finished".to_string()
+    };
 
     TurnExecutionOutcome {
         task_id: task.id,
@@ -2939,6 +3513,13 @@ pub fn convert_core_task_to_turn_outcome(
         model_used: format!("{:?}", task.route).to_ascii_lowercase(),
         execution_mode: BackendExecutionMode::OfflineCore,
         side_effect_replay_prevented: false,
+        request_status,
+        task_status: task_status_str,
+        completed_steps,
+        unresolved_goals,
+        recovery_required,
+        budget_exhausted: effect_ledger.budget_tracker.budget_exhausted,
+        exhausted_dimension: effect_ledger.budget_tracker.exhausted_dimension.clone(),
         thinking,
         reply_markdown,
         trace_dots,
@@ -2965,6 +3546,7 @@ pub fn build_halted_side_effect_outcome(
     effect_ledger: &mut TurnEffectLedger,
     upstream_err_msg: &str,
 ) -> TurnExecutionOutcome {
+    effect_ledger.budget_tracker.finish_active_execution();
     let fallback_privacy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
     effect_ledger.ensure_persistence_context(
         core.state_db.clone(),
@@ -2983,7 +3565,7 @@ pub fn build_halted_side_effect_outcome(
     let mut summary_lines = vec![if has_uncertain {
         "检测到变更步骤存在未确认副作用或执行中断；为防止重复执行或二次破坏，已将任务标记为待恢复（recovery_required）并安全中止自动回退重试：".to_string()
     } else {
-        "已完成前置系统操作，但后续模型响应异常；为防止重复执行副作用，已安全中止自动回退重试："
+        "已完成前置系统操作，但后续模型响应异常（partially_completed / recovery_required）；为防止重复执行副作用，已安全中止自动回退重试："
             .to_string()
     }];
     for (idx, rec) in effect_ledger.records().iter().enumerate() {
@@ -3020,6 +3602,21 @@ pub fn build_halted_side_effect_outcome(
     }
     let honest_reply = summary_lines.join("\n");
 
+    let (_, _, completed_steps, mut unresolved_goals, _) = evaluate_turn_goal_evidence(
+        core,
+        user_text,
+        BackendExecutionMode::ManagedBrokerTools,
+        None,
+        effect_ledger,
+    );
+    push_unique_goal(
+        &mut unresolved_goals,
+        format!(
+            "后续模型轮次异常中断（{}），已完成前置变更但未完成最终确认或后续步骤",
+            upstream_err_msg
+        ),
+    );
+
     let handoff_command = effect_ledger.task_steps.iter().find_map(|st| {
         st.data
             .get("handoff_command")
@@ -3028,10 +3625,10 @@ pub fn build_halted_side_effect_outcome(
     });
     let task_steps = std::mem::take(&mut effect_ledger.task_steps);
     let last_resource_path = effect_ledger.last_resource_path.take();
-    let task_status = if has_uncertain {
-        TaskStatus::RecoveryRequired
+    let (task_status, task_status_str) = if has_uncertain {
+        (TaskStatus::RecoveryRequired, "recovery_required")
     } else {
-        TaskStatus::Completed
+        (TaskStatus::PartiallyCompleted, "partially_completed")
     };
 
     if effective_privacy.allows_task_persistence() {
@@ -3053,7 +3650,7 @@ pub fn build_halted_side_effect_outcome(
             handoff_command: handoff_command.clone(),
             taint: taints,
             data_class,
-            budget: TaskBudget::default(),
+            budget: effect_ledger.budget_tracker.budget.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -3081,6 +3678,13 @@ pub fn build_halted_side_effect_outcome(
         model_used: active.model.clone(),
         execution_mode: BackendExecutionMode::ManagedBrokerTools,
         side_effect_replay_prevented: true,
+        request_status: "finished".to_string(),
+        task_status: task_status_str.to_string(),
+        completed_steps,
+        unresolved_goals,
+        recovery_required: true,
+        budget_exhausted: effect_ledger.budget_tracker.budget_exhausted,
+        exhausted_dimension: effect_ledger.budget_tracker.exhausted_dimension.clone(),
         thinking: combined_thinking,
         reply_markdown: honest_reply,
         trace_dots: std::mem::take(&mut effect_ledger.trace_dots),

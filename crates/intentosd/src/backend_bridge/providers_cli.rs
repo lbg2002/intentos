@@ -14,9 +14,9 @@
 
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
-    build_quick_chat_openai_tools_with_policy, execute_quick_chat_tool_call,
-    finalize_completed_turn_outcome, prepare_system_prompt_and_context_with_policy,
-    synthesize_rich_approved_step_markdown,
+    build_budget_exhausted_turn_outcome, build_quick_chat_openai_tools_with_policy,
+    execute_quick_chat_tool_call, finalize_completed_turn_outcome,
+    prepare_system_prompt_and_context_with_policy, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, build_search_dirs,
@@ -1415,6 +1415,11 @@ fn record_blocked_chat_only_cli_calls(
         return scrubbed_text;
     }
     let blocked_names: Vec<String> = parsed_calls.iter().map(|(_, n, _)| n.clone()).collect();
+    for name in &blocked_names {
+        if !effect_ledger.chat_only_blocked_tools.contains(name) {
+            effect_ledger.chat_only_blocked_tools.push(name.clone());
+        }
+    }
     let joined = blocked_names.join(", ");
     let sec_note = format!(
         "仅对话模式（ExternalChatOnly）安全策略已拦截外部 CLI 请求的系统工具调用（`{}`），未执行任何 `CapabilityBroker` 操作。",
@@ -1549,16 +1554,29 @@ pub async fn run_cli_backend_turn_with_policy(
     base_sections.push(format!("User: {}", user_text));
 
     let mut transcript_history: Vec<String> = Vec::new();
-    let max_rounds = if effective_allow_broker_tools {
-        MAX_CLI_TOOL_ROUNDS
-    } else {
-        1
-    };
+    effect_ledger.budget_tracker.start_active_execution();
 
-    for round_idx in 0..max_rounds {
+    loop {
         if turn_handle.is_cancelled() {
             anyhow::bail!("turn_cancelled");
         }
+
+        if let Err(_dim) = effect_ledger.budget_tracker.try_begin_model_round() {
+            return Ok(build_budget_exhausted_turn_outcome(
+                core,
+                active,
+                execution_mode,
+                task_id,
+                session,
+                user_text,
+                incognito,
+                taints,
+                data_class,
+                String::new(),
+                effect_ledger,
+            ));
+        }
+        let round_num = effect_ledger.budget_tracker.used_model_rounds as usize;
 
         let mut prompt_sections = base_sections.clone();
         prompt_sections.extend(transcript_history.iter().cloned());
@@ -1573,7 +1591,7 @@ pub async fn run_cli_backend_turn_with_policy(
             policy.network_policy,
             data_class,
             turn_handle,
-            round_idx + 1,
+            round_num,
             &full_prompt,
             !effective_privacy.allows_memory_write(),
         )
@@ -1598,7 +1616,7 @@ pub async fn run_cli_backend_turn_with_policy(
                 }
                 let call_id = opt_id
                     .clone()
-                    .unwrap_or_else(|| format!("cli_call_{}_{}", round_idx + 1, tc_idx + 1));
+                    .unwrap_or_else(|| format!("cli_call_{}_{}", round_num, tc_idx + 1));
 
                 match execute_quick_chat_tool_call(
                     core,
@@ -1629,7 +1647,7 @@ pub async fn run_cli_backend_turn_with_policy(
                                 .map(|(rem_i, (rid, rname, rargs))| {
                                     (
                                         rid.clone().unwrap_or_else(|| {
-                                            format!("cli_sib_{}_{}", round_idx + 1, rem_i + 1)
+                                            format!("cli_sib_{}_{}", round_num, rem_i + 1)
                                         }),
                                         rname.clone(),
                                         rargs.clone(),
@@ -1653,7 +1671,7 @@ pub async fn run_cli_backend_turn_with_policy(
                                 memory_hits: memory_hits.to_vec(),
                                 memory_dot: memory_dot.cloned(),
                                 context_compression: compressed_history.stats.clone(),
-                                rounds_used: round_idx + 1,
+                                rounds_used: round_num,
                                 paused_call_id: call_id,
                                 paused_canonical_tool: canonical_tool,
                                 paused_parsed_args: parsed_args.clone(),
@@ -1668,6 +1686,27 @@ pub async fn run_cli_backend_turn_with_policy(
                             });
                         }
                         return Ok(*outcome);
+                    }
+                    QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                        for (_, skipped_name, _) in &parsed_calls[tc_idx..] {
+                            effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                skipped_name, dimension
+                            ));
+                        }
+                        return Ok(build_budget_exhausted_turn_outcome(
+                            core,
+                            active,
+                            execution_mode,
+                            task_id,
+                            session,
+                            user_text,
+                            incognito,
+                            taints,
+                            data_class,
+                            scrubbed_text,
+                            effect_ledger,
+                        ));
                     }
                     QuickChatToolExecOutcome::ToolMessage {
                         content,
@@ -1731,20 +1770,6 @@ pub async fn run_cli_backend_turn_with_policy(
             effect_ledger,
         ));
     }
-
-    Ok(finalize_completed_turn_outcome(
-        core,
-        active,
-        execution_mode,
-        task_id,
-        session,
-        user_text,
-        incognito,
-        taints,
-        data_class,
-        String::new(),
-        effect_ledger,
-    ))
 }
 
 /// Resume a suspended CLI turn after `PendingApproval` has been approved by the user.
@@ -1831,7 +1856,7 @@ pub async fn continue_resumed_cli_turn(
                             memory_hits: cp.memory_hits.clone(),
                             memory_dot: cp.memory_dot.clone(),
                             context_compression: cp.context_compression.clone(),
-                            rounds_used: cp.rounds_used,
+                            rounds_used: cp.effect_ledger.budget_tracker.used_model_rounds as usize,
                             paused_call_id: rem_id.clone(),
                             paused_canonical_tool: canonical_tool,
                             paused_parsed_args: rem_args.clone(),
@@ -1846,6 +1871,31 @@ pub async fn continue_resumed_cli_turn(
                         });
                     }
                     return Ok(*outcome);
+                }
+                QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                    for (_, skipped_name, _) in &cp.remaining_tool_calls[rem_idx..] {
+                        cp.effect_ledger.budget_skipped_steps.push(format!(
+                            "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                            skipped_name, dimension
+                        ));
+                    }
+                    let partial_md = synthesize_rich_approved_step_markdown(
+                        &cp.user_text,
+                        &cp.effect_ledger.task_steps,
+                    );
+                    return Ok(build_budget_exhausted_turn_outcome(
+                        core,
+                        &cp.active,
+                        execution_mode,
+                        &cp.task_id,
+                        &cp.session,
+                        &cp.user_text,
+                        cp.incognito,
+                        cp.taints.clone(),
+                        cp.data_class,
+                        partial_md,
+                        &mut cp.effect_ledger,
+                    ));
                 }
                 QuickChatToolExecOutcome::ToolMessage {
                     content, is_error, ..
@@ -1867,7 +1917,6 @@ pub async fn continue_resumed_cli_turn(
         prior_round_tool_results.join("\n")
     ));
 
-    let remaining_rounds = MAX_CLI_TOOL_ROUNDS.saturating_sub(cp.rounds_used).max(1);
     let mut base_sections: Vec<String> = vec![cp.sys_text.clone()];
     if effective_allow_broker_tools {
         base_sections.push(build_cli_broker_protocol_prompt_with_policy(
@@ -1880,7 +1929,26 @@ pub async fn continue_resumed_cli_turn(
     }
     base_sections.push(format!("User: {}", cp.user_text));
 
-    for r_offset in 0..remaining_rounds {
+    loop {
+        if let Err(_dim) = cp.effect_ledger.budget_tracker.try_begin_model_round() {
+            let partial_md =
+                synthesize_rich_approved_step_markdown(&cp.user_text, &cp.effect_ledger.task_steps);
+            return Ok(build_budget_exhausted_turn_outcome(
+                core,
+                &cp.active,
+                execution_mode,
+                &cp.task_id,
+                &cp.session,
+                &cp.user_text,
+                cp.incognito,
+                cp.taints.clone(),
+                cp.data_class,
+                partial_md,
+                &mut cp.effect_ledger,
+            ));
+        }
+        let round_num = cp.effect_ledger.budget_tracker.used_model_rounds as usize;
+
         let mut prompt_sections = base_sections.clone();
         prompt_sections.extend(transcript_history.iter().cloned());
         let full_prompt = prompt_sections.join("\n\n");
@@ -1894,7 +1962,7 @@ pub async fn continue_resumed_cli_turn(
             policy.network_policy,
             cp.data_class,
             resume_handle,
-            cp.rounds_used + r_offset + 1,
+            round_num,
             &full_prompt,
             cp.incognito || !cp.effect_ledger.privacy().allows_memory_write(),
         )
@@ -1917,9 +1985,9 @@ pub async fn continue_resumed_cli_turn(
             let mut all_duplicates = true;
 
             for (tc_idx, (opt_id, fn_name, parsed_args)) in parsed_calls.iter().enumerate() {
-                let call_id = opt_id.clone().unwrap_or_else(|| {
-                    format!("cli_res_{}_{}", cp.rounds_used + r_offset + 1, tc_idx + 1)
-                });
+                let call_id = opt_id
+                    .clone()
+                    .unwrap_or_else(|| format!("cli_res_{}_{}", round_num, tc_idx + 1));
                 match execute_quick_chat_tool_call(
                     core,
                     &cp.active,
@@ -1948,11 +2016,7 @@ pub async fn continue_resumed_cli_turn(
                                 .map(|(ri, (rid, rname, rargs))| {
                                     (
                                         rid.clone().unwrap_or_else(|| {
-                                            format!(
-                                                "cli_sib_{}_{}",
-                                                cp.rounds_used + r_offset + 1,
-                                                ri + 1
-                                            )
+                                            format!("cli_sib_{}_{}", round_num, ri + 1)
                                         }),
                                         rname.clone(),
                                         rargs.clone(),
@@ -1976,7 +2040,7 @@ pub async fn continue_resumed_cli_turn(
                                 memory_hits: cp.memory_hits.clone(),
                                 memory_dot: cp.memory_dot.clone(),
                                 context_compression: cp.context_compression.clone(),
-                                rounds_used: cp.rounds_used + r_offset + 1,
+                                rounds_used: round_num,
                                 paused_call_id: call_id,
                                 paused_canonical_tool: canonical_tool,
                                 paused_parsed_args: parsed_args.clone(),
@@ -1991,6 +2055,35 @@ pub async fn continue_resumed_cli_turn(
                             });
                         }
                         return Ok(*outcome);
+                    }
+                    QuickChatToolExecOutcome::BudgetExhausted { dimension } => {
+                        for (_, skipped_name, _) in &parsed_calls[tc_idx..] {
+                            cp.effect_ledger.budget_skipped_steps.push(format!(
+                                "未执行工具调用 `{}` (预算维度 `{}` 已耗尽)",
+                                skipped_name, dimension
+                            ));
+                        }
+                        let partial_md = if scrubbed_text.trim().is_empty() {
+                            synthesize_rich_approved_step_markdown(
+                                &cp.user_text,
+                                &cp.effect_ledger.task_steps,
+                            )
+                        } else {
+                            scrubbed_text
+                        };
+                        return Ok(build_budget_exhausted_turn_outcome(
+                            core,
+                            &cp.active,
+                            execution_mode,
+                            &cp.task_id,
+                            &cp.session,
+                            &cp.user_text,
+                            cp.incognito,
+                            cp.taints.clone(),
+                            cp.data_class,
+                            partial_md,
+                            &mut cp.effect_ledger,
+                        ));
                     }
                     QuickChatToolExecOutcome::ToolMessage {
                         content,

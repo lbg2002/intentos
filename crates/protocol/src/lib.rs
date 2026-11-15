@@ -732,10 +732,45 @@ pub struct TaskStep {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn default_max_model_rounds() -> u32 {
+    6
+}
+
+fn default_max_tool_calls() -> u32 {
+    12
+}
+
+fn default_max_wall_time_ms() -> u64 {
+    90_000
+}
+
+fn default_max_runtime_seconds() -> u64 {
+    90
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TaskBudget {
+    #[serde(default = "default_max_model_rounds")]
+    pub max_model_rounds: u32,
+    #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: u32,
+    #[serde(default = "default_max_wall_time_ms")]
+    pub max_wall_time_ms: u64,
+    #[serde(default = "default_max_runtime_seconds")]
     pub max_runtime_seconds: u64,
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
     #[serde(default)]
     pub max_cost: Option<f64>,
 }
@@ -743,10 +778,36 @@ pub struct TaskBudget {
 impl Default for TaskBudget {
     fn default() -> Self {
         Self {
-            max_tool_calls: 30,
-            max_runtime_seconds: 180,
+            max_model_rounds: default_max_model_rounds(),
+            max_tool_calls: default_max_tool_calls(),
+            max_wall_time_ms: default_max_wall_time_ms(),
+            max_runtime_seconds: default_max_runtime_seconds(),
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_retries: default_max_retries(),
+            max_cost_usd: None,
             max_cost: None,
         }
+    }
+}
+
+impl TaskBudget {
+    /// Effective wall-time budget in milliseconds, honoring explicit `max_wall_time_ms` first
+    /// while remaining backward-compatible with legacy callers that only customized `max_runtime_seconds`.
+    pub fn effective_wall_time_ms(&self) -> u64 {
+        if self.max_wall_time_ms == default_max_wall_time_ms()
+            && self.max_runtime_seconds != default_max_runtime_seconds()
+            && self.max_runtime_seconds > 0
+        {
+            self.max_runtime_seconds.saturating_mul(1_000)
+        } else {
+            self.max_wall_time_ms
+        }
+    }
+
+    /// Effective cost cap in USD (`max_cost_usd` takes precedence over legacy `max_cost`).
+    pub fn effective_max_cost_usd(&self) -> Option<f64> {
+        self.max_cost_usd.or(self.max_cost)
     }
 }
 
@@ -1073,5 +1134,31 @@ mod tests {
         let d2 = PendingApproval::compute_digest("sound.volume.set", &args);
         assert_eq!(d1, d2);
         assert!(d1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn task_budget_h07_defaults_and_backward_compat_deserialization() {
+        let def = TaskBudget::default();
+        assert_eq!(def.max_model_rounds, 6);
+        assert_eq!(def.max_tool_calls, 12);
+        assert_eq!(def.max_wall_time_ms, 90_000);
+        assert_eq!(def.max_retries, 2);
+        assert_eq!(def.max_input_tokens, None);
+        assert_eq!(def.max_output_tokens, None);
+        assert_eq!(def.max_cost_usd, None);
+        assert_eq!(def.effective_wall_time_ms(), 90_000);
+
+        let legacy: TaskBudget =
+            serde_json::from_str(r#"{"max_tool_calls":30,"max_runtime_seconds":180}"#).unwrap();
+        assert_eq!(legacy.max_model_rounds, 6);
+        assert_eq!(legacy.max_tool_calls, 30);
+        assert_eq!(legacy.max_retries, 2);
+        assert_eq!(legacy.effective_wall_time_ms(), 180_000);
+
+        let partial: TaskBudget =
+            serde_json::from_str(r#"{"max_tool_calls":3,"max_wall_time_ms":1500}"#).unwrap();
+        assert_eq!(partial.max_model_rounds, 6);
+        assert_eq!(partial.max_tool_calls, 3);
+        assert_eq!(partial.effective_wall_time_ms(), 1_500);
     }
 }
