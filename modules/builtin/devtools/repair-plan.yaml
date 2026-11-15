@@ -1,0 +1,26 @@
+id: repair.plan
+version: 1
+summary: 基于已采集的真实系统或软件诊断证据构建结构化修复方案（明确步骤能力 ID、风险等级、人工审批要求、可逆性与验证探针）
+category: devtools
+aliases: ["生成故障修复方案", "诊断修复计划", "repair plan"]
+l0_patterns: []
+input_schema:
+  type: object
+  required: [evidence]
+  properties:
+    evidence:
+      type: object
+      description: 由 dependency.inspect、service.status、network.diagnose、package.inspect 或 system.bottleneck 采集的真实诊断证据 JSON
+    goal:
+      type: string
+      maxLength: 512
+      description: 可选用户修复目标补充说明
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: repair.plan
+undo: none
+verification:
+  kind: structured_output
+feedback: "已根据真实诊断证据生成待确认修复方案（未自动执行任何修改）"

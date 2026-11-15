@@ -1,0 +1,33 @@
+id: service.status
+version: 1
+summary: 查询 systemd 用户态或系统服务运行状态（LoadState/ActiveState/SubState/Result/ExecMainStatus）及最近单元日志
+category: devtools
+aliases: ["服务运行状态", "systemd状态", "守护进程诊断", "service status"]
+l0_patterns:
+  - "检查服务 {unit} 状态"
+  - "查看 systemd 服务 {unit}"
+input_schema:
+  type: object
+  required: [unit]
+  properties:
+    unit:
+      type: string
+      maxLength: 256
+      description: systemd 单元名称（如 pipewire.service、dbus.service、ssh.service）
+    user_scope:
+      type: boolean
+      description: 是否查询 systemctl --user 用户会话服务（默认 false）
+    journal_lines:
+      type: integer
+      minimum: 0
+      maximum: 50
+      description: 附带采样的最近单元日志条数（默认 15，上限 50）
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: service.status
+undo: none
+verification:
+  kind: structured_output
+feedback: "已采样 systemd 服务状态与单元日志"

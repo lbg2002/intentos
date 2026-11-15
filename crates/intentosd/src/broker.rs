@@ -178,7 +178,44 @@ impl CapabilityBroker {
             return self.dispatch_adapter_tool(call).await;
         }
 
-        let Some(desc) = self.descriptors.get(&call.capability_id) else {
+        let dotted_diag_alias = call.capability_id.trim().replace('_', ".");
+        let desc_opt = self.descriptors.get(&call.capability_id).or_else(|| {
+            if crate::diagnostics::is_diagnostic_capability(&call.capability_id) {
+                self.descriptors.get(&dotted_diag_alias)
+            } else {
+                None
+            }
+        });
+
+        let Some(desc) = desc_opt else {
+            if crate::diagnostics::is_diagnostic_capability(&call.capability_id) {
+                match crate::diagnostics::execute_diagnostic_capability(
+                    self.core().as_deref(),
+                    &self.fs_engine,
+                    &call.request_id,
+                    &call.capability_id,
+                    &call.arguments,
+                ) {
+                    Ok(res) => {
+                        self.record_audit_if_persistent(
+                            &call.task_id,
+                            &res.capability_id,
+                            &format!("{:?}", call.origin),
+                            "observe",
+                            "allow",
+                            &format!("{:?}", res.status),
+                            &call.arguments,
+                            Some(&res.message),
+                        );
+                        return Ok(BrokerDispatchOutcome::Executed(res));
+                    }
+                    Err(err) => {
+                        return Ok(BrokerDispatchOutcome::Denied {
+                            reason: format!("诊断能力执行拒绝: {}", err),
+                        });
+                    }
+                }
+            }
             return Ok(BrokerDispatchOutcome::Denied {
                 reason: format!("未注册的能力 ID: {}", call.capability_id),
             });
@@ -757,11 +794,16 @@ impl CapabilityBroker {
                 } else {
                     ExecutionStatus::Exited
                 };
+                let audit_eff = data
+                    .get("effect")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ui")
+                    .to_string();
                 self.record_audit_if_persistent(
                     &call.task_id,
                     &canonical,
                     &format!("{:?}", call.origin),
-                    "ui",
+                    &audit_eff,
                     "allow",
                     &format!("{:?}", status),
                     &call.arguments,
@@ -790,12 +832,43 @@ impl CapabilityBroker {
     }
 
     fn scan_adapter_forbidden_paths(&self, args: &Value) -> Option<String> {
-        if let Some(params_obj) = args.get("params").and_then(|v| v.as_object()) {
-            for k in ["path", "source", "target", "input", "output", "file"] {
-                if let Some(p_str) = params_obj.get(k).and_then(|v| v.as_str())
-                    && self.fs_engine.is_forbidden(Path::new(p_str))
-                {
-                    return Some(format!("安全内核拦截访问受保护路径: {}", p_str));
+        const PATH_KEYS: [&str; 9] = [
+            "path",
+            "source",
+            "target",
+            "input",
+            "output",
+            "file",
+            "directory",
+            "output_path",
+            "repo_dir",
+        ];
+        for obj_opt in [
+            args.as_object(),
+            args.get("params").and_then(|v| v.as_object()),
+            args.get("arguments").and_then(|v| v.as_object()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for k in PATH_KEYS {
+                if let Some(p_str) = obj_opt.get(k).and_then(|v| v.as_str()) {
+                    let expanded = expand_tilde_arg_path(p_str);
+                    if self.fs_engine.is_forbidden(Path::new(p_str))
+                        || self.fs_engine.is_forbidden(&expanded)
+                    {
+                        return Some(format!("安全内核拦截访问受保护路径: {}", p_str));
+                    }
+                }
+            }
+            if let Some(paths_arr) = obj_opt.get("paths").and_then(|v| v.as_array()) {
+                for p_str in paths_arr.iter().filter_map(|v| v.as_str()) {
+                    let expanded = expand_tilde_arg_path(p_str);
+                    if self.fs_engine.is_forbidden(Path::new(p_str))
+                        || self.fs_engine.is_forbidden(&expanded)
+                    {
+                        return Some(format!("安全内核拦截访问受保护路径: {}", p_str));
+                    }
                 }
             }
         }
@@ -1940,13 +2013,33 @@ impl CapabilityBroker {
                     uptime_s,
                     mem_summary.join("\n")
                 );
+                let detailed_bottleneck = if args
+                    .get("detailed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    crate::diagnostics::diagnose_system_bottleneck(args)
+                        .ok()
+                        .and_then(|rep| serde_json::to_value(rep).ok())
+                        .map(crate::diagnostics::scrub_diag_json)
+                } else {
+                    None
+                };
+                let mut payload = json!({
+                    "loadavg": loadavg,
+                    "uptime_secs": uptime_s,
+                    "memory": mem_summary
+                });
+                if let (Some(obj), Some(bn)) = (payload.as_object_mut(), detailed_bottleneck) {
+                    obj.insert("bottleneck".to_string(), bn);
+                }
                 Ok(CapabilityResult {
                     request_id: request_id.into(),
                     capability_id: "system.inspect".into(),
                     status: ExecutionStatus::Exited,
                     exit_code: Some(0),
                     message: format!("系统采样：负载 {} | {}", loadavg, mem_summary.join(" / ")),
-                    data: json!({ "loadavg": loadavg, "uptime_secs": uptime_s, "memory": mem_summary }),
+                    data: payload,
                     stdout_preview: text,
                     stderr_preview: String::new(),
                     truncated: false,
@@ -3342,6 +3435,66 @@ impl CapabilityBroker {
                     &core, request_id, task_id, args,
                 )
                 .await
+            }
+            h if crate::diagnostics::is_diagnostic_capability(h) => {
+                crate::diagnostics::execute_diagnostic_capability(
+                    self.core().as_deref(),
+                    &self.fs_engine,
+                    request_id,
+                    h,
+                    args,
+                )
+            }
+            h if crate::app_adapter::is_adapter_tool(h) => {
+                let core = self
+                    .core()
+                    .ok_or_else(|| anyhow::anyhow!("app_adapter 尚未完成 Core 绑定"))?;
+                let data = crate::app_adapter::execute_adapter_tool(&core, h, args).await?;
+                let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+                let msg = data
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("软件指令转译完成")
+                    .to_string();
+                let csid = data
+                    .get("changeset_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let verification = data
+                    .get("verification")
+                    .and_then(|v| serde_json::from_value::<VerificationReport>(v.clone()).ok())
+                    .unwrap_or(VerificationReport {
+                        state: if ok {
+                            VerificationState::Passed
+                        } else {
+                            VerificationState::VerificationFailed
+                        },
+                        method: "app_adapter".into(),
+                        checks: vec!["approved_channel_dispatched".into()],
+                        details: None,
+                    });
+                let status = if !ok {
+                    ExecutionStatus::VerificationFailed
+                } else if verification.state == VerificationState::RequestedUnverified {
+                    ExecutionStatus::RequestedUnverified
+                } else {
+                    ExecutionStatus::Exited
+                };
+                Ok(CapabilityResult {
+                    request_id: request_id.into(),
+                    capability_id: h.into(),
+                    status,
+                    exit_code: Some(if ok { 0 } else { 1 }),
+                    message: msg.clone(),
+                    data,
+                    stdout_preview: msg,
+                    stderr_preview: String::new(),
+                    truncated: false,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    changeset_id: csid,
+                    verification,
+                    backend_mode: "app_adapter".into(),
+                })
             }
             other => anyhow::bail!("未实现的内置 handler: {}", other),
         }

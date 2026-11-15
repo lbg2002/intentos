@@ -15,6 +15,7 @@ pub mod gui_bridge;
 pub mod headless_bridge;
 pub mod local_scanner;
 pub mod mpris_dbus;
+pub mod provider;
 pub mod registry;
 pub mod sni_dbusmenu;
 pub mod uri_desktop;
@@ -33,6 +34,13 @@ pub use local_scanner::{
     execute_desktop_action_by_id, normalize_software_category,
 };
 pub use mpris_dbus::{MprisDiscoveryReport, MprisNowPlaying};
+pub use provider::{
+    AvailabilityState, BibliographyEntry, CapabilityAvailability, ChannelCandidate,
+    ExecutionChannel, ProviderCapabilitySpec, ProviderExecutionOutcome, SoftwareCapabilityProvider,
+    StructuredSection, build_honest_guidance_outcome, build_minimal_docx_bytes,
+    build_minimal_pdf_bytes, execute_channel_chain, execute_provider_tool, is_provider_tool_name,
+    probe_wayland_and_atspi_env, provider_tool_specs, resolve_host_binary,
+};
 pub use registry::{AdaptationChannel, AdapterRegistry, AppAdapterProfile, SemanticAppAction};
 pub use sni_dbusmenu::{
     LiveTrayApp, TrayMenuItem, activate_or_show_tray_app, apply_clean_desktop_env,
@@ -79,7 +87,7 @@ pub struct AdapterExecutionOutcome {
     pub changeset_id: Option<String>,
 }
 
-/// Check whether a tool name belongs to the `app_adapter` LLM tool suite.
+/// Check whether a tool name belongs to the `app_adapter` / `SoftwareCapabilityProvider` LLM tool suite.
 pub fn is_adapter_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -91,7 +99,14 @@ pub fn is_adapter_tool(tool_name: &str) -> bool {
             | "app_adapter.now_playing"
             | "app_adapter_inspect_app"
             | "app_adapter.inspect_app"
-    )
+    ) || provider::is_provider_tool_name(tool_name)
+}
+
+/// Return the complete set of `app_adapter` + 5-tier `SoftwareCapabilityProvider` LLM `ToolSpec`s.
+pub fn all_adapter_tool_specs() -> Vec<ToolSpec> {
+    let mut specs = adapter_tool_specs();
+    specs.extend(provider::provider_tool_specs());
+    specs
 }
 
 /// Expose LLM `ToolSpec` definitions so the AIOS Brain can inspect and control non-CLI desktop GUI apps directly.
@@ -261,6 +276,9 @@ pub async fn execute_adapter_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少必填参数 `app`"))?;
             dynamic_profiler::inspect_live_app(core, app).await
+        }
+        other if provider::is_provider_tool_name(other) => {
+            provider::execute_provider_tool(core, other, args).await
         }
         other => anyhow::bail!("未知的 app_adapter 工具名: {}", other),
     }
@@ -1150,7 +1168,9 @@ pub async fn handle_module_rpc(
                     "close_app_verified",
                     "inspect_live_app",
                     "list_live_tray_apps",
-                    "trigger_tray_menu"
+                    "trigger_tray_menu",
+                    "app_provider_capabilities",
+                    "app_provider_execute"
                 ],
                 "categories": local_scanner::all_software_categories()
             }))
@@ -1488,6 +1508,15 @@ pub async fn handle_module_rpc(
             )
             .await?;
             Ok(serde_json::to_value(outcome)?)
+        }
+        "provider_capabilities" | "app_provider_capabilities" => {
+            provider::execute_provider_tool(core, "app_provider_capabilities", &payload).await
+        }
+        "provider_execute" | "app_provider_execute" => {
+            provider::execute_provider_tool(core, "app_provider_execute", &payload).await
+        }
+        other if provider::is_provider_tool_name(other) => {
+            provider::execute_provider_tool(core, other, &payload).await
         }
         other => anyhow::bail!("app_adapter: 未知的模块 RPC 动作 `{}`", other),
     }
@@ -2580,5 +2609,84 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
         .unwrap();
         assert!(naut_sel.ok);
         assert!(naut_sel.translated_command.contains("--select"));
+    }
+
+    #[tokio::test]
+    async fn m2d_provider_rpc_and_broker_dispatch_end_to_end() {
+        let (_tmp, core, work_dir) = setup_test_core();
+
+        // 1. Tool specs & RPC catalog
+        assert_eq!(adapter_tool_specs().len(), 4);
+        assert_eq!(provider_tool_specs().len(), 2);
+        assert_eq!(all_adapter_tool_specs().len(), 6);
+        assert!(is_adapter_tool("app_provider_capabilities"));
+        assert!(is_adapter_tool("app_provider_execute"));
+        assert!(is_adapter_tool("document.replace_section"));
+        assert!(!is_adapter_tool("media.control")); // preserves YAML builtin `media.control`
+
+        let rpc_caps = handle_module_rpc(
+            &core,
+            "app_provider_capabilities",
+            json!({ "domain": "document" }),
+        )
+        .await
+        .unwrap();
+        assert!(rpc_caps.get("count").and_then(|v| v.as_u64()).unwrap_or(0) >= 4);
+
+        // 2. Reversible `.docx` edit via `CapabilityBroker::dispatch` (`app_provider_execute`) + Undo
+        let docx_path = work_dir.join("broker_paper.docx");
+        let orig_bytes = build_minimal_docx_bytes(
+            Some("Broker Test Paper"),
+            &[("1 Introduction", 1, &["Original introduction paragraph."])],
+        );
+        std::fs::write(&docx_path, &orig_bytes).unwrap();
+
+        let call = intentos_protocol::CapabilityCall {
+            request_id: "req-m2d-1".into(),
+            task_id: "task-m2d-1".into(),
+            capability_id: "app_provider_execute".into(),
+            arguments: json!({
+                "capability_id": "document.replace_section",
+                "params": {
+                    "path": docx_path.to_string_lossy(),
+                    "section_heading": "Introduction",
+                    "new_content": "Updated introduction paragraph via Broker."
+                }
+            }),
+            origin: intentos_protocol::InvocationOrigin::UserExplicit,
+            taints: vec![],
+        };
+        let dispatch_out = core.broker.dispatch(&call).await.unwrap();
+        let crate::broker::BrokerDispatchOutcome::Executed(res) = dispatch_out else {
+            panic!("expected BrokerDispatchOutcome::Executed");
+        };
+        assert_eq!(res.status, intentos_protocol::ExecutionStatus::Exited);
+        assert_eq!(res.verification.state, VerificationState::Passed);
+        let csid = res.changeset_id.expect("changeset_id recorded");
+
+        // Undo via `core.broker.undo_changeset` restores byte-exact `.docx`!
+        let (undone, _) = core.broker.undo_changeset(Some(&csid)).unwrap();
+        assert_eq!(undone.status, intentos_protocol::ChangeSetStatus::Undone);
+        assert_eq!(std::fs::read(&docx_path).unwrap(), orig_bytes);
+
+        // 3. Approval gate via Broker for `gui.semantic_inspect` click_control (`approved = false`)
+        let gui_call = intentos_protocol::CapabilityCall {
+            request_id: "req-m2d-2".into(),
+            task_id: "task-m2d-2".into(),
+            capability_id: "app_provider_execute".into(),
+            arguments: json!({
+                "capability_id": "gui.semantic_inspect",
+                "app_hint": "libreoffice",
+                "params": { "click_control": "保存" },
+                "approved": false
+            }),
+            origin: intentos_protocol::InvocationOrigin::UserExplicit,
+            taints: vec![],
+        };
+        let gui_out = core.broker.dispatch(&gui_call).await.unwrap();
+        assert!(matches!(
+            gui_out,
+            crate::broker::BrokerDispatchOutcome::RequiresApproval(_)
+        ));
     }
 }

@@ -1,0 +1,35 @@
+id: dependency.inspect
+version: 1
+summary: 诊断应用程序、二进制或 .desktop 启动器的动态链接库依赖（对比纯净桌面环境与当前环境 ldd、缺失 .so、Conda/LD_LIBRARY_PATH 冲突及解释器权限）
+category: devtools
+aliases: ["依赖检查", "动态库冲突诊断", "软件启动异常诊断", "dependency inspect"]
+l0_patterns:
+  - "检查 {target} 动态库依赖"
+  - "诊断 {target} 启动异常"
+input_schema:
+  type: object
+  required: [target]
+  properties:
+    target:
+      type: string
+      maxLength: 1024
+      description: 目标软件名称、.desktop 文件名/路径或可执行文件绝对路径
+    extra_desktop_dirs:
+      type: array
+      maxItems: 8
+      items:
+        type: string
+      description: 可选额外 .desktop 搜索目录列表
+    env_ld_library_path:
+      type: string
+      maxLength: 2048
+      description: 可选用于复现实验的自定义 LD_LIBRARY_PATH（留空则读取当前进程真实环境变量）
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: dependency.inspect
+undo: none
+verification:
+  kind: structured_output
+feedback: "已完成可执行文件、解释器与双环境 ldd 依赖诊断"

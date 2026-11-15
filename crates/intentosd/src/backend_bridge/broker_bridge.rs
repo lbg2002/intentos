@@ -459,7 +459,10 @@ pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> 
     }
     let norm_us = trimmed.replace('.', "_");
     let norm_dot = trimmed.replace('_', ".");
-    for spec in core.broker.aios_tool_specs() {
+    if crate::diagnostics::is_diagnostic_capability(trimmed) {
+        return norm_dot;
+    }
+    for spec in crate::meta_tools::discoverable_aios_and_provider_specs(&core.broker) {
         if spec.name == trimmed || spec.name == norm_us || spec.name.replace('_', ".") == norm_dot {
             return spec.name;
         }
@@ -489,6 +492,9 @@ pub fn resolve_capability_effect_with_args(
         }
         return Effect::ExecSandboxed;
     }
+    if crate::diagnostics::is_diagnostic_capability(canonical_tool) {
+        return Effect::Observe;
+    }
     if crate::security_guard::is_memory_write_tool(canonical_tool) {
         return Effect::Setting;
     }
@@ -496,10 +502,55 @@ pub fn resolve_capability_effect_with_args(
         return Effect::Observe;
     }
     if crate::app_adapter::is_adapter_tool(canonical_tool) {
-        return if canonical_tool == "app_adapter_invoke" {
-            Effect::Ui
-        } else {
-            Effect::Observe
+        let us = canonical_tool.trim().replace('.', "_");
+        return match us.as_str() {
+            "app_adapter_invoke" | "ide_goto_or_diff" | "file_manager_reveal" => Effect::Ui,
+            "document_replace_section"
+            | "workspace_organize_apply"
+            | "document_convert_headless" => Effect::WriteReversible,
+            "document_compile_bibliography" => {
+                let has_out = args
+                    .get("output_path")
+                    .or_else(|| args.pointer("/params/output_path"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty());
+                if has_out {
+                    Effect::WriteReversible
+                } else {
+                    Effect::Observe
+                }
+            }
+            "gui_semantic_inspect" => {
+                let act = args
+                    .get("action")
+                    .or_else(|| args.pointer("/params/action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("inspect");
+                if act == "inspect" {
+                    Effect::Observe
+                } else {
+                    Effect::Ui
+                }
+            }
+            "app_provider_execute" => {
+                if let Some(inner_cap) = args
+                    .get("capability_id")
+                    .or_else(|| args.get("action"))
+                    .and_then(|v| v.as_str())
+                {
+                    let inner_params = args.get("params").unwrap_or(args);
+                    let norm_inner = inner_cap.trim().replace('.', "_");
+                    if norm_inner != "app_provider_execute" {
+                        return resolve_capability_effect_with_args(
+                            core,
+                            &norm_inner,
+                            inner_params,
+                        );
+                    }
+                }
+                Effect::WriteReversible
+            }
+            _ => Effect::Observe,
         };
     }
     core.broker

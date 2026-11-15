@@ -1,0 +1,48 @@
+id: logs.query
+version: 1
+summary: 查询系统或用户态 systemd 日志（journalctl）或受授权日志文件尾部并自动脱敏敏感凭据
+category: devtools
+aliases: ["系统日志查询", "查看报错日志", "journalctl日志", "logs query"]
+l0_patterns:
+  - "查询 {unit} 服务日志"
+  - "查看最近系统报错日志"
+input_schema:
+  type: object
+  properties:
+    unit:
+      type: string
+      maxLength: 256
+      description: 可选 systemd 单元名（如 ssh.service、pipewire.service）
+    grep:
+      type: string
+      maxLength: 256
+      description: 可选关键词或子串过滤
+    since:
+      type: string
+      maxLength: 128
+      description: 可选起始时间（如 "1 hour ago"、"today"、"2026-11-15 08:00:00"）
+    priority:
+      type: string
+      enum: ["0", "1", "2", "3", "4", "5", "6", "7", "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
+      description: 可选日志级别上限
+    lines:
+      type: integer
+      minimum: 1
+      maximum: 100
+      description: 返回最大行数（上限 100，默认 40）
+    user_scope:
+      type: boolean
+      description: 是否优先查询当前用户态 journalctl --user（默认 false）
+    log_file:
+      type: string
+      maxLength: 1024
+      description: 可选已授权目录内的日志文件路径（读取尾部行并脱敏）
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: logs.query
+undo: none
+verification:
+  kind: structured_output
+feedback: "已完成日志检索与敏感信息脱敏"

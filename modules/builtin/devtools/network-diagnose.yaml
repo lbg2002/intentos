@@ -1,0 +1,35 @@
+id: network.diagnose
+version: 1
+summary: 诊断本机网卡地址（ip -j addr）、默认路由、DNS 配置（/etc/resolv.conf）、本地代理端口连通性及云盘/rclone FUSE 挂载健康度
+category: devtools
+aliases: ["网络综合诊断", "代理端口检查", "DNS与路由诊断", "云盘挂载诊断", "network diagnose"]
+l0_patterns:
+  - "诊断网络与代理状态"
+  - "检查DNS与云盘挂载状态"
+input_schema:
+  type: object
+  properties:
+    proxy_ports:
+      type: array
+      maxItems: 10
+      items:
+        type: integer
+      description: 可选要探测的本机回环代理端口列表（如 [7890, 7897, 1080]）
+    proxy_url:
+      type: string
+      maxLength: 512
+      description: 可选显式待检测代理地址（留空则自动读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）
+    timeout_ms:
+      type: integer
+      minimum: 50
+      maximum: 5000
+      description: 单端口 TCP 连通性探测超时毫秒数（默认 250ms）
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: network.diagnose
+undo: none
+verification:
+  kind: structured_output
+feedback: "已完成网卡、默认路由、DNS、本地代理与 FUSE 挂载诊断"

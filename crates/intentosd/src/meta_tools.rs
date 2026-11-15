@@ -12,7 +12,8 @@
 //! 6. `task.verify` (`task_verify`)
 
 use crate::app_adapter::{
-    AdapterRegistry, LocalScanOptions, deep_scan_local_software, inspect_live_app, is_adapter_tool,
+    AdapterRegistry, LocalScanOptions, SoftwareCapabilityProvider, deep_scan_local_software,
+    inspect_live_app, is_adapter_tool, provider_tool_specs,
 };
 use crate::backend_bridge::broker_bridge::classify_capability_idempotency;
 use crate::backend_bridge::turn_checkpoint::TurnEffectLedger;
@@ -341,6 +342,47 @@ pub enum UnwrappedInvokeTarget {
     },
 }
 
+/// Build the complete list of dynamically discoverable & mid-turn unlockable AIOS + M2-D
+/// `SoftwareCapabilityProvider` + `system.bottleneck` `ToolSpec`s (while keeping
+/// `CapabilityBroker::aios_tool_specs()` at its 9 core Wave-4 tools).
+pub fn discoverable_aios_and_provider_specs(broker: &CapabilityBroker) -> Vec<ToolSpec> {
+    let mut specs = broker.aios_tool_specs();
+    let mut seen: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
+    for pspec in provider_tool_specs() {
+        if seen.insert(pspec.name.clone()) {
+            specs.push(pspec);
+        }
+    }
+    for cap in SoftwareCapabilityProvider::list_capabilities(None, None) {
+        if cap.capability_id == "media.control"
+            || broker.get_descriptor(&cap.capability_id).is_some()
+        {
+            continue;
+        }
+        let fn_name = cap.capability_id.replace('.', "_");
+        if seen.insert(fn_name.clone()) {
+            specs.push(ToolSpec {
+                name: fn_name,
+                description: cap.summary,
+                parameters: cap.input_schema,
+            });
+        }
+    }
+    if seen.insert("system_bottleneck".to_string()) {
+        specs.push(ToolSpec {
+            name: "system_bottleneck".to_string(),
+            description: "只读采样 /proc 内存压力、CPU 负载、Swap 抖动、磁盘空间与高占用进程瓶颈诊断（绝不自动杀进程）".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
+                }
+            }),
+        });
+    }
+    specs
+}
+
 /// Resolve a concrete capability or AIOS tool identifier registered on `broker` / `snap`.
 pub fn resolve_registered_concrete_capability(
     raw_id: &str,
@@ -358,11 +400,14 @@ pub fn resolve_registered_concrete_capability(
     if let Some(d) = broker.get_descriptor(&dotted) {
         return Some(d.id.clone());
     }
+    if crate::diagnostics::is_diagnostic_capability(trimmed) {
+        return Some(dotted);
+    }
     let underscored = trimmed.replace('.', "_");
     if is_memory_tool(trimmed) || is_adapter_tool(trimmed) {
         return Some(underscored);
     }
-    for spec in broker.aios_tool_specs() {
+    for spec in discoverable_aios_and_provider_specs(broker) {
         if spec.name == trimmed || spec.name == underscored || spec.name.replace('_', ".") == dotted
         {
             return Some(spec.name);
@@ -488,6 +533,27 @@ fn parse_effect_filter(raw: &str) -> Option<Effect> {
 }
 
 fn infer_aios_tool_domain_and_effect(name: &str) -> (&'static str, Effect, bool) {
+    let dotted = name.trim().replace('_', ".");
+    match dotted.as_str() {
+        "document.replace.section" => return ("document", Effect::WriteReversible, true),
+        "document.compile.bibliography" => return ("bibliography", Effect::WriteReversible, true),
+        "document.convert.headless" => return ("document", Effect::WriteReversible, true),
+        "document.read.section" | "document.inspect.format" | "pdf.extract.text" => {
+            return ("document", Effect::Observe, true);
+        }
+        "workspace.organize.apply" => return ("workspace", Effect::WriteReversible, true),
+        "workspace.organize.plan" | "cloud.rclone.status" => {
+            return ("workspace", Effect::Observe, true);
+        }
+        "git.inspect.repo" => return ("vcs", Effect::Observe, true),
+        "ide.goto.or.diff" | "file.manager.reveal" => return ("desktop_gui", Effect::Ui, true),
+        "gui.semantic.inspect" => return ("desktop_gui", Effect::Observe, true),
+        "closed.app.internal.action" => return ("closed_app", Effect::Observe, true),
+        "system.bottleneck" => return ("diagnostics", Effect::Observe, true),
+        "app.provider.execute" => return ("software_provider", Effect::WriteReversible, true),
+        "app.provider.capabilities" => return ("software_provider", Effect::Observe, true),
+        _ => {}
+    }
     if is_memory_write_tool(name) {
         ("memory", Effect::Setting, false)
     } else if is_memory_tool(name) {
@@ -679,19 +745,32 @@ fn execute_capability_search(
     }
 
     // 2. Search registered AIOS / Provider `ToolSpec`s (memory_hub, app_adapter, SoftwareCapabilityProvider)
+    let provider_caps_map: HashMap<String, crate::app_adapter::ProviderCapabilitySpec> =
+        SoftwareCapabilityProvider::list_capabilities(None, None)
+            .into_iter()
+            .map(|c| (c.capability_id.replace('.', "_"), c))
+            .collect();
     let q_lc = effective_query.to_lowercase();
     let q_tokens: Vec<&str> = q_lc.split_whitespace().filter(|t| !t.is_empty()).collect();
-    for spec in core.broker.aios_tool_specs() {
+    for spec in discoverable_aios_and_provider_specs(&core.broker) {
         if !privacy.allows_memory_read() && is_memory_tool(&spec.name) {
             continue;
         }
         if !privacy.allows_memory_write() && is_memory_write_tool(&spec.name) {
             continue;
         }
-        if !include_apps && is_adapter_tool(&spec.name) {
+        if !include_apps
+            && is_adapter_tool(&spec.name)
+            && !provider_caps_map.contains_key(&spec.name)
+        {
             continue;
         }
-        let (dom, eff, reversible) = infer_aios_tool_domain_and_effect(&spec.name);
+        let prov_meta = provider_caps_map.get(&spec.name);
+        let (dom, eff, reversible) = if let Some(pm) = prov_meta {
+            (pm.domain.as_str(), pm.effect, pm.reversible)
+        } else {
+            infer_aios_tool_domain_and_effect(&spec.name)
+        };
         if let Some(df) = domain_filter
             && !dom.eq_ignore_ascii_case(df)
             && !spec
@@ -706,41 +785,55 @@ fn execute_capability_search(
         {
             continue;
         }
+        let canonical_id = prov_meta
+            .map(|pm| pm.capability_id.clone())
+            .unwrap_or_else(|| spec.name.clone());
         let name_lc = spec.name.to_lowercase();
+        let cid_lc = canonical_id.to_lowercase();
         let desc_lc = spec.description.to_lowercase();
         let mut sc = 0.0;
         if q_lc.is_empty() {
             sc = 15.0;
         } else {
-            if name_lc == q_lc || name_lc.replace('_', ".") == q_lc {
+            if name_lc == q_lc || cid_lc == q_lc || name_lc.replace('_', ".") == q_lc {
                 sc += 115.0;
-            } else if name_lc.contains(&q_lc) {
+            } else if name_lc.contains(&q_lc) || cid_lc.contains(&q_lc) {
                 sc += 75.0;
             }
             if desc_lc.contains(&q_lc) {
                 sc += 48.0;
             }
             for tok in &q_tokens {
-                if name_lc.contains(tok) {
+                if name_lc.contains(tok) || cid_lc.contains(tok) {
                     sc += 34.0;
                 } else if desc_lc.contains(tok) {
                     sc += 20.0;
                 }
             }
         }
-        if sc > 0.0 && seen_ids.insert(spec.name.clone()) {
+        let availability_str = prov_meta
+            .map(|pm| match pm.availability.state {
+                crate::app_adapter::AvailabilityState::Available => "available",
+                crate::app_adapter::AvailabilityState::DegradedGuidanceOnly => {
+                    "degraded_guidance_only"
+                }
+                crate::app_adapter::AvailabilityState::Unavailable => "unavailable",
+            })
+            .unwrap_or("available");
+        if sc > 0.0 && seen_ids.insert(canonical_id.clone()) {
+            seen_ids.insert(spec.name.clone());
             entries.push((
                 sc,
                 json!({
-                    "id": spec.name,
+                    "id": canonical_id,
                     "tool_name": spec.name.replace('.', "_"),
                     "summary": compact_description_text(&spec.description, 64),
                     "domain": dom,
                     "effect": eff.as_str(),
                     "reversible": reversible,
-                    "availability": "available",
+                    "availability": availability_str,
                 }),
-                Some(spec.name),
+                Some(canonical_id),
             ));
         }
     }
@@ -924,7 +1017,8 @@ fn execute_capability_describe(
         }
     }
 
-    let aios_specs = core.broker.aios_tool_specs();
+    let aios_specs = discoverable_aios_and_provider_specs(&core.broker);
+    let provider_caps = SoftwareCapabilityProvider::list_capabilities(None, None);
     let meta_specs = meta_tool_specs(privacy);
     let mut described: Vec<Value> = Vec::new();
     let mut not_found: Vec<String> = Vec::new();
@@ -993,6 +1087,47 @@ fn execute_capability_describe(
 
         let norm_us = req_id.replace('.', "_");
         let norm_dot = req_id.replace('_', ".");
+        if let Some(pcap) = provider_caps.iter().find(|c| {
+            c.capability_id == *req_id
+                || c.capability_id.replace('.', "_") == norm_us
+                || c.capability_id.replace('_', ".") == norm_dot
+        }) {
+            let idem =
+                classify_capability_idempotency(&pcap.capability_id, pcap.effect, &json!({}));
+            described.push(json!({
+                "id": pcap.capability_id,
+                "version": 1,
+                "tool_name": pcap.capability_id.replace('.', "_"),
+                "summary": compact_description_text(&pcap.summary, 80),
+                "description": pcap.summary,
+                "domain": pcap.domain,
+                "category": pcap.domain,
+                "channels": pcap.channels,
+                "effect": pcap.effect.as_str(),
+                "effects": [pcap.effect.as_str()],
+                "permission_tier": permission_tier_for_effect(pcap.effect),
+                "requires_approval": pcap.requires_approval,
+                "idempotency_policy": idem,
+                "reversible": pcap.reversible,
+                "preconditions": pcap.preconditions,
+                "undo_semantics": {
+                    "undoable": pcap.reversible,
+                    "strategy": if pcap.reversible && pcap.effect > Effect::Observe { "changeset" } else { "none" },
+                    "creates_changeset": pcap.reversible && pcap.effect > Effect::Observe,
+                },
+                "input_schema": pcap.input_schema,
+                "output_semantics": {
+                    "envelope": "{ message: string, data: object }",
+                    "verification_method": pcap.verification_method,
+                },
+                "availability": pcap.availability,
+            }));
+            if !unlocked_capability_ids.contains(&pcap.capability_id) {
+                unlocked_capability_ids.push(pcap.capability_id.clone());
+            }
+            continue;
+        }
+
         if let Some(spec) = aios_specs.iter().find(|s| {
             s.name == *req_id || s.name == norm_us || s.name.replace('_', ".") == norm_dot
         }) {
@@ -2260,7 +2395,7 @@ fn resolve_full_openai_tool_schema(
 
     let norm_us = raw_id.replace('.', "_");
     let norm_dot = raw_id.replace('_', ".");
-    for spec in broker.aios_tool_specs() {
+    for spec in discoverable_aios_and_provider_specs(broker) {
         if spec.name == raw_id || spec.name == norm_us || spec.name.replace('_', ".") == norm_dot {
             if (!privacy.allows_memory_read() && is_memory_tool(&spec.name))
                 || (!privacy.allows_memory_write() && is_memory_write_tool(&spec.name))

@@ -1434,7 +1434,10 @@ fn resolve_tool_name_to_cap(tool_name: &str, broker: &CapabilityBroker) -> Strin
     }
     let norm_us = trimmed.replace('.', "_");
     let norm_dot = trimmed.replace('_', ".");
-    for spec in broker.aios_tool_specs() {
+    if crate::diagnostics::is_diagnostic_capability(trimmed) {
+        return norm_dot;
+    }
+    for spec in crate::meta_tools::discoverable_aios_and_provider_specs(broker) {
         if spec.name == trimmed || spec.name == norm_us || spec.name.replace('_', ".") == norm_dot {
             return spec.name;
         }

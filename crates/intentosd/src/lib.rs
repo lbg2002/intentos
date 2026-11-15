@@ -10,6 +10,7 @@ pub mod core;
 pub mod db;
 pub mod dbus_bridge;
 pub mod decision;
+pub mod diagnostics;
 pub mod execution_hub;
 pub mod gateway;
 pub mod intent_engine;

@@ -1,0 +1,35 @@
+id: repair.verify
+version: 1
+summary: 重新执行指定诊断探针并与修复前证据对比，核实系统或应用修复是否真实生效
+category: devtools
+aliases: ["验证故障修复结果", "复检修复状态", "repair verify"]
+l0_patterns: []
+input_schema:
+  type: object
+  required: [probe]
+  properties:
+    probe:
+      type: string
+      enum:
+        - dependency.inspect
+        - service.status
+        - network.diagnose
+        - package.inspect
+        - system.bottleneck
+        - process.health
+      description: 用于复检验证的目标诊断探针名称
+    probe_args:
+      type: object
+      description: 传递给目标诊断探针的参数对象（如 target、unit、package、pid）
+    before_evidence:
+      type: object
+      description: 可选修复前采集的原始诊断证据，用于前后状态对比
+effects: [observe]
+idempotent: true
+execution:
+  type: builtin
+  handler: repair.verify
+undo: none
+verification:
+  kind: structured_output
+feedback: "已完成修复后实时探针复检"
