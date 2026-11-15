@@ -193,3 +193,21 @@
   - `cargo clippy --workspace --all-targets -- -D warnings`：**0 警告，0 错误**
   - `cargo test --workspace -- --test-threads=1`：**`142/142` 测试（含新增 `tests/e2e_v0_2_m1.rs` 5 项端到端验收套件）100% 通过**
   - 325 条基准评测准确率提升至 **`99.7%`（324/325）**，候选延迟 **P50 = `2.79 ms` / P95 = `5.92 ms`**，红队安全门禁 **`16/16` 全通过**。
+
+---
+
+### 里程碑 9：`v0.2-M1.1 全量底座加固与 v0.2-M2 动态能力发现、WorldState、受控终端及诊断/软件 Provider`（GitHub Milestone #2，Issues `#6`–`#9` 全量收官）
+- **交付时间**：2026-11-15
+- **`v0.2-M1.1` 十项底座可靠性、隐私、预算、性能与流式加固 (`H01`–`H10`，Commits `afd8c18`..`a862ba3`)**：
+  - **并发回合隔离、语义幂等与持久化步骤 WAL (`H01`–`H03`，`afd8c18`, `7515373`, `a5ac6e7`)**：实现同 `session_id` 原子回合占用与请求级 `request_id` 幂等单飞；按 `CacheUntilStateChanged` / `AlwaysRefresh` / `IdempotentMutation` / `ExactlyOncePerStep` / `NeverReplay` 五类语义与 `state_epoch` 失效机制管理重放；新增 SQLite `turn_step_journal` 预写日志，对未决副作用标记 `RecoveryRequired` 并在重启后恢复，绝不盲目自动重跑。
+  - **外部 CLI 真实沙箱隔离、三态隐私上下文与统一执行脊柱 (`H04`–`H06`，`85e7524`, `7fd5930`, `3b2b4e9`)**：实测探测 `codex` / `zcode` / `pi` CLI 能力并套入 `bubblewrap` 沙箱，通过 `stdin` 管道消除 `/proc/<pid>/cmdline` 提示词泄露，统一 `allow_broker_tools=false` 时的 `ExternalChatOnly` 硬阻断；将 `ExecutionContext`（`Standard` / `EphemeralReadOnly` / `StrictIsolated`）贯通全链路；收敛 Core L2 与 Quick-Chat 共用事务型 `CapabilityBroker` 分发器，修复 `pi-adapter` 崩溃回退 `native` 时的跨运行时重复副作用漏洞。
+  - **五维全局预算、渐进式认知检索、版本化能力快照与真实 SSE 流式事件 (`H07`–`H10`，`0f46c11`, `9054506`, `31f2c38`, `a862ba3`)**：引入 `TaskBudgetTracker`（轮次/工具调用/耗时/审批暂停剔除/重试上限）；`H08` 对高确定性意图跳过 Fast LLM，仅在歧义时发送 Top-12 紧凑能力目录（`9,612 B -> 956 B`，**-90.05%**）；`H09` 引入 `CapabilitySnapshot` 预序列化缓存与 `CapabilitySearchIndex`，使 `build_quick_chat_openai_tools` 延迟从 `23.73 ms` 降至 **`0.29 ms`（提速 `83×`）**，`parse_structured_intent` 从 `23.22 ms` 降至 **`0.35 ms`（提速 `61×`）**；`H10` 建立单调递增序号 `AgentEvent` 流式总线、OpenAI/Anthropic 增量 SSE 解析器（含跨 chunk UTF-8 与密钥实时脱敏）及受限 TTL Warm Worker 复用池。
+- **`v0.2-M2` 动态能力发现、环境状态理解、受控终端与诊断/软件语义能力 (`M2-A`–`M2-D`，Commits `ad5a8cb`..`8f17a02`，Closes `#6`, `#7`, `#8`, `#9`)**：
+  - **`M2-A` 动态能力发现 6 元工具与渐进式 Schema 暴露 (`meta_tools.rs`、`capability_snapshot.rs`，`ad5a8cb`，Closes `#6`)**：新增 `capability.search`（P50 = `23.4 µs`）、`capability.describe`、`capability.invoke`（阻断递归元工具调用并完整穿过 `CapabilityBroker`）、`app.discover`、`resource.resolve`、`task.verify`；首轮仅暴露高置信度直接工具 + 6 个元工具，使 Quick-Chat 首轮 Schema 从 `15,672 B` 降至 **`3,474 B`（`-77.83%`）**，Core L2 首轮 Schema 从 `38,351 B` 降至 **`3,474 B`（`-90.94%`）**，并在回合中段动态解锁新发现能力。
+  - **`M2-B` 统一 `ResourceResolver` 与隐私门控 `WorldState` (`world_state.rs`、`context_resolver.rs`，`9cdb9fb`, `8f17a02`，Closes `#7`)**：统一解析文件、目录、项目、应用、窗口、URL、日期对比实验结果（如「比较昨天与前天的实验结果」→ `MultipleComparative`），并在原生 Wayland 焦点不可见时诚实返回 `UnavailableOnWayland` 触发澄清询问（「把它关掉」绝不盲关后台窗口），`StrictIsolated` 下实现零项目/记忆泄露。
+  - **`M2-C` `C0`–`C4` 受控终端 `CommandProposal` 分类器与 `bubblewrap` 沙箱执行器 (`terminal_agent.rs`、`crates/sandbox`、`973f452`，Closes `#8`)**：结构化 `CommandProposal` 强制非 Shell `Command::new(program).args(argv)` 执行，硬拦截 `bash -c` / `python3 -c` / 可执行符号链接伪装 / 数据符号链接越界 / `~/.ssh` 读取 / 未授权目录写入；`C0`/`C1` 在无外网 `bwrap` 沙箱内受限执行（独立进程组超时 `SIGKILL` + 64 KiB 截断 + `SensitiveDataGuard` 脱敏），`C3` 系统修改强制人工审批并诚实标记 `reversible: false`。
+  - **`M2-D` Linux 统一诊断套件与 5 层多通道 `SoftwareCapabilityProvider` (`diagnostics.rs`、`app_adapter/provider.rs`，`0ae73e1`，Closes `#8`, `#9`)**：实现 `logs.query`、`dependency.inspect`（净环境 vs 当前环境双 `ldd` 精准定位缺失 `.so` 与 Conda `LD_LIBRARY_PATH` 冲突）、`service.status`、`package.inspect`、`network.diagnose`（真实网卡路由 + 本地代理端口活性探测 + FUSE/云盘挂载健康检查）、`system.bottleneck`、`repair.plan`、`repair.verify`；将桌面软件适配升级为 5 层严格优先级 `SoftwareCapabilityProvider`（`NativeApiOrDbus` → `CliOrHeadless` → `DirectDocumentFormat` → `GuiAtSpiSemantic` → `HonestGuidance`，含 `RequestedUnverified` 零盲目跨通道重放保证），打通 `.docx` 章节可逆编辑与字节级精确 `Undo`、多格式（`.pdf`/`.docx`/`.md`）文献综述编译、`git.inspect_repo` 及闭源软件诚实引导。
+- **`v0.2-M2` 全量质量门禁与同机 `--release` 实测验收**：
+  - `cargo fmt --all -- --check`：**0 差异**；`cargo clippy --workspace --all-targets -- -D warnings`：**0 警告**。
+  - 无头净环境 `cargo test --workspace -- --test-threads=1`：**`226 / 226` 单元测试与端到端集成测试（含开放式论文研究工作区综合合成验收 `tests/e2e_v0_2_m2.rs`）100% 通过**。
+  - 同机 `--release` `intentosctl eval`（325 条语料）：总体准确率 **`99.69%`（324/325）**，L0 覆盖率 **`100.0%`（284/284）**，候选延迟 **P50 = `2.84 ms` / P95 = `5.54 ms`**，`Undo` **`6/6`**，红队门禁 **`16/16` 全通过**；`intentosd` 静置内存 **`24.18 MiB`**（`<= 80 MiB`）、10s 静置 CPU **`0.00%`**；GTK4 设置中心与悬浮启动器 `--smoke-ui` 100% 通过。

@@ -316,20 +316,106 @@ cargo test --workspace -- --test-threads=1
 
 ## 7. 建议提交顺序与交付清单
 
-- [ ] H01：原子 turn 注册、请求身份绑定、并发测试。
-- [ ] H02：工具幂等策略、读取刷新与相对操作测试。
-- [ ] H03：持久化步骤日志、未知副作用、崩溃恢复测试。
-- [ ] H04：真实 CLI/SDK 隔离、统一只对话策略、实测证明。
-- [ ] H05：完整三态 privacy context 与全链路测试。
-- [ ] H06：收敛全部 Agent 执行入口、旧路径迁移与故障注入。
-- [ ] H07：全局预算、部分完成与目标验证、协议兼容。
-- [ ] H08：渐进式认知决策，减少重复推理与硬编码。
-- [ ] H09：性能基线、能力快照、模型发现缓存、I/O 优化。
-- [ ] H10：真实流式事件、Worker 按需复用、三端交互。
-- [ ] M2-A：动态能力元工具、渐进 Schema 暴露。
-- [ ] M2-B：ResourceResolver + WorldState。
-- [ ] M2-C：受控终端执行。
-- [ ] M2-D：系统诊断与软件 Provider 六种真实任务闭环。
-- [ ] 更新 PROGRESS.md、评测报告与实际验收结果；公开未完成项、已知限制和回归风险。
+- [x] H01：原子 turn 注册、请求身份绑定、并发测试。
+- [x] H02：工具幂等策略、读取刷新与相对操作测试。
+- [x] H03：持久化步骤日志、未知副作用、崩溃恢复测试。
+- [x] H04：真实 CLI/SDK 隔离、统一只对话策略、实测证明。
+- [x] H05：完整三态 privacy context 与全链路测试。
+- [x] H06：收敛全部 Agent 执行入口、旧路径迁移与故障注入。
+- [x] H07：全局预算、部分完成与目标验证、协议兼容。
+- [x] H08：渐进式认知决策，减少重复推理与硬编码。
+- [x] H09：性能基线、能力快照、模型发现缓存、I/O 优化。
+- [x] H10：真实流式事件、Worker 按需复用、三端交互。
+- [x] M2-A：动态能力元工具、渐进 Schema 暴露。
+- [x] M2-B：ResourceResolver + WorldState。
+- [x] M2-C：受控终端执行。
+- [x] M2-D：系统诊断与软件 Provider 六种真实任务闭环。
+- [x] 更新 PROGRESS.md、评测报告与实际验收结果；公开未完成项、已知限制和回归风险。
 
 **最终交付要求**：不仅能识别用户指令，还能实际完成“恢复论文工作环境、检查昨天的实验结果、整理新增文献、给出今天优先事项”等复杂目标；每项子任务有实际证据、明确的部分失败语义、可控权限与适用的撤销/恢复机制。此验收场景不应被硬编码成专用关键词或虚假成功路径。
+
+---
+
+## 8. 实施完成状态、提交记录与同机性能对照实测
+
+### 8.1 线性提交记录（`H01`–`H10` 与 `M2-A`–`M2-D`）
+
+所有加固与 Milestone 2 架构任务已按线性顺序合入 `main` 分支，全量遵守 `#![forbid(unsafe_code)]` 且所有能力执行 100% 经过 `CapabilityBroker` + `PolicyEngine` + `TurnEffectLedger` + `ChangeSet`：
+
+| 阶段 / 编号 | Commit SHA | 提交摘要与核心闭环内容 |
+|---|---|---|
+| 基线 (`Baseline`) | `cf9e649` | `docs: add M1.1 hardening and M2 agent implementation task specification` |
+| `H01` | `afd8c18` | `fix(h01): atomic turn registration, request identity binding, and concurrency guard` |
+| `H02` | `7515373` | `fix(h02): capability-semantic idempotency policies, read invalidation, and step identity` |
+| `H03` | `a5ac6e7` | `fix(h03): persistent step execution ledger, unknown side-effect halt, and restart recovery` |
+| `H04` | `85e7524` | `fix(h04): real OS sandbox isolation for external CLI agents, stdin prompt pipe, and unified chat-only enforcement` |
+| `H05` | `7fd5930` | `fix(h05): propagate three-state ExecutionContext privacy policy end-to-end` |
+| `H06` | `3b2b4e9` | `refactor(h06): unify Core L2 and Quick-Chat execution spine with shared ledger and P0 fault-injection suite` |
+| `H07` | `0f46c11` | `feat(h07): global multi-dimensional budget tracker and honest partial/recovery task status` |
+| `H08` | `9054506` | `feat(h08): progressive L0/L1/L2 cognitive decision, compact Fast-LLM retrieval, and calibration` |
+| `H09` | `31f2c38` | `perf(h09): versioned CapabilitySnapshot, non-blocking BackendCatalog cache, and I/O hot-path optimization` |
+| `H10` | `a862ba3` | `feat(h10): unified AgentEvent streaming protocol, SSE incremental parser, and warm worker reuse` |
+| `M2-A` (`#6`) | `ad5a8cb` | `feat(m2-a): dynamic capability discovery meta-tools and progressive schema exposure` |
+| `M2-B` (`#7`) | `9cdb9fb` | `feat(m2-b): unified ResourceResolver and privacy-gated WorldState with Wayland honesty` |
+| `M2-C` (`#8`) | `973f452` | `feat(m2-c): C0-C4 controlled terminal CommandProposal classifier and sandboxed executor` |
+| `M2-D` (`#8`, `#9`) | `0ae73e1` | `feat(m2-d): real Linux diagnostic capability suite and 5-tier SoftwareCapabilityProvider` |
+| `M2-E2E` | `4896679` | `test(m2): add comprehensive M2 and open-ended research synthesis E2E suite` |
+| `M2-B Fix` | `8f17a02` | `fix(m2-b): exclude clipboard destination phrases from read-from-clipboard deictic check` |
+
+### 8.2 验证覆盖矩阵（严格区分仿真/Mock 测试与宿主机真机实测）
+
+1. **Workspace 自动化测试全量通过（`226 / 226`，`0 failed`）**：
+   - 单元测试（`174` 项）：`intentos_capability_sdk` (`2`)、`intentos_fsops` (`6`)、`intentos_protocol` (`4`)、`intentos_sandbox` (`4`)、`intentosd` (`158`)。
+   - 集成与端到端测试（`52` 项）：`e2e_poc` (`2`)、`e2e_v0_1` (`5`)、`e2e_wave2` (`2`)、`e2e_wave3` (`4`)、`e2e_wave4` (`4`)、`e2e_wave5` (`4`)、`e2e_v0_2_m1` (`8`)、`e2e_v0_2_m1_1_p0` (`12`，覆盖并发防串扰、语义幂等、步骤 WAL 崩溃恢复、CLI 沙箱与 `ExternalChatOnly`、三态隐私零落盘、跨运行时 `TurnEffectLedger` 防重放)、`e2e_v0_2_m1_1_p1` (`6`，覆盖 `AgentEvent` SSE 流、UTF-8 多字节流式分片、密钥实时脱敏、流中断取消、Warm Worker 复用与隔离)、`e2e_v0_2_m2` (`5`，覆盖动态能力中段解锁、`WorldState` Wayland 诚实消解与双资源对比、`C0`–`C4` 受控终端、6 类真实诊断/软件任务闭环及开放式论文研究工作区综合目标 + `Undo` 回退 + 部分失败诚实语义)。
+   - **诚实边界说明**：端到端套件中的大模型多轮推理采用本地隔离 HTTP/SSE 网关（Deterministic Mock Upstream）驱动多轮 `tool_calls`，以确保离线 CI 可重现；而所有底层系统效应（`SYS_openat2` 文件事务、`bubblewrap 0.11.1` 命名空间隔离、`/proc` 采样、双环境 `ldd` 动态库冲突分析、`git` 仓库状态、TCP 代理活性探测、`.docx` ZIP/XML 章节读写与字节级 `Undo` 还原）均为 **100% 宿主机真实执行，零假成功返回**。
+2. **宿主机真机实测环境**：
+   - 硬件与内核：`AMD Ryzen 7 4800H (8C/16T)`，`30,941 MiB RAM`，`Ubuntu 26.04.1 LTS (Linux 7.0.0-43-generic x86_64)`。
+   - 桌面与沙箱：`Wayland` + `GNOME Shell 50.1`，`bubblewrap 0.11.1`（非特权 User/Mount/Net/PID Namespace 实测可用），`rustc 1.96.0`，`Python 3.14.4`（系统 GTK4 / Libadwaita）。
+
+### 8.3 同机 `--release` 性能基线与交付后实测对照（`cf9e649` vs `v0.2-M2` `8f17a02`）
+
+#### （1）首轮工具 Schema 与认知提示词开销对照（M2-A 渐进式暴露 + H08 紧凑检索）
+
+> 注：在已注册能力规模从 `cf9e649` 的 **96 项**（`87 YAML + 9 AIOS`）扩展至 **119 项可发现能力**（`95 YAML + 9 AIOS + 15 SoftwareCapabilityProvider + 6 Meta-Tools`）的前提下，首轮上下文开销实现大幅下降：
+
+| 指标项（代表性复合语句：`帮我查找文档里的周报并把音量调到30%`） | `cf9e649` 基线 | `v0.2-M2` (`8f17a02`) | 变化幅度 |
+|---|---:|---:|---:|
+| Quick-Chat 首轮 OpenAI `tools` JSON 字节数 | `15,672 B` (`29` tools) | **`3,474 B`** (`11` tools: `5` direct + `6` meta) | **`-77.83%`** (目标 `>= 50%`) |
+| Quick-Chat 首轮 OpenAI `ceil(B/4)` / BPE 近似 Token | `3,918` / `6,783` tok | **`869` / `1,717` tok** | **`-77.82%` / `-74.69%`** |
+| Quick-Chat 325 条语料首轮 OpenAI `tools` 平均字节数 | `15,747.8 B` | **`3,218.1 B`** (`min 2,061 B, max 5,076 B`) | **`-79.56%`** |
+| Quick-Chat 首轮 Anthropic `tools` JSON 字节数 | `14,831 B` | **`3,155 B`** | **`-78.73%`** |
+| CLI 受控桥接 `<intentos_tool_call>` 协议提示词字节数 | `5,929 B` | **`2,393 B`** | **`-59.64%`** |
+| Core L2 首轮 OpenAI `tools` JSON 字节数（vs 全量 96 工具） | `38,351 B` (`96` tools) | **`3,474 B`** (`11` tools) | **`-90.94%`** |
+| Core L2 首轮 OpenAI `tools`（vs 原生循环 36 工具过滤） | `17,804 B` (`36` tools) | **`3,474 B`** (`11` tools) | **`-80.49%`** |
+| Core L2 `pi-adapter` `RunRequest.tools` JSON 字节数 | `35,375 B` | **`3,133 B`** | **`-91.14%`** |
+| Fast LLM `cognitive_parser` `cap_catalog` JSON 数组 | `9,612 B` (`87` caps) | **`956 B`** (`Top-12` caps) | **`-90.05%`** |
+| Fast LLM `cognitive_parser` 完整 `messages` 载荷字节数 | `11,811 B` | **`2,066 B`** | **`-82.51%`** |
+
+#### （2）热路径阶段延迟、官方 325 条基准评测与守护进程资源占用对照（`--release`）
+
+| 维度 / 实测指标 | `cf9e649` 基线 (`--release`) | `v0.2-M2` (`8f17a02`, `--release`) | 门禁 / 对照结论 |
+|---|---:|---:|---|
+| `build_quick_chat_openai_tools` P50 / P95 / P99 (Cold) | `23.73 / 27.05 / 41.62 ms` | **`0.32 / 0.47 / 0.66 ms`** | **`-98.6%` (`73.6×` 提速)** |
+| `build_quick_chat_openai_tools` P50 / P95 / P99 (Warm) | `24.00 / 31.86 / 41.60 ms` | **`0.29 / 0.42 / 0.56 ms`** | **`-98.8%` (`83.3×` 提速)** |
+| `parse_structured_intent` 本地结构化解析 P50 / P95 / P99 | `23.22 / 28.41 / 45.95 ms` | **`0.38 / 0.67 / 1.08 ms`** (Warm `0.35 / 0.65 / 0.78 ms`) | **`-98.4%` (`61.5×` 提速，消除重复编译)** |
+| `CapabilitySnapshot::search` 动态检索 P50 / P95 / P99 | N/A（新增动态检索索引） | **`0.024 / 0.052 / 0.064 ms`** (Warm `23.4 / 47.1 / 61.5 µs`) | 远优于 `< 0.5 ms` 目标 |
+| `router.route_text` L0 解析路由 P50 / P95 / P99 (Warm) | `2.04 / 4.96 / 7.01 ms` | **`1.88 / 5.26 / 5.77 ms`** | 保持 ~`2 ms` 亚感知水平 |
+| 实时候选刷新 `query_candidates` P50 / P95 / P99 (Warm) | `2.70 / 5.52 / 8.32 ms` | **`2.53 / 5.82 / 6.22 ms`** | 远优于冻结门禁 (`P50 <= 12 ms, P95 <= 30 ms`) |
+| 官方 `intentosctl eval` 总体准确率 (`N=325`) | `99.69%` (`324/325`) | **`99.69%` (`324/325`)** | 零回归（远高于 `>= 88%` 门禁） |
+| 官方 `intentosctl eval` 日常 L0 覆盖率 (`N=284`) | `100.0%` (`284/284`) | **`100.0%` (`284/284`)** | 零回归（`>= 85%` 门禁） |
+| 官方 `intentosctl eval` L0 执行延迟 P50 / P95 (Cold) | `6.25 / 69.02 ms` | **`6.52 / 75.93 ms`** | 远优于冻结门禁 (`P50 <= 120 ms, P95 <= 300 ms`) |
+| 可逆变更集 `Undo` / 虚假成功数 / 红队门禁 (`RT-01`..`16`) | `6/6` / `0` / `16/16` | **`6/6` / `0` / `16/16`** | 100% 通过 |
+| `intentosd` 独立守护进程冷启动 / 热启动就绪耗时 | `229.43 / 233.44 ms` (`96` caps) | **`235.70 / 253.13 ms`** (`104` caps) | 保持 ~`240 ms` 极速就绪 |
+| `intentosd` 空闲常驻物理内存 `VmRSS`（静置 3s） | `23,268 kB` (`22.72 MiB`) | **`24,760 kB` (`24.18 MiB`, `RssAnon 6.0 MiB`)** | 远低于 `<= 80 MiB` 预算 |
+| `intentosd` 10 秒静置 CPU 占用率 | `0.00%` (`0` ticks / `10s`) | **`0.00%` (`0` ticks / `10.01s`)** | 远低于 `<= 0.5%` 预算 |
+| GTK4 `intentos-settings.py --smoke-ui` 冷 / 热耗时 | `483.12 / 455.22 ms` | **`424.73 / 402.42 ms`** (`VmRSS ~92.4 MiB`, `11` 页 `0` 警告) | 全 11 页构建与 CSS 校验通过 |
+| GTK4 `intentos-launcher.py --smoke-ui` 冷 / 热耗时 | `399.55 / 379.99 ms` | **`379.16 / 361.50 ms`** (`VmRSS ~85.4 MiB`, `36` 实时模型) | 主题/审批续接/语音按钮校验通过 |
+
+### 8.4 未完成项（后续 `M3`/`M4` 规划）、已知限制与回归风险披露
+
+1. **Wayland 活动窗口焦点读取边界**：在 Ubuntu 26.04 原生 Wayland 会话下，若 GNOME Shell 扩展未上报近期（`<= 15s` TTL）焦点窗口提示，合成器安全隔离禁止任意后台进程静默嗅探全局前台窗口；此时 `WorldState` 诚实返回 `FocusWindowConfidence::UnavailableOnWayland` 并触发澄清询问，绝不猜测或误关后台应用。
+2. **闭源桌面软件内部动作边界**：针对微信、QQ、百度网盘等无公开 D-Bus / CLI 接口且 AT-SPI 无障碍树未暴露语义控件的内部操作，`SoftwareCapabilityProvider` 严格停留在第 5 级 `HonestGuidance`（返回可操作的人工步骤说明，`action_executed: false`），绝不采用全屏截图视觉坐标盲点点击。
+3. **L0 尾部执行延迟构成**：`intentosctl eval` 的 L0 执行 P95（`~75.9 ms`）主要由外部系统工具子进程（如 `powerprofilesctl`、`apt-cache`、`ss`）的 OS 调度开销决定，Rust 核心路由与策略仲裁本身小于 `3 ms`。
+4. **后续 `v0.2-M3` / `v0.2-M4` 待推进事项**：
+   - `M3`：分层长期记忆（`M0`–`M4`）重要性与项目作用域检索、跨天工作区增量恢复快照、经成功验证轨迹的候选技能沉淀（不自动继承历史高危授权）。
+   - `M4`：低功耗事件总线、持久化定时/事件防抖调度（完善 `drive_scheduler.rs` 真实 `settle_seconds` 等待语义）、设置中心从 11 页向「5 核心域 + 高级折叠」收敛及 `IntentOS-AgentBench` 全量评测集建设。
