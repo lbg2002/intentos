@@ -25,3 +25,4 @@ pub mod settings;
 pub mod speech_hub;
 pub mod web_shell;
 pub mod web_ui;
+pub mod world_state;

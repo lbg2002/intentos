@@ -312,6 +312,7 @@ impl CapabilityBroker {
                         close_res,
                         start.elapsed().as_millis() as u64,
                     );
+                    core.world_state.invalidate_running_apps();
                     self.record_audit_if_persistent(
                         &call.task_id,
                         &desc.id,
@@ -328,6 +329,13 @@ impl CapabilityBroker {
                 let res = self
                     .execute_approved(&call.request_id, &call.task_id, desc, &call.arguments)
                     .await?;
+                if matches!(
+                    desc.id.as_str(),
+                    "app.launch" | "app.quit" | "process.terminate"
+                ) && let Some(core) = self.core()
+                {
+                    core.world_state.invalidate_running_apps();
+                }
                 self.record_audit_if_persistent(
                     &call.task_id,
                     &desc.id,

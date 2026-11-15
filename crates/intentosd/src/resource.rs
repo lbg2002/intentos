@@ -7,10 +7,16 @@
 
 use crate::config::{AppConfig, SiteEntry};
 use crate::db::IndexDb;
+pub use crate::world_state::{
+    AMBIGUITY_CONFIDENCE_MARGIN, ResourceKind, ResourceRef, ResourceResolution, ResourceResolver,
+    compute_stable_resource_id,
+};
+use chrono::{TimeZone, Utc};
 use intentos_fsops::SafeFsEngine;
 use pinyin::ToPinyin;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,6 +77,169 @@ pub struct ResolvedWebTarget {
     pub url: String,
     pub title: String,
     pub source: String,
+}
+
+impl AppRecord {
+    /// Convert an indexed `AppRecord` into a unified [`ResourceRef`] (`M2-B`).
+    pub fn to_resource_ref(&self, confidence: f64, source: &str) -> ResourceRef {
+        let uri = format!("app://{}", self.app_id);
+        let desktop_path = {
+            let p = Path::new(&self.source);
+            if p.is_file() {
+                Some(p.to_path_buf())
+            } else {
+                None
+            }
+        };
+        ResourceRef {
+            id: compute_stable_resource_id(ResourceKind::Application, &uri),
+            kind: ResourceKind::Application,
+            uri,
+            path: desktop_path,
+            display_name: self.name.clone(),
+            project_id: None,
+            source: source.to_string(),
+            confidence: confidence.clamp(0.0, 1.0),
+            last_verified_at: Utc::now(),
+            metadata: json!({
+                "app_id": self.app_id,
+                "generic_name": self.generic_name,
+                "exec_cmd": self.exec_cmd,
+                "desktop_source": self.source,
+            }),
+        }
+    }
+}
+
+impl FileRecord {
+    /// Construct a `FileRecord` directly from a live on-disk file path.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let meta = fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.clone());
+        let ext = path
+            .extension()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let category = classify_extension(&ext).to_string();
+        let parent_dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Some(Self {
+            path: path.to_string_lossy().to_string(),
+            name,
+            stem,
+            ext,
+            category,
+            parent_dir,
+            size_bytes: meta.len(),
+            mtime_secs,
+        })
+    }
+
+    /// Infer semantic [`ResourceKind`] (`ExperimentResult`, `Document`, or `File`) from extension and path.
+    pub fn infer_resource_kind(&self) -> ResourceKind {
+        let ext = self.ext.to_ascii_lowercase();
+        let stem_lc = self.stem.to_lowercase();
+        let parent_lc = self.parent_dir.to_lowercase();
+        let is_exp_ext = matches!(
+            ext.as_str(),
+            "csv" | "json" | "jsonl" | "tsv" | "md" | "txt" | "yaml" | "yml" | "log"
+        );
+        let has_exp_signal = [
+            "exp",
+            "experiment",
+            "result",
+            "results",
+            "metric",
+            "metrics",
+            "eval",
+            "bench",
+            "benchmark",
+            "ablation",
+            "run_",
+            "summary",
+            "实验",
+            "结果",
+            "指标",
+            "评测",
+            "对比",
+        ]
+        .iter()
+        .any(|kw| {
+            stem_lc.contains(kw) || parent_lc.ends_with(kw) || parent_lc.contains(&format!("/{kw}"))
+        });
+
+        if is_exp_ext && has_exp_signal {
+            return ResourceKind::ExperimentResult;
+        }
+        if matches!(
+            ext.as_str(),
+            "doc"
+                | "docx"
+                | "odt"
+                | "rtf"
+                | "pdf"
+                | "md"
+                | "markdown"
+                | "tex"
+                | "ppt"
+                | "pptx"
+                | "odp"
+                | "xls"
+                | "xlsx"
+                | "ods"
+        ) {
+            return ResourceKind::Document;
+        }
+        ResourceKind::File
+    }
+
+    /// Convert a `FileRecord` into a unified [`ResourceRef`] (`M2-B`).
+    pub fn to_resource_ref(
+        &self,
+        confidence: f64,
+        source: &str,
+        project_id: Option<String>,
+    ) -> ResourceRef {
+        let kind = self.infer_resource_kind();
+        let uri = format!("file://{}", self.path);
+        let verified_at = Utc
+            .timestamp_opt(self.mtime_secs, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        ResourceRef {
+            id: compute_stable_resource_id(kind, &uri),
+            kind,
+            uri,
+            path: Some(PathBuf::from(&self.path)),
+            display_name: self.name.clone(),
+            project_id,
+            source: source.to_string(),
+            confidence: confidence.clamp(0.0, 1.0),
+            last_verified_at: verified_at,
+            metadata: json!({
+                "ext": self.ext,
+                "category": self.category,
+                "parent_dir": self.parent_dir,
+                "size_bytes": self.size_bytes,
+                "mtime_secs": self.mtime_secs,
+            }),
+        }
+    }
 }
 
 /// Strip Conda (`miniconda`, `anaconda`, `conda`) library directories from `LD_LIBRARY_PATH`
@@ -142,6 +311,140 @@ impl ResourceEngine {
 
     pub fn index_db(&self) -> &Arc<IndexDb> {
         &self.index_db
+    }
+
+    pub fn fs_engine(&self) -> &Arc<SafeFsEngine> {
+        &self.fs_engine
+    }
+
+    pub fn authorized_roots(&self) -> &[PathBuf] {
+        self.fs_engine.authorized_roots()
+    }
+
+    /// Return all indexed `.desktop` application records from `index.db` without disk re-scanning.
+    pub fn list_indexed_apps(&self) -> Vec<AppRecord> {
+        let Ok(conn) = self.index_db.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT app_id, name, generic_name, exec_cmd, keywords, pinyin_full, pinyin_init, aliases, source FROM apps",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok(AppRecord {
+                app_id: r.get(0)?,
+                name: r.get(1)?,
+                generic_name: r.get(2)?,
+                exec_cmd: r.get(3)?,
+                keywords: r.get(4)?,
+                pinyin_full: r.get(5)?,
+                pinyin_init: r.get(6)?,
+                aliases: r.get(7)?,
+                source: r.get(8)?,
+            })
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
+    /// Collect verified live `FileRecord`s across `index.db` and authorized directories (plus optional
+    /// non-forbidden `extra_dirs`), ensuring newly created workspace/experiment files are immediately visible
+    /// without full daemon re-indexing while strictly filtering out forbidden paths and symlinks (`M2-B`).
+    pub fn collect_live_or_indexed_files(&self, extra_dirs: &[PathBuf]) -> Vec<FileRecord> {
+        const MAX_LIVE_SCAN_FILES: usize = 5_000;
+        let mut by_path: HashMap<String, FileRecord> = HashMap::new();
+
+        // 1. Seed from `index.db`, verifying on-disk existence & refreshing metadata
+        if let Ok(conn) = self.index_db.conn.lock()
+            && let Ok(mut stmt) = conn.prepare(
+                "SELECT path, name, stem, ext, category, parent_dir, size_bytes, mtime_secs FROM files LIMIT 5000",
+            )
+            && let Ok(rows) = stmt.query_map([], |r| {
+                Ok(FileRecord {
+                    path: r.get(0)?,
+                    name: r.get(1)?,
+                    stem: r.get(2)?,
+                    ext: r.get(3)?,
+                    category: r.get(4)?,
+                    parent_dir: r.get(5)?,
+                    size_bytes: r.get::<_, i64>(6)?.max(0) as u64,
+                    mtime_secs: r.get(7)?,
+                })
+            })
+        {
+            for rec in rows.flatten() {
+                let p = Path::new(&rec.path);
+                if self.fs_engine.is_forbidden(p) {
+                    continue;
+                }
+                if let Some(fresh) = FileRecord::from_path(p) {
+                    by_path.insert(fresh.path.clone(), fresh);
+                }
+            }
+        }
+
+        // 2. Bounded incremental walk over authorized roots + authorized extra_dirs
+        let mut roots: Vec<PathBuf> = self.fs_engine.authorized_roots().to_vec();
+        for extra in extra_dirs {
+            if !self.fs_engine.is_forbidden(extra)
+                && self
+                    .fs_engine
+                    .authorized_roots()
+                    .iter()
+                    .any(|r| extra.starts_with(r))
+                && !roots.contains(extra)
+            {
+                roots.push(extra.clone());
+            }
+        }
+
+        'scan: for root in &roots {
+            if !root.exists() || self.fs_engine.is_forbidden(root) {
+                continue;
+            }
+            for entry in WalkDir::new(root)
+                .max_depth(5)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    if e.depth() > 0
+                        && (name == ".git"
+                            || name == "target"
+                            || name == "node_modules"
+                            || name == ".cache")
+                    {
+                        return false;
+                    }
+                    !self.fs_engine.is_forbidden(e.path())
+                })
+            {
+                let Ok(entry) = entry else { continue };
+                if entry.depth() == 0 || entry.path_is_symlink() {
+                    continue;
+                }
+                let p = entry.path();
+                let key = p.to_string_lossy().to_string();
+                if let std::collections::hash_map::Entry::Vacant(slot) = by_path.entry(key)
+                    && let Some(rec) = FileRecord::from_path(p)
+                {
+                    slot.insert(rec);
+                }
+                if by_path.len() >= MAX_LIVE_SCAN_FILES {
+                    break 'scan;
+                }
+            }
+        }
+
+        let mut list: Vec<FileRecord> = by_path.into_values().collect();
+        list.sort_by(|a, b| {
+            b.mtime_secs
+                .cmp(&a.mtime_secs)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        list
     }
 
     /// Scan desktop entries, authorized directories, installed fonts, and browser bookmarks into `index.db`.

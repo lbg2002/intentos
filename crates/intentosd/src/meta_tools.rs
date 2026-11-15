@@ -1635,6 +1635,93 @@ fn execute_resource_resolve(
         }
     }
 
+    let ws_kind = crate::world_state::ResourceKind::from_hint(&kind_filter);
+    let mut effective_session_buf: Option<SessionState> = session.cloned();
+    if let Some(ref last_turn_p) = effect_ledger.last_resource_path {
+        let mut sb = effective_session_buf
+            .take()
+            .unwrap_or_else(|| SessionState {
+                session_id: session_id.to_string(),
+                messages: Vec::new(),
+                last_resource_path: None,
+                updated_at: chrono::Utc::now(),
+            });
+        if sb.last_resource_path.is_none() {
+            sb.last_resource_path = Some(last_turn_p.clone());
+        }
+        effective_session_buf = Some(sb);
+    }
+    let ws_resolution = crate::world_state::resolve_resource_for_core(
+        core,
+        raw_query,
+        ws_kind,
+        effective_session_buf.as_ref(),
+        privacy,
+    );
+
+    if let crate::world_state::ResourceResolution::MultipleComparative(ref refs) = ws_resolution {
+        for r in refs {
+            let target = r
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| r.uri.clone());
+            upsert_candidate(
+                &mut candidates,
+                format!("ws:{}", r.id),
+                r.kind.as_str(),
+                r.display_name.clone(),
+                target,
+                r.confidence,
+                &r.source,
+                r.metadata.clone(),
+            );
+        }
+    } else if candidates.is_empty() {
+        match &ws_resolution {
+            crate::world_state::ResourceResolution::Single(r) => {
+                let target = r
+                    .path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| r.uri.clone());
+                upsert_candidate(
+                    &mut candidates,
+                    format!("ws:{}", r.id),
+                    r.kind.as_str(),
+                    r.display_name.clone(),
+                    target,
+                    r.confidence,
+                    &r.source,
+                    r.metadata.clone(),
+                );
+            }
+            crate::world_state::ResourceResolution::Ambiguous {
+                candidates: ws_cands,
+                ..
+            } => {
+                for r in ws_cands {
+                    let target = r
+                        .path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| r.uri.clone());
+                    upsert_candidate(
+                        &mut candidates,
+                        format!("ws:{}", r.id),
+                        r.kind.as_str(),
+                        r.display_name.clone(),
+                        target,
+                        r.confidence,
+                        &r.source,
+                        r.metadata.clone(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     candidates.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -1656,22 +1743,80 @@ fn execute_resource_resolve(
         })
         .collect();
 
-    let (status_label, ambiguous, resolved_val, clarification_prompt) = if candidates.is_empty() {
-        ("not_found", false, Value::Null, Value::Null)
-    } else if candidates.len() >= 2
-        && (candidates[0].confidence - candidates[1].confidence).abs() < 0.08
-    {
-        let prompt = format!(
-            "针对「{}」找到多个相近候选：1) {} ({})；2) {} ({})。若任务需对比多项可同时使用，若仅针对单个目标请确认具体对象。",
-            raw_query,
-            candidates[0].name,
-            candidates[0].path_or_id,
-            candidates[1].name,
-            candidates[1].path_or_id
-        );
-        ("ambiguous", true, Value::Null, Value::String(prompt))
-    } else {
-        ("resolved", false, candidates_json[0].clone(), Value::Null)
+    let (status_label, ambiguous, resolved_val, clarification_prompt) = match &ws_resolution {
+        crate::world_state::ResourceResolution::MultipleComparative(refs) if refs.len() >= 2 => {
+            let items: Vec<Value> = refs
+                .iter()
+                .map(|r| {
+                    let target = r
+                        .path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| r.uri.clone());
+                    json!({
+                        "id": r.id,
+                        "kind": r.kind.as_str(),
+                        "name": r.display_name,
+                        "target": target,
+                        "confidence": r.confidence,
+                        "source": r.source,
+                        "metadata": r.metadata,
+                    })
+                })
+                .collect();
+            (
+                "multiple_comparative",
+                false,
+                Value::Array(items),
+                Value::Null,
+            )
+        }
+        crate::world_state::ResourceResolution::Unavailable { reason, .. }
+            if candidates.is_empty() =>
+        {
+            (
+                "unavailable",
+                false,
+                Value::Null,
+                Value::String(format!(
+                    "当前环境状态不可用（{}），请明确指定目标名称或路径。",
+                    reason
+                )),
+            )
+        }
+        crate::world_state::ResourceResolution::Ambiguous {
+            clarification_prompt: ws_prompt,
+            ..
+        } if candidates.len() >= 2
+            && (candidates[0].confidence - candidates[1].confidence).abs()
+                < crate::world_state::AMBIGUITY_CONFIDENCE_MARGIN =>
+        {
+            (
+                "ambiguous",
+                true,
+                Value::Null,
+                Value::String(ws_prompt.clone()),
+            )
+        }
+        _ => {
+            if candidates.is_empty() {
+                ("not_found", false, Value::Null, Value::Null)
+            } else if candidates.len() >= 2
+                && (candidates[0].confidence - candidates[1].confidence).abs() < 0.08
+            {
+                let prompt = format!(
+                    "针对「{}」找到多个相近候选：1) {} ({})；2) {} ({})。若任务需对比多项可同时使用，若仅针对单个目标请确认具体对象。",
+                    raw_query,
+                    candidates[0].name,
+                    candidates[0].path_or_id,
+                    candidates[1].name,
+                    candidates[1].path_or_id
+                );
+                ("ambiguous", true, Value::Null, Value::String(prompt))
+            } else {
+                ("resolved", false, candidates_json[0].clone(), Value::Null)
+            }
+        }
     };
 
     let msg = format!(
@@ -1688,6 +1833,7 @@ fn execute_resource_resolve(
         "resolved": resolved_val,
         "clarification_prompt": clarification_prompt,
         "candidates": candidates_json,
+        "world_state_resolution": serde_json::to_value(&ws_resolution).unwrap_or(Value::Null),
     });
     (
         ExecutionStatus::Exited,

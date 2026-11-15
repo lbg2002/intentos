@@ -65,6 +65,7 @@ pub struct IntentOsCore {
     pub decision: Arc<DecisionAdapter>,
     pub sessions: Arc<SessionBuffer>,
     pub agent: Arc<AgentCoordinator>,
+    pub world_state: Arc<crate::world_state::WorldStateTracker>,
     incognito_tasks: Mutex<HashMap<String, Task>>,
     task_privacy_policies: Mutex<HashMap<String, PrivacySessionPolicy>>,
     passthrough_cwd: Mutex<PathBuf>,
@@ -178,6 +179,7 @@ impl IntentOsCore {
             decision,
             sessions,
             agent,
+            world_state: Arc::new(crate::world_state::WorldStateTracker::new()),
             incognito_tasks: Mutex::new(HashMap::new()),
             task_privacy_policies: Mutex::new(HashMap::new()),
             passthrough_cwd: Mutex::new(init_cwd),
@@ -380,6 +382,9 @@ impl IntentOsCore {
                     }
                     "speech_hub" => {
                         crate::speech_hub::handle_module_rpc(self, &action, payload).await
+                    }
+                    "world_state" => {
+                        crate::world_state::handle_world_state_rpc(self, &action, &payload)
                     }
                     "web_ui" => crate::web_ui::handle_module_rpc(self, &action, payload).await,
                     other => anyhow::bail!("未知的功能模块域 (domain): {}", other),
@@ -660,20 +665,30 @@ impl IntentOsCore {
         } else {
             req.text.clone()
         };
+        let mut pending_ws_clarification: Option<String> = None;
         if resolved_text == req.text {
             let ctx_state_db = if privacy.allows_memory_read() {
                 Some(self.state_db.as_ref())
             } else {
                 None
             };
-            let ctx_out = crate::intent_engine::resolve_context_references(
+            let ws_resolver = crate::world_state::ResourceResolver::new(self, &self.world_state);
+            let ctx_out = crate::intent_engine::context_resolver::resolve_context_with_world_state(
                 &req.text,
+                &ws_resolver,
                 Some(&session),
                 ctx_state_db,
                 None,
+                privacy,
             );
             if ctx_out.is_resolved() {
                 resolved_text = ctx_out.effective_text().to_string();
+            } else if let crate::intent_engine::ContextResolutionOutcome::NeedsClarification {
+                prompt,
+                ..
+            } = ctx_out
+            {
+                pending_ws_clarification = Some(prompt);
             }
         }
         // Wave 2 Personal Memory Hub multi-turn entity resolution ("打开我之前说的那个文件" / "把刚才提到的那个文件移到下载")
@@ -683,6 +698,7 @@ impl IntentOsCore {
                 resolve_conversational_memory_entity(self, &req.text, &session.session_id)
         {
             resolved_text = mem_resolved;
+            pending_ws_clarification = None;
         }
 
         // If user explicitly picked a candidate from the disambiguation / launcher list, run it directly!
@@ -735,11 +751,41 @@ impl IntentOsCore {
             return Ok(task);
         }
 
+        if let Some(prompt) = pending_ws_clarification.as_ref()
+            && !self.gateway.has_usable_credentials()
+        {
+            let task = Task {
+                id: task_id,
+                goal: resolved_text,
+                session_id: Some(session.session_id),
+                project_id: None,
+                trigger: TaskTrigger::User,
+                route: RouteLayer::L0,
+                status: TaskStatus::Paused,
+                steps: Vec::new(),
+                changeset_ids: Vec::new(),
+                pending_approval: None,
+                candidates_for_disambiguation: Vec::new(),
+                assistant_message: Some(prompt.clone()),
+                result_summary: Some("needs_clarification".into()),
+                handoff_command: None,
+                taint: taints,
+                data_class,
+                budget: TaskBudget::default(),
+                created_at: now,
+                updated_at: Utc::now(),
+            };
+            self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+            return Ok(task);
+        }
+
         let stage0_speech = crate::intent_engine::parse_structured_intent(&resolved_text, &[]);
         let is_procedural_question = stage0_speech.speech_act
             == crate::intent_engine::goal_schema::SpeechActModality::ProceduralOrExplanatory;
 
-        let routed = if is_aios_memory_or_adapter_query || is_doc_chapter_query {
+        let routed = if let Some(prompt) = pending_ws_clarification {
+            RoutedIntent::EscalateL2 { reason: prompt }
+        } else if is_aios_memory_or_adapter_query || is_doc_chapter_query {
             RoutedIntent::EscalateL2 {
                 reason: "AIOS 个人记忆、文档章节大纲定位或软件指令转译查询升级至 L2 智能体".into(),
             }
