@@ -15,8 +15,9 @@
 ## ✨ 核心特性
 
 ### 1. 极简桌面悬浮随问窗（多端统一体验）
-- **单悬浮窗设计**：支持 **GTK4 原生桌面悬浮窗**（X11 / Wayland 即开即用）、**GNOME Shell 46–49 顶栏扩展** 与 **本地离线 Web UI**（`127.0.0.1:8787`）。
-- **实时模型自动探测**：自动发现本机 `ZCode`、`Codex`、`Pi`、OpenAI 兼容接口与 Anthropic `/v1/messages` 接口，实时拉取 `/v1/models` 全量可用模型列表，支持关键词搜索切换与推理强度调节。
+- **单悬浮窗设计**：支持 **GTK4 原生桌面悬浮窗**（X11 / Wayland 即开即用）、**GNOME Shell 46–50 桌面扩展** 与 **本地离线 Web UI**（`127.0.0.1:8787`），内置统一 `AgentEvent` 增量 SSE 流式响应。
+- **动态能力发现与渐进式上下文 (`meta_tools` & `world_state`)**：首轮仅注入精简直接工具与 6 个动态发现元工具（首轮 Schema Token 开销降低 **77.8%–90.9%**），执行中途按需搜索并解锁 119+ 项系统与软件语义能力；内置隐私门控 `WorldState` 与 `ResourceResolver`（含 Wayland 焦点诚实澄清与多实验结果对比消解）。
+- **实时模型自动探测与沙箱受控执行**：自动发现本机 `ZCode`、`Codex`、`Pi`、OpenAI 兼容接口与 Anthropic `/v1/messages` 接口（非阻塞缓存 + `/v1/models` 实时刷新），支持 `C0`–`C4` 五级受控终端提案（`bubblewrap` 无外网进程组隔离）与 Linux 系统故障真实诊断闭环。
 - **诚实可观测轨迹点 (`●`)**：紫色（记忆召回）、青色（软件转译层）、绿色（已验证执行完成 + 一键 `↶ 撤销`）、天蓝色（已发请求待桌面响应）、琥珀色（敏感权限待审批）。
 
 ### 2. 本机全量软件深度扫描与 9 大类通用接口转译层 (`app_adapter`)
@@ -60,23 +61,29 @@ intentos/
 ├── crates/
 │   ├── intentosd/           # 核心守护进程 (Router + Broker + Policy + Gateway)
 │   │   └── src/
-│   │       ├── backend_bridge/  # 多引擎大模型桥接 (/v1/models 实时发现 + 审批断点续接)
-│   │       ├── memory_hub/      # 个人记忆、文档章节大纲索引 & 非线性时间衰减上下文压缩
-│   │       ├── app_adapter/     # 本机软件 9 大类深扫 + SNI/DBusMenu/MPRIS2/AT-SPI2 转译层
-│   │       ├── speech_hub/      # 离线 ONNX 语音模型下载管理 + PipeWire/ALSA 录音转写
-│   │       ├── config_center/   # 11 大配置域持久化与校验
-│   │       ├── execution_hub/   # 会话授权信封、E2 暂存预演与工作流
-│   │       └── web_ui/          # 100% 本地离线内嵌前端资源
+│   │       ├── backend_bridge/       # 统一事务型回合引擎、步骤 WAL 账本、SSE 流式与 CLI 沙箱桥接
+│   │       ├── intent_engine/        # 渐进式 L0/L1/L2 认知路由、StructuredIntent 与指代消解
+│   │       ├── meta_tools.rs         # 6 大动态能力发现元工具与回合中段渐进式 Schema 解锁
+│   │       ├── capability_snapshot.rs# 版本化预序列化能力快照与亚毫秒级检索索引
+│   │       ├── world_state.rs        # 隐私门控 WorldState 环境状态与统一 ResourceResolver
+│   │       ├── terminal_agent.rs     # C0-C4 受控终端 CommandProposal 分类器与沙箱执行器
+│   │       ├── diagnostics.rs        # Linux 系统日志/动态库(ldd)/网络代理/性能瓶颈诊断与验证修复
+│   │       ├── app_adapter/          # 5 层 SoftwareCapabilityProvider + 9 大类深扫转译层
+│   │       ├── memory_hub/           # 个人记忆、文档章节大纲索引 & 非线性时间衰减上下文压缩
+│   │       ├── speech_hub/           # 离线 ONNX 语音模型下载管理 + PipeWire/ALSA 录音转写
+│   │       ├── config_center/        # 11 大配置域持久化与校验
+│   │       ├── execution_hub/        # 会话授权信封、E2 暂存预演与工作流
+│   │       └── web_ui/               # 100% 本地离线内嵌前端资源
 │   ├── intentosctl/         # 命令行客户端、TUI 启动器与安全评测门禁
 │   ├── fsops/               # openat2 防逃逸文件系统引擎与可逆备份还原
-│   ├── sandbox/             # bwrap 无外网沙箱执行器
+│   ├── sandbox/             # bubblewrap 无外网进程组受控沙箱执行器
 │   ├── capability-sdk/      # 能力模块 SDK
 │   └── protocol/            # IPC / D-Bus 强类型协议定义
 ├── desktop/
 │   ├── gtk-fallback/        # GTK4 桌面原生悬浮随问窗 (intentos-launcher.py)
 │   ├── settings/            # GTK4 11 页可视化设置中心 (intentos-settings.py)
-│   └── gnome-extension/     # GNOME Shell 46-49 原生桌面扩展
-├── modules/builtin/         # 95+ 单源 YAML 系统能力声明描述
+│   └── gnome-extension/     # GNOME Shell 46-50 原生桌面扩展
+├── modules/builtin/         # 95+ 单源 YAML 系统与开发者诊断能力声明描述
 └── scripts/                 # 一键安装、本地运行与离线 ONNX 语音推理脚本
 ```
 
@@ -89,7 +96,7 @@ intentos/
 ```bash
 sudo apt update
 sudo apt install -y \
-  build-essential pkg-config libssl-dev libsqlite3-dev \
+  build-essential pkg-config libssl-dev libsqlite3-dev bubblewrap \
   python3 python3-gi gir1.2-gtk-4.0 gir1.2-wnck-3.0 gir1.2-atspi-2.0 \
   libglib2.0-bin pipewire-bin ripgrep
 ```
@@ -134,9 +141,13 @@ cargo build --release
 ## 🧪 运行测试与门禁检查
 
 ```bash
-# 全仓零警告静态检查与 115 项单元/端到端集成测试
+# 全仓零警告静态检查与 226 项单元/端到端集成测试
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace -- --test-threads=1
+env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace -- --test-threads=1
+
+# 325 条语料 + 16 项安全红队自动化基准评测
+./target/release/intentosctl eval --corpus eval/intents/v0_1_shell_300.json --report-out eval/latest_report.md
 
 # 桌面悬浮窗与 11 页设置中心 UI 冒烟自检
 /usr/bin/python3 ./desktop/settings/intentos-settings.py --smoke-ui
@@ -147,14 +158,14 @@ cargo test --workspace -- --test-threads=1
 
 ## 🗺️ v0.2 Cognitive Shell 路线图
 
-IntentOS 正在从 v0.1「单点系统控制与命令路由壳层」全面升级为 **v0.2 Cognitive Shell（懂个人项目上下文、能跨软件协同、可验证且可逆的高可信桌面认知壳层）**。完整五层目标架构、北极星验收场景与「暂缓方向」工程边界请参阅 **[docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md)**，实时研发进度可在 **[GitHub Milestones](https://github.com/lbg2002/intentos/milestones)** 查看：
+IntentOS 正在从 v0.1「单点系统控制与命令路由壳层」全面升级为 **v0.2 Cognitive Shell（懂个人项目上下文、能跨软件协同、可验证且可逆的高可信桌面认知壳层）**。完整架构设计与同机性能对照实测请参阅 **[docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md)** 与 **[docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md](docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md)**，实时研发进度可在 **[GitHub Milestones](https://github.com/lbg2002/intentos/milestones)** 查看：
 
-| 里程碑 | 核心目标 | 关联 Issues |
-| :--- | :--- | :--- |
-| **[v0.2-M1: 统一智能体核心与可信底座加固](https://github.com/lbg2002/intentos/milestone/1)** | 拆分 `turn_engine.rs`、统一多后端 `CapabilityBroker` 受控执行、`TurnEffectLedger` 副作用幂等防重放、三级隐私隔离与 `SensitiveDataGuard` 全链路脱敏、重构 L1 `StructuredIntent` 目标识别与复合意图不丢步 | [#1](https://github.com/lbg2002/intentos/issues/1) · [#2](https://github.com/lbg2002/intentos/issues/2) · [#3](https://github.com/lbg2002/intentos/issues/3) · [#4](https://github.com/lbg2002/intentos/issues/4) · [#5](https://github.com/lbg2002/intentos/issues/5) |
-| **[v0.2-M2: 动态能力发现与受控系统执行](https://github.com/lbg2002/intentos/milestone/2)** | 动态能力发现元工具 (`capability.search/describe/invoke`)、C0–C4 五级受控终端 (`CommandProposal`)、系统故障自诊断 (`diag.*`) 与五级自动降级 `SoftwareCapabilityProvider` | [#6](https://github.com/lbg2002/intentos/issues/6) · [#7](https://github.com/lbg2002/intentos/issues/7) · [#8](https://github.com/lbg2002/intentos/issues/8) · [#9](https://github.com/lbg2002/intentos/issues/9) |
-| **[v0.2-M3: M0-M4 个人认知记忆与工作空间恢复](https://github.com/lbg2002/intentos/milestone/3)** | M0–M4 五层个人认知记忆与动态召回、项目工作空间一键恢复、受控技能自动沉淀 (`SKILL.md`)，以及「每日认知简报与工作接续」北极星闭环验收 | [#10](https://github.com/lbg2002/intentos/issues/10) · [#11](https://github.com/lbg2002/intentos/issues/11) · [#12](https://github.com/lbg2002/intentos/issues/12) · [#13](https://github.com/lbg2002/intentos/issues/13) |
-| **[v0.2-M4: 主动式事件总线、极简设置与 AgentBench](https://github.com/lbg2002/intentos/milestone/4)** | 真实后台 `EventBus`（`inotify` / D-Bus / 持久化定时 + `settle_seconds` 防抖）、设置中心收敛为 5 核心页 + 高级折叠区、四层环境验证型 `IntentOS AgentBench` | [#14](https://github.com/lbg2002/intentos/issues/14) · [#15](https://github.com/lbg2002/intentos/issues/15) · [#16](https://github.com/lbg2002/intentos/issues/16) |
+| 里程碑 | 状态 | 核心目标 | 关联 Issues |
+| :--- | :---: | :--- | :--- |
+| **[v0.2-M1 (+M1.1): 统一智能体核心与可信底座加固](https://github.com/lbg2002/intentos/milestone/1)** | ✅ 已完成 | 统一事务型执行脊柱、持久化步骤 WAL 账本、外部 CLI `bwrap` 隔离、三态隐私上下文、五维全局预算、版本化 `CapabilitySnapshot`（`83×` 提速）与 `AgentEvent` SSE 流 | [#1](https://github.com/lbg2002/intentos/issues/1) · [#2](https://github.com/lbg2002/intentos/issues/2) · [#3](https://github.com/lbg2002/intentos/issues/3) · [#4](https://github.com/lbg2002/intentos/issues/4) · [#5](https://github.com/lbg2002/intentos/issues/5) |
+| **[v0.2-M2: 动态能力发现与受控系统执行](https://github.com/lbg2002/intentos/milestone/2)** | ✅ 已完成 | 动态能力发现 6 元工具（首轮 Schema 缩减 `77.8%–90.9%`）、`WorldState` + `ResourceResolver`、`C0`–`C4` 受控终端 (`CommandProposal`)、Linux 系统真实诊断与 5 层 `SoftwareCapabilityProvider` | [#6](https://github.com/lbg2002/intentos/issues/6) · [#7](https://github.com/lbg2002/intentos/issues/7) · [#8](https://github.com/lbg2002/intentos/issues/8) · [#9](https://github.com/lbg2002/intentos/issues/9) |
+| **[v0.2-M3: M0-M4 个人认知记忆与工作空间恢复](https://github.com/lbg2002/intentos/milestone/3)** | 🚧 规划中 | M0–M4 五层个人认知记忆与动态召回、项目工作空间一键恢复、受控技能自动沉淀 (`SKILL.md`)，以及「每日认知简报与工作接续」北极星闭环验收 | [#10](https://github.com/lbg2002/intentos/issues/10) · [#11](https://github.com/lbg2002/intentos/issues/11) · [#12](https://github.com/lbg2002/intentos/issues/12) · [#13](https://github.com/lbg2002/intentos/issues/13) |
+| **[v0.2-M4: 主动式事件总线、极简设置与 AgentBench](https://github.com/lbg2002/intentos/milestone/4)** | 🚧 规划中 | 真实后台 `EventBus`（`inotify` / D-Bus / 持久化定时 + `settle_seconds` 防抖）、设置中心收敛为 5 核心页 + 高级折叠区、四层环境验证型 `IntentOS AgentBench` | [#14](https://github.com/lbg2002/intentos/issues/14) · [#15](https://github.com/lbg2002/intentos/issues/15) · [#16](https://github.com/lbg2002/intentos/issues/16) |
 
 ---
 
