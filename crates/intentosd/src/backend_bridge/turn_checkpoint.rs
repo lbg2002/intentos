@@ -33,10 +33,163 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
+
+fn is_untrusted_step_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        "step_id" | "_step_id" | "__step_id" | "attempt_id" | "_attempt_id" | "idempotency_key"
+    )
+}
+
+fn is_path_argument_key(key: &str) -> bool {
+    matches!(
+        key,
+        "path"
+            | "target"
+            | "source"
+            | "destination"
+            | "dest"
+            | "directory"
+            | "dir"
+            | "repo_dir"
+            | "output"
+            | "out_dir"
+            | "left"
+            | "right"
+            | "file"
+            | "file_path"
+            | "input"
+            | "archive_path"
+    )
+}
+
+fn is_path_array_argument_key(key: &str) -> bool {
+    matches!(key, "paths" | "files" | "sources")
+}
+
+/// Normalize filesystem paths (`~` expansion + lexical `.`, `..`, duplicate `/`, and trailing `/`
+/// cleanup) while leaving URLs (`https://...`) and plain identifiers untouched.
+pub fn normalize_path_for_dedup(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    let looks_like_path = trimmed.starts_with('/')
+        || trimmed == "~"
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.contains('/');
+    if !looks_like_path {
+        return trimmed.to_string();
+    }
+
+    let expanded = if trimmed == "~" {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(trimmed))
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        std::env::var("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .unwrap_or_else(|_| PathBuf::from(trimmed))
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    let mut is_abs = false;
+    let mut prefix: Option<String> = None;
+    let mut segments: Vec<String> = Vec::new();
+
+    for comp in Path::new(&expanded).components() {
+        match comp {
+            Component::Prefix(p) => {
+                prefix = Some(p.as_os_str().to_string_lossy().to_string());
+            }
+            Component::RootDir => {
+                is_abs = true;
+                segments.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if let Some(last) = segments.last()
+                    && last != ".."
+                {
+                    segments.pop();
+                } else if !is_abs {
+                    segments.push("..".to_string());
+                }
+            }
+            Component::Normal(seg) => {
+                segments.push(seg.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    let mut out = String::new();
+    if let Some(p) = prefix {
+        out.push_str(&p);
+    }
+    if is_abs {
+        out.push('/');
+    }
+    out.push_str(&segments.join("/"));
+    if out.is_empty() { ".".to_string() } else { out }
+}
+
+/// Strip untrusted model-supplied step identity fields and normalize path values in a JSON `Value`.
+pub fn sanitize_and_normalize_tool_args(v: &Value) -> Value {
+    fn normalize_inner(v: &Value, is_root: bool) -> Value {
+        match v {
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, val) in map {
+                    if is_root && is_untrusted_step_meta_key(k.as_str()) {
+                        continue;
+                    }
+                    let normalized_val = if is_path_argument_key(k.as_str()) {
+                        if let Some(s) = val.as_str() {
+                            Value::String(normalize_path_for_dedup(s))
+                        } else {
+                            normalize_inner(val, false)
+                        }
+                    } else if is_path_array_argument_key(k.as_str()) {
+                        if let Some(arr) = val.as_array() {
+                            Value::Array(
+                                arr.iter()
+                                    .map(|item| {
+                                        if let Some(s) = item.as_str() {
+                                            Value::String(normalize_path_for_dedup(s))
+                                        } else {
+                                            normalize_inner(item, false)
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            normalize_inner(val, false)
+                        }
+                    } else {
+                        normalize_inner(val, false)
+                    };
+                    out.insert(k.clone(), normalized_val);
+                }
+                Value::Object(out)
+            }
+            Value::Array(arr) => Value::Array(
+                arr.iter()
+                    .map(|item| normalize_inner(item, false))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    normalize_inner(v, true)
+}
 
 /// Recursively serialize a JSON `Value` with lexicographically sorted object keys so
 /// `idempotency_key` is 100% invariant to JSON field ordering (even under `preserve_order`).
@@ -83,14 +236,97 @@ pub fn canonicalize_json_value(v: &Value) -> String {
     buf
 }
 
-/// Canonicalize a raw JSON string if valid JSON, otherwise return trimmed raw string.
+/// Canonicalize tool arguments (`Value`) with untrusted step-meta stripping, path normalization,
+/// and deterministic lexicographical JSON key ordering.
+pub fn canonicalize_tool_args_value(v: &Value) -> String {
+    let normalized = sanitize_and_normalize_tool_args(v);
+    canonicalize_json_value(&normalized)
+}
+
+/// Canonicalize a raw JSON string if valid JSON (including path normalization and meta-key stripping),
+/// otherwise return trimmed raw string.
 pub fn canonicalize_json_str(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-        canonicalize_json_value(&val)
+        canonicalize_tool_args_value(&val)
     } else {
         trimmed.to_string()
     }
+}
+
+/// Capability-semantic idempotency policy derived deterministically by the trusted broker bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolIdempotencyPolicy {
+    /// Live environment/status/memory/app-inspect reads (`*.get`, `*.list`, `*.status`, `*.inspect`,
+    /// `network.ip`, `disk.free`, `memory_*`, `app_adapter_inspect_app`). Fresh on each logical step;
+    /// deduplicates only exact retries of the same `(step_id, attempt_id)`.
+    AlwaysRefresh,
+    /// Deterministic search (`file.search`, `app.search`, `package.search`). Cached within the
+    /// current `state_epoch`, immediately invalidated when any tool with `effect > Effect::Observe` executes.
+    CacheUntilStateChanged,
+    /// Absolute state setters (`sound.volume.set` without `relative`, `display.brightness.set` without
+    /// `relative`, `notify.dnd.set`, `appearance.*`, `power.profile.set`). Deduplicates identical
+    /// `(capability_id, canonical_args, state_epoch)` when the prior outcome succeeded.
+    IdempotentMutation,
+    /// Relative, stateful, or sequential actions (`sound.volume.set` with `relative`, `media.control`,
+    /// `app.launch`, `app.quit`, `file.move`, `file.rename`, `file.copy`, `file.write`, `file.trash`,
+    /// `archive.*`, `app_adapter_invoke`). Distinct steps both execute; replaying the same trusted
+    /// `step_id` executes at most once.
+    ExactlyOncePerStep,
+    /// High-risk/session/destructive operations (`process.terminate`, `power.session`, `screen.lock`, etc.)
+    /// that must never be automatically replayed.
+    NeverReplay,
+}
+
+/// Trusted step invocation identity separating logical `step_id`, transport `call_id`, and `attempt_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepInvocationContext {
+    /// Trusted `step_id` allocated by `TurnEffectLedger` (NEVER accepted from untrusted model JSON!).
+    /// When `None`, `TurnEffectLedger` allocates the next sequential `step_<N>`.
+    pub trusted_step_id: Option<String>,
+    /// Transport protocol call identifier (`tool_call_id` / XML `call_id`).
+    pub call_id: String,
+    /// Execution attempt within the logical step (`attempt_1`, `attempt_2`, ...).
+    pub attempt_id: String,
+}
+
+impl StepInvocationContext {
+    /// Create context for a new model tool call (`trusted_step_id: None`, `attempt_id: "attempt_1"`).
+    pub fn new_call(call_id: impl Into<String>) -> Self {
+        Self {
+            trusted_step_id: None,
+            call_id: call_id.into(),
+            attempt_id: "attempt_1".to_string(),
+        }
+    }
+
+    /// Create context for an explicit trusted replay/retry of `step_id`.
+    pub fn for_trusted_step(
+        step_id: impl Into<String>,
+        call_id: impl Into<String>,
+        attempt_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            trusted_step_id: Some(step_id.into()),
+            call_id: call_id.into(),
+            attempt_id: attempt_id.into(),
+        }
+    }
+}
+
+/// Rich per-step metadata tracked alongside `StepExecutionRecord` inside `TurnEffectLedger`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepExecutionMeta {
+    pub step_id: String,
+    pub call_id: String,
+    pub attempt_id: String,
+    pub policy: ToolIdempotencyPolicy,
+    pub pre_state_epoch: u64,
+    pub post_state_epoch: u64,
+    pub is_error: bool,
+    pub was_denied: bool,
+    pub verification_status: String,
 }
 
 /// Immutable execution ledger entry for a single tool step within a turn.
@@ -109,16 +345,51 @@ pub struct StepExecutionRecord {
     pub cached_output: Value,
 }
 
+impl StepExecutionRecord {
+    /// True when the recorded execution failed or was denied (`!self.succeeded`).
+    pub fn is_error(&self) -> bool {
+        !self.succeeded
+    }
+
+    /// True when the step was rejected by `PolicyEngine` / `SafeFsEngine` (`Denied`).
+    pub fn was_denied(&self) -> bool {
+        self.verification_status.eq_ignore_ascii_case("denied")
+            || self
+                .cached_output
+                .get("was_denied")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+    }
+}
+
+/// Decision produced by `TurnEffectLedger::evaluate_idempotency`.
+pub enum IdempotencyDecision<'a> {
+    Proceed,
+    CachedHit {
+        record: &'a StepExecutionRecord,
+        meta: Option<&'a StepExecutionMeta>,
+        reason: &'static str,
+    },
+    StepIdentityConflict {
+        step_id: String,
+        existing_capability: String,
+    },
+}
+
 /// Per-turn side-effect ledger and runtime progress buffer.
 ///
-/// Tracks every tool invocation's `step_id` and `idempotency_key`, deduplicates duplicate
-/// tool calls within the same turn, and prevents fallback side-effect replay when an upstream
-/// backend fails after a mutating capability has already committed!
+/// Tracks every tool invocation's trusted `step_id`, `attempt_id`, `state_epoch`, and
+/// `ToolIdempotencyPolicy`, deduplicates according to capability semantics, invalidates
+/// read caches upon state mutation, and prevents fallback side-effect replay!
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnEffectLedger {
     pub turn_id: String,
     next_step_seq: usize,
+    #[serde(default)]
+    state_epoch: u64,
     records: Vec<StepExecutionRecord>,
+    #[serde(default)]
+    step_metadata: Vec<StepExecutionMeta>,
     #[serde(skip)]
     by_idempotency_key: HashMap<String, usize>,
 
@@ -144,7 +415,9 @@ impl TurnEffectLedger {
         Self {
             turn_id: turn_id.into(),
             next_step_seq: 0,
+            state_epoch: 0,
             records: Vec::new(),
+            step_metadata: Vec::new(),
             by_idempotency_key: HashMap::new(),
             trace_dots: Vec::new(),
             adapter_actions: Vec::new(),
@@ -156,13 +429,25 @@ impl TurnEffectLedger {
         }
     }
 
-    /// Allocate the next deterministic `step_id` (`step_1`, `step_2`, ...).
+    /// Current monotonic `state_epoch` within this turn (incremented whenever `effect > Effect::Observe` executes).
+    pub fn state_epoch(&self) -> u64 {
+        self.state_epoch
+    }
+
+    /// Advance `state_epoch` to invalidate `CacheUntilStateChanged` and prior `IdempotentMutation` epochs.
+    pub fn bump_state_epoch(&mut self) -> u64 {
+        self.state_epoch += 1;
+        self.state_epoch
+    }
+
+    /// Allocate the next deterministic trusted `step_id` (`step_1`, `step_2`, ...).
     pub fn next_step_id(&mut self) -> String {
         self.next_step_seq += 1;
         format!("step_{}", self.next_step_seq)
     }
 
-    /// Compute deterministic SHA-256 `idempotency_key` from `turn_id + capability_id + canonical_args_json`.
+    /// Compute deterministic SHA-256 `idempotency_key` from `turn_id + capability_id + canonical_args_json`
+    /// (with JSON key sorting and path normalization).
     pub fn compute_idempotency_key(&self, capability_id: &str, args_json: &str) -> String {
         let canonical = canonicalize_json_str(args_json);
         let mut hasher = Sha256::new();
@@ -174,7 +459,236 @@ impl TurnEffectLedger {
         hex::encode(hasher.finalize())
     }
 
-    /// Look up an existing step execution by `idempotency_key` to block duplicate execution in the same turn.
+    /// Compute a policy-scoped SHA-256 `idempotency_key` binding `turn_id`, `policy`, and the
+    /// relevant step/attempt/epoch scope.
+    pub fn compute_step_idempotency_key(
+        &self,
+        policy: ToolIdempotencyPolicy,
+        step_id: &str,
+        attempt_id: &str,
+        capability_id: &str,
+        canonical_args_json: &str,
+        epoch: u64,
+    ) -> String {
+        let canonical = canonicalize_json_str(canonical_args_json);
+        let mut hasher = Sha256::new();
+        hasher.update(self.turn_id.as_bytes());
+        hasher.update(b":");
+        match policy {
+            ToolIdempotencyPolicy::AlwaysRefresh => {
+                hasher.update(b"always_refresh:");
+                hasher.update(step_id.as_bytes());
+                hasher.update(b":");
+                hasher.update(attempt_id.as_bytes());
+            }
+            ToolIdempotencyPolicy::CacheUntilStateChanged => {
+                hasher.update(b"cache_epoch:");
+                hasher.update(epoch.to_string().as_bytes());
+            }
+            ToolIdempotencyPolicy::IdempotentMutation => {
+                hasher.update(b"idempotent_mutation:");
+                hasher.update(epoch.to_string().as_bytes());
+            }
+            ToolIdempotencyPolicy::ExactlyOncePerStep => {
+                hasher.update(b"once_per_step:");
+                hasher.update(step_id.as_bytes());
+            }
+            ToolIdempotencyPolicy::NeverReplay => {
+                hasher.update(b"never_replay:");
+                hasher.update(step_id.as_bytes());
+            }
+        }
+        hasher.update(b":");
+        hasher.update(capability_id.as_bytes());
+        hasher.update(b":");
+        hasher.update(canonical.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Evaluate whether an incoming tool invocation should execute fresh (`Proceed`), return a
+    /// cached outcome (`CachedHit`), or reject a conflicting `trusted_step_id` (`StepIdentityConflict`).
+    pub fn evaluate_idempotency(
+        &self,
+        policy: ToolIdempotencyPolicy,
+        trusted_step_id: Option<&str>,
+        attempt_id: &str,
+        capability_id: &str,
+        canonical_args_json: &str,
+    ) -> IdempotencyDecision<'_> {
+        let canonical = canonicalize_json_str(canonical_args_json);
+
+        // 1. Explicit trusted `step_id` replay / retry evaluation
+        if let Some(sid) = trusted_step_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let matching: Vec<(usize, &StepExecutionRecord, Option<&StepExecutionMeta>)> = self
+                .records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.step_id == sid)
+                .map(|(i, r)| (i, r, self.step_metadata.get(i)))
+                .collect();
+
+            if let Some((_, first_rec, _)) = matching.first() {
+                if first_rec.capability_id != capability_id
+                    || canonicalize_json_str(&first_rec.canonical_args_json) != canonical
+                {
+                    return IdempotencyDecision::StepIdentityConflict {
+                        step_id: sid.to_string(),
+                        existing_capability: first_rec.capability_id.clone(),
+                    };
+                }
+
+                // Exact `(step_id, attempt_id)` transport duplicate -> always return cached hit!
+                if let Some((_, rec, meta)) = matching
+                    .iter()
+                    .rev()
+                    .find(|(_, _, m)| m.is_some_and(|meta| meta.attempt_id == attempt_id))
+                {
+                    return IdempotencyDecision::CachedHit {
+                        record: rec,
+                        meta: *meta,
+                        reason: "exact_step_attempt_replay",
+                    };
+                }
+
+                // New attempt_id for an already-attempted trusted `step_id`:
+                let (_, last_rec, last_meta) = *matching.last().unwrap();
+                if last_rec.succeeded {
+                    return IdempotencyDecision::CachedHit {
+                        record: last_rec,
+                        meta: last_meta,
+                        reason: "step_already_succeeded",
+                    };
+                }
+                if last_rec.was_denied() {
+                    return IdempotencyDecision::CachedHit {
+                        record: last_rec,
+                        meta: last_meta,
+                        reason: "step_policy_denied",
+                    };
+                }
+
+                return match policy {
+                    ToolIdempotencyPolicy::AlwaysRefresh
+                    | ToolIdempotencyPolicy::CacheUntilStateChanged => {
+                        // Allow at most 1 retry (total 2 attempts) on transient read-only errors
+                        if matching.len() < 2 {
+                            IdempotencyDecision::Proceed
+                        } else {
+                            IdempotencyDecision::CachedHit {
+                                record: last_rec,
+                                meta: last_meta,
+                                reason: "read_retry_exhausted",
+                            }
+                        }
+                    }
+                    ToolIdempotencyPolicy::IdempotentMutation
+                    | ToolIdempotencyPolicy::ExactlyOncePerStep
+                    | ToolIdempotencyPolicy::NeverReplay => IdempotencyDecision::CachedHit {
+                        record: last_rec,
+                        meta: last_meta,
+                        reason: "mutation_step_no_blind_replay",
+                    },
+                };
+            }
+        }
+
+        // 2. Policy denial cache within the current `state_epoch`: never flip a denied call to ok
+        //    or allow loop-hammering a forbidden scope when no state/approval epoch changed.
+        for (idx, rec) in self.records.iter().enumerate().rev() {
+            let meta = self.step_metadata.get(idx);
+            let epoch_matches = meta.is_none_or(|m| m.post_state_epoch == self.state_epoch);
+            if epoch_matches
+                && rec.capability_id == capability_id
+                && canonicalize_json_str(&rec.canonical_args_json) == canonical
+                && rec.was_denied()
+            {
+                return IdempotencyDecision::CachedHit {
+                    record: rec,
+                    meta,
+                    reason: "cached_policy_denial",
+                };
+            }
+        }
+
+        // 3. Policy-semantic cross-step evaluation
+        match policy {
+            ToolIdempotencyPolicy::AlwaysRefresh => IdempotencyDecision::Proceed,
+
+            ToolIdempotencyPolicy::CacheUntilStateChanged => {
+                let mut transient_failures_in_epoch = 0usize;
+                for (idx, rec) in self.records.iter().enumerate().rev() {
+                    let meta = self.step_metadata.get(idx);
+                    let in_epoch = meta.is_none_or(|m| m.post_state_epoch == self.state_epoch);
+                    if !in_epoch {
+                        continue;
+                    }
+                    if rec.capability_id == capability_id
+                        && canonicalize_json_str(&rec.canonical_args_json) == canonical
+                    {
+                        if rec.succeeded {
+                            return IdempotencyDecision::CachedHit {
+                                record: rec,
+                                meta,
+                                reason: "cache_until_state_changed",
+                            };
+                        }
+                        transient_failures_in_epoch += 1;
+                        if transient_failures_in_epoch >= 2 {
+                            return IdempotencyDecision::CachedHit {
+                                record: rec,
+                                meta,
+                                reason: "read_retry_exhausted",
+                            };
+                        }
+                    }
+                }
+                IdempotencyDecision::Proceed
+            }
+
+            ToolIdempotencyPolicy::IdempotentMutation => {
+                for (idx, rec) in self.records.iter().enumerate().rev() {
+                    let meta = self.step_metadata.get(idx);
+                    let in_epoch = meta.is_none_or(|m| m.post_state_epoch == self.state_epoch);
+                    if !in_epoch {
+                        continue;
+                    }
+                    if rec.capability_id == capability_id
+                        && canonicalize_json_str(&rec.canonical_args_json) == canonical
+                    {
+                        return IdempotencyDecision::CachedHit {
+                            record: rec,
+                            meta,
+                            reason: if rec.succeeded {
+                                "idempotent_mutation_dedup"
+                            } else {
+                                "failed_mutation_no_blind_replay"
+                            },
+                        };
+                    }
+                }
+                IdempotencyDecision::Proceed
+            }
+
+            ToolIdempotencyPolicy::ExactlyOncePerStep => IdempotencyDecision::Proceed,
+
+            ToolIdempotencyPolicy::NeverReplay => {
+                for (idx, rec) in self.records.iter().enumerate().rev() {
+                    if rec.capability_id == capability_id
+                        && canonicalize_json_str(&rec.canonical_args_json) == canonical
+                    {
+                        return IdempotencyDecision::CachedHit {
+                            record: rec,
+                            meta: self.step_metadata.get(idx),
+                            reason: "never_replay_policy",
+                        };
+                    }
+                }
+                IdempotencyDecision::Proceed
+            }
+        }
+    }
+
+    /// Look up an existing step execution by `idempotency_key`.
     pub fn lookup_idempotent(&self, idempotency_key: &str) -> Option<&StepExecutionRecord> {
         if let Some(&idx) = self.by_idempotency_key.get(idempotency_key) {
             return self.records.get(idx);
@@ -184,8 +698,18 @@ impl TurnEffectLedger {
             .find(|r| r.idempotency_key == idempotency_key)
     }
 
-    /// Record a completed or denied tool execution step into the ledger.
-    pub fn record_step(&mut self, record: StepExecutionRecord) {
+    /// Look up the latest `StepExecutionRecord` for a trusted `step_id`.
+    pub fn lookup_step(&self, step_id: &str) -> Option<&StepExecutionRecord> {
+        self.records.iter().rev().find(|r| r.step_id == step_id)
+    }
+
+    /// Record a step alongside explicit `StepExecutionMeta`.
+    pub fn record_step_with_meta(
+        &mut self,
+        mut record: StepExecutionRecord,
+        meta: StepExecutionMeta,
+    ) {
+        record.canonical_args_json = canonicalize_json_str(&record.canonical_args_json);
         if let Some(ref csid) = record.changeset_id
             && !self.changeset_ids.contains(csid)
         {
@@ -193,9 +717,35 @@ impl TurnEffectLedger {
         }
         let idx = self.records.len();
         self.by_idempotency_key
-            .entry(record.idempotency_key.clone())
-            .or_insert(idx);
+            .insert(record.idempotency_key.clone(), idx);
         self.records.push(record);
+        self.step_metadata.push(meta);
+    }
+
+    /// Record a completed or denied tool execution step into the ledger (compatibility entry point).
+    pub fn record_step(&mut self, record: StepExecutionRecord) {
+        let pre_epoch = self.state_epoch;
+        if record.effect > Effect::Observe && record.mutated_state {
+            self.bump_state_epoch();
+        }
+        let post_epoch = self.state_epoch;
+        let default_policy = if record.effect == Effect::Observe {
+            ToolIdempotencyPolicy::AlwaysRefresh
+        } else {
+            ToolIdempotencyPolicy::IdempotentMutation
+        };
+        let meta = StepExecutionMeta {
+            step_id: record.step_id.clone(),
+            call_id: record.step_id.clone(),
+            attempt_id: "attempt_1".to_string(),
+            policy: default_policy,
+            pre_state_epoch: pre_epoch,
+            post_state_epoch: post_epoch,
+            is_error: record.is_error(),
+            was_denied: record.was_denied(),
+            verification_status: record.verification_status.clone(),
+        };
+        self.record_step_with_meta(record, meta);
     }
 
     /// Push a unique reasoning/thinking snippet into `accumulated_thoughts`.
@@ -237,15 +787,21 @@ impl TurnEffectLedger {
         &self.records
     }
 
+    pub fn step_metadata(&self) -> &[StepExecutionMeta] {
+        &self.step_metadata
+    }
+
     /// Export a structured JSON summary of this turn's effect ledger for UI & audit diagnostics.
     pub fn summary_json(&self) -> Value {
         json!({
             "turn_id": self.turn_id,
+            "state_epoch": self.state_epoch,
             "total_steps": self.records.len(),
             "mutated_steps": self.records.iter().filter(|r| r.mutated_state).count(),
             "has_committed_side_effects": self.has_committed_side_effects(),
             "committed_changeset_ids": self.committed_changeset_ids(),
             "steps": self.records,
+            "step_metadata": self.step_metadata,
         })
     }
 }

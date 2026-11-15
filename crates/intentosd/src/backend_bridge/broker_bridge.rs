@@ -7,7 +7,12 @@
 //! invocation into `TurnEffectLedger`.
 
 use crate::backend_bridge::detector::ActiveBackendSelection;
-use crate::backend_bridge::turn_checkpoint::{StepExecutionRecord, TurnEffectLedger};
+pub use crate::backend_bridge::turn_checkpoint::{
+    IdempotencyDecision, StepExecutionMeta, StepInvocationContext, ToolIdempotencyPolicy,
+};
+use crate::backend_bridge::turn_checkpoint::{
+    StepExecutionRecord, TurnEffectLedger, canonicalize_tool_args_value,
+};
 use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
 use crate::runtime::{SessionState, build_context_blocks};
@@ -20,7 +25,7 @@ use intentos_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Explicit runtime execution mode reported on every Quick-Chat turn response.
@@ -249,30 +254,169 @@ pub enum QuickChatToolExecOutcome {
 }
 
 pub fn canonicalize_json_for_dedup(val: &Value) -> String {
+    canonicalize_tool_args_value(val)
+}
+
+fn strip_untrusted_step_meta_fields(val: &Value) -> Value {
     match val {
         Value::Object(map) => {
-            let sorted: BTreeMap<&str, String> = map
-                .iter()
-                .map(|(k, v)| (k.as_str(), canonicalize_json_for_dedup(v)))
-                .collect();
-            let parts: Vec<String> = sorted
-                .into_iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(k).unwrap_or_else(|_| format!("\"{}\"", k)),
-                        v
-                    )
-                })
-                .collect();
-            format!("{{{}}}", parts.join(","))
+            let mut clean = serde_json::Map::new();
+            for (k, v) in map {
+                if matches!(
+                    k.as_str(),
+                    "step_id"
+                        | "_step_id"
+                        | "__step_id"
+                        | "attempt_id"
+                        | "_attempt_id"
+                        | "idempotency_key"
+                ) {
+                    continue;
+                }
+                clean.insert(k.clone(), v.clone());
+            }
+            Value::Object(clean)
         }
-        Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(canonicalize_json_for_dedup).collect();
-            format!("[{}]", parts.join(","))
-        }
-        other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
+        other => other.clone(),
     }
+}
+
+fn has_relative_or_toggle_adjustment(parsed_args: &Value) -> bool {
+    let Some(obj) = parsed_args.as_object() else {
+        return false;
+    };
+    if let Some(rel) = obj.get("relative") {
+        let non_empty = match rel {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::String(s) => !s.trim().is_empty(),
+            _ => true,
+        };
+        if non_empty {
+            return true;
+        }
+    }
+    if obj.get("delta").is_some_and(|v| !v.is_null()) {
+        return true;
+    }
+    if obj.get("toggle").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    if let Some(act) = obj
+        .get("action")
+        .or_else(|| obj.get("mode"))
+        .and_then(|v| v.as_str())
+    {
+        let act_norm = act.trim().to_ascii_lowercase();
+        if matches!(
+            act_norm.as_str(),
+            "up" | "down"
+                | "increase"
+                | "decrease"
+                | "inc"
+                | "dec"
+                | "toggle"
+                | "next"
+                | "previous"
+                | "prev"
+                | "play_pause"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Deterministically classify `ToolIdempotencyPolicy` from trusted capability metadata and arguments.
+pub fn classify_capability_idempotency(
+    capability_id: &str,
+    effect: Effect,
+    parsed_args: &Value,
+) -> ToolIdempotencyPolicy {
+    let cap = capability_id.trim();
+
+    if effect == Effect::Observe
+        || cap.starts_with("memory_")
+        || cap.starts_with("memory.")
+        || matches!(
+            cap,
+            "app_adapter_inspect_app"
+                | "app_adapter.inspect_app"
+                | "app_adapter_list"
+                | "app_adapter.list"
+                | "app_adapter_now_playing"
+                | "app_adapter.now_playing"
+        )
+    {
+        if matches!(
+            cap,
+            "file.search"
+                | "app.search"
+                | "package.search"
+                | "web.resolve"
+                | "web.search"
+                | "web.search_site"
+        ) {
+            return ToolIdempotencyPolicy::CacheUntilStateChanged;
+        }
+        return ToolIdempotencyPolicy::AlwaysRefresh;
+    }
+
+    if matches!(
+        cap,
+        "process.terminate"
+            | "power.session"
+            | "screen.lock"
+            | "settings.reset"
+            | "terminal.handoff"
+            | "package.install"
+            | "package.remove"
+            | "service.control"
+            | "docker.control"
+    ) || (effect >= Effect::WriteDestructive && cap != "file.trash")
+    {
+        return ToolIdempotencyPolicy::NeverReplay;
+    }
+
+    if !has_relative_or_toggle_adjustment(parsed_args)
+        && (cap.starts_with("appearance.")
+            || matches!(
+                cap,
+                "sound.volume.set"
+                    | "sound.mic.volume.set"
+                    | "sound.mute.set"
+                    | "sound.mic.mute.set"
+                    | "sound.output.switch"
+                    | "display.brightness.set"
+                    | "display.night_light.set"
+                    | "display.scale.set"
+                    | "display.resolution.set"
+                    | "display.orientation.set"
+                    | "notify.dnd.set"
+                    | "power.profile.set"
+                    | "power.idle_timeout.set"
+                    | "bluetooth.power.set"
+                    | "network.wifi.set"
+                    | "network.airplane.set"
+                    | "network.vpn.set"
+                    | "network.proxy.set"
+                    | "file.mkdir"
+            ))
+    {
+        return ToolIdempotencyPolicy::IdempotentMutation;
+    }
+
+    ToolIdempotencyPolicy::ExactlyOncePerStep
+}
+
+/// Derive `ToolIdempotencyPolicy` from `IntentOsCore`'s trusted capability registry + arguments.
+pub fn derive_tool_idempotency_policy(
+    core: &IntentOsCore,
+    canonical_tool: &str,
+    parsed_args: &Value,
+) -> ToolIdempotencyPolicy {
+    let effect = resolve_capability_effect(core, canonical_tool);
+    classify_capability_idempotency(canonical_tool, effect, parsed_args)
 }
 
 pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> String {
@@ -413,7 +557,7 @@ pub fn build_quick_chat_anthropic_tools(openai_tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// Execute a single Quick-Chat tool call through `CapabilityBroker`, enforcing per-turn
+/// Execute a single Quick-Chat tool call through `CapabilityBroker`, enforcing capability-semantic
 /// idempotency deduplication and recording the execution into `effect_ledger`.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_quick_chat_tool_call(
@@ -431,32 +575,129 @@ pub async fn execute_quick_chat_tool_call(
     parsed_args: &Value,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<QuickChatToolExecOutcome> {
+    execute_quick_chat_tool_call_with_step(
+        core,
+        active,
+        execution_mode,
+        task_id,
+        session,
+        user_text,
+        incognito,
+        taints,
+        data_class,
+        StepInvocationContext::new_call(call_id),
+        fn_name,
+        parsed_args,
+        effect_ledger,
+    )
+    .await
+}
+
+/// Execute a Quick-Chat tool call with explicit separation of trusted `step_id` (from `TurnEffectLedger`
+/// or trusted orchestrator), transport `call_id`, and `attempt_id`.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_quick_chat_tool_call_with_step(
+    core: &IntentOsCore,
+    active: &ActiveBackendSelection,
+    execution_mode: BackendExecutionMode,
+    task_id: &str,
+    session: &SessionState,
+    user_text: &str,
+    incognito: bool,
+    taints: &[Taint],
+    data_class: DataClass,
+    step_ctx: StepInvocationContext,
+    fn_name: &str,
+    parsed_args: &Value,
+    effect_ledger: &mut TurnEffectLedger,
+) -> anyhow::Result<QuickChatToolExecOutcome> {
     let canonical_tool = resolve_tool_name_to_capability(fn_name, core);
     let is_mem = crate::memory_hub::is_memory_tool(&canonical_tool);
     let is_adap = crate::app_adapter::is_adapter_tool(&canonical_tool);
-    let canonical_args = canonicalize_json_for_dedup(parsed_args);
-    let idempotency_key = effect_ledger.compute_idempotency_key(&canonical_tool, &canonical_args);
 
-    // Idempotent Duplicate Tool-Call Guard via `TurnEffectLedger`
-    if let Some(prev) = effect_ledger.lookup_idempotent(&idempotency_key) {
-        let feedback = serde_json::to_string(&json!({
-            "duplicate_call_blocked": true,
-            "idempotent_dedup": true,
-            "idempotency_key": prev.idempotency_key,
-            "step_id": prev.step_id,
-            "tool": canonical_tool,
-            "changeset_id": prev.changeset_id,
-            "cached_output": prev.cached_output,
-            "instruction": "检测到当前回合内重复调用完全相同的工具与参数，系统已通过 TurnEffectLedger 幂等账本拦截重复执行并返回缓存输出。请不要再次调用该工具，请立即基于已有结果向用户总结并完成回复。"
-        }))?;
-        return Ok(QuickChatToolExecOutcome::ToolMessage {
-            content: feedback,
-            is_error: false,
-            duplicate_blocked: true,
-        });
+    // Strip untrusted model-supplied step identity fields before policy/dedup/dispatch
+    let sanitized_input_args = strip_untrusted_step_meta_fields(parsed_args);
+    let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
+    let effect = resolve_capability_effect(core, &canonical_tool);
+    let policy = classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
+    let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+        "attempt_1".to_string()
+    } else {
+        step_ctx.attempt_id.trim().to_string()
+    };
+
+    // Capability-Semantic Idempotency & Step-Identity Evaluation via `TurnEffectLedger`
+    match effect_ledger.evaluate_idempotency(
+        policy,
+        step_ctx.trusted_step_id.as_deref(),
+        &attempt_id,
+        &canonical_tool,
+        &canonical_args,
+    ) {
+        IdempotencyDecision::StepIdentityConflict {
+            step_id,
+            existing_capability,
+        } => {
+            let err_payload = serde_json::to_string(&json!({
+                "duplicate_call_blocked": true,
+                "idempotent_dedup": false,
+                "is_error": true,
+                "was_denied": false,
+                "dedup_reason": "step_identity_conflict",
+                "step_id": step_id,
+                "existing_capability": existing_capability,
+                "requested_capability": canonical_tool,
+                "error": format!(
+                    "Trusted step_id '{}' is already bound to '{}' and cannot be reused with conflicting capability or arguments",
+                    step_id, existing_capability
+                ),
+            }))?;
+            return Ok(QuickChatToolExecOutcome::ToolMessage {
+                content: err_payload,
+                is_error: true,
+                duplicate_blocked: true,
+            });
+        }
+
+        IdempotencyDecision::CachedHit {
+            record: prev,
+            reason,
+            ..
+        } => {
+            let is_err = prev.is_error();
+            let was_denied = prev.was_denied();
+            let feedback = serde_json::to_string(&json!({
+                "duplicate_call_blocked": true,
+                "idempotent_dedup": !is_err,
+                "dedup_reason": reason,
+                "policy": policy,
+                "idempotency_key": prev.idempotency_key,
+                "step_id": prev.step_id,
+                "tool": canonical_tool,
+                "is_error": is_err,
+                "was_denied": was_denied,
+                "verification_status": prev.verification_status,
+                "changeset_id": prev.changeset_id,
+                "cached_output": prev.cached_output,
+                "instruction": if was_denied {
+                    "该操作已被安全策略拒绝（Denied），重复调用同样被拦截。请不要再次尝试访问受禁路径或权限范围。"
+                } else if is_err {
+                    "该步骤此前执行失败，为防止未知副作用已阻止盲目重放。请向用户如实说明错误原因。"
+                } else {
+                    "检测到当前回合内重复调用可安全去重的工具与参数，系统已通过 TurnEffectLedger 幂等账本拦截重复执行并返回缓存输出。请不要再次调用该工具，请立即基于已有结果向用户总结并完成回复。"
+                }
+            }))?;
+            return Ok(QuickChatToolExecOutcome::ToolMessage {
+                content: feedback,
+                is_error: is_err,
+                duplicate_blocked: true,
+            });
+        }
+
+        IdempotencyDecision::Proceed => {}
     }
 
-    let mut effective_args = parsed_args.clone();
+    let mut effective_args = sanitized_input_args.clone();
     if is_mem
         && !incognito
         && let Some(obj) = effective_args.as_object_mut()
@@ -465,7 +706,6 @@ pub async fn execute_quick_chat_tool_call(
             .or_insert_with(|| json!(session.session_id));
     }
 
-    let effect = resolve_capability_effect(core, &canonical_tool);
     let is_untainted_reversible_setting = !is_mem
         && !is_adap
         && !taints.iter().any(|t| t.is_untrusted())
@@ -477,7 +717,7 @@ pub async fn execute_quick_chat_tool_call(
     };
 
     let call = CapabilityCall {
-        request_id: call_id.to_string(),
+        request_id: step_ctx.call_id.clone(),
         task_id: task_id.to_string(),
         capability_id: canonical_tool.clone(),
         arguments: effective_args,
@@ -487,7 +727,26 @@ pub async fn execute_quick_chat_tool_call(
 
     match core.broker.dispatch(&call).await? {
         BrokerDispatchOutcome::Executed(mut res) => {
-            let step_id = effect_ledger.next_step_id();
+            let step_id = step_ctx
+                .trusted_step_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| effect_ledger.next_step_id());
+            let pre_epoch = effect_ledger.state_epoch();
+            let post_epoch = if effect > Effect::Observe {
+                effect_ledger.bump_state_epoch()
+            } else {
+                pre_epoch
+            };
+            let idempotency_key = effect_ledger.compute_step_idempotency_key(
+                policy,
+                &step_id,
+                &attempt_id,
+                &canonical_tool,
+                &canonical_args,
+                post_epoch,
+            );
+
             if canonical_tool == "file.search" {
                 supplement_approved_dir_file_search(
                     core,
@@ -496,11 +755,11 @@ pub async fn execute_quick_chat_tool_call(
                     &mut res.data,
                 );
             }
-            if let Some(p) = parsed_args
+            if let Some(p) = sanitized_input_args
                 .get("path")
-                .or_else(|| parsed_args.get("target"))
-                .or_else(|| parsed_args.get("source"))
-                .or_else(|| parsed_args.get("directory"))
+                .or_else(|| sanitized_input_args.get("target"))
+                .or_else(|| sanitized_input_args.get("source"))
+                .or_else(|| sanitized_input_args.get("directory"))
                 .and_then(|v| v.as_str())
             {
                 effect_ledger.last_resource_path = Some(p.to_string());
@@ -512,6 +771,17 @@ pub async fn execute_quick_chat_tool_call(
             );
             let mutated_state = effect > Effect::Observe && is_ok;
             let verification_status = format!("{:?}", res.verification.state);
+            let step_meta = StepExecutionMeta {
+                step_id: step_id.clone(),
+                call_id: step_ctx.call_id.clone(),
+                attempt_id: attempt_id.clone(),
+                policy,
+                pre_state_epoch: pre_epoch,
+                post_state_epoch: post_epoch,
+                is_error: !is_ok,
+                was_denied: false,
+                verification_status: verification_status.clone(),
+            };
 
             if is_mem {
                 let summary = serde_json::to_string_pretty(&res.data)
@@ -522,17 +792,20 @@ pub async fn execute_quick_chat_tool_call(
                 ));
                 effect_ledger.tool_steps_json.push(json!({
                     "step_id": step_id,
+                    "call_id": step_ctx.call_id,
+                    "attempt_id": attempt_id,
+                    "policy": policy,
                     "idempotency_key": idempotency_key,
                     "capability_id": canonical_tool,
                     "tool": canonical_tool,
-                    "arguments": parsed_args,
+                    "arguments": sanitized_input_args,
                     "duration_ms": res.duration_ms,
                     "data": res.data,
                 }));
                 effect_ledger.task_steps.push(TaskStep {
                     step_id: step_id.clone(),
                     capability_id: canonical_tool.clone(),
-                    arguments_summary: parsed_args.to_string(),
+                    arguments_summary: sanitized_input_args.to_string(),
                     status: res.status,
                     verification: res.verification,
                     changeset_id: res.changeset_id.clone(),
@@ -540,18 +813,21 @@ pub async fn execute_quick_chat_tool_call(
                     data: res.data.clone(),
                     duration_ms: res.duration_ms,
                 });
-                effect_ledger.record_step(StepExecutionRecord {
-                    step_id,
-                    idempotency_key,
-                    capability_id: canonical_tool,
-                    canonical_args_json: canonical_args,
-                    effect,
-                    mutated_state,
-                    succeeded: is_ok,
-                    changeset_id: res.changeset_id,
-                    verification_status,
-                    cached_output: res.data.clone(),
-                });
+                effect_ledger.record_step_with_meta(
+                    StepExecutionRecord {
+                        step_id,
+                        idempotency_key,
+                        capability_id: canonical_tool,
+                        canonical_args_json: canonical_args,
+                        effect,
+                        mutated_state,
+                        succeeded: is_ok,
+                        changeset_id: res.changeset_id,
+                        verification_status,
+                        cached_output: res.data.clone(),
+                    },
+                    step_meta,
+                );
                 return Ok(QuickChatToolExecOutcome::ToolMessage {
                     content: serde_json::to_string(&res.data)?,
                     is_error: !is_ok,
@@ -589,10 +865,13 @@ pub async fn execute_quick_chat_tool_call(
                 effect_ledger.adapter_actions.push(res.data.clone());
                 effect_ledger.tool_steps_json.push(json!({
                     "step_id": step_id,
+                    "call_id": step_ctx.call_id,
+                    "attempt_id": attempt_id,
+                    "policy": policy,
                     "idempotency_key": idempotency_key,
                     "capability_id": canonical_tool,
                     "tool": canonical_tool,
-                    "arguments": parsed_args,
+                    "arguments": sanitized_input_args,
                     "duration_ms": res.duration_ms,
                     "data": res.data,
                     "result": res.data,
@@ -600,7 +879,7 @@ pub async fn execute_quick_chat_tool_call(
                 effect_ledger.task_steps.push(TaskStep {
                     step_id: step_id.clone(),
                     capability_id: canonical_tool.clone(),
-                    arguments_summary: parsed_args.to_string(),
+                    arguments_summary: sanitized_input_args.to_string(),
                     status: res.status,
                     verification: res.verification,
                     changeset_id: res.changeset_id.clone(),
@@ -608,18 +887,21 @@ pub async fn execute_quick_chat_tool_call(
                     data: res.data.clone(),
                     duration_ms: res.duration_ms,
                 });
-                effect_ledger.record_step(StepExecutionRecord {
-                    step_id,
-                    idempotency_key,
-                    capability_id: canonical_tool,
-                    canonical_args_json: canonical_args,
-                    effect,
-                    mutated_state,
-                    succeeded: is_ok,
-                    changeset_id: res.changeset_id,
-                    verification_status,
-                    cached_output: res.data.clone(),
-                });
+                effect_ledger.record_step_with_meta(
+                    StepExecutionRecord {
+                        step_id,
+                        idempotency_key,
+                        capability_id: canonical_tool,
+                        canonical_args_json: canonical_args,
+                        effect,
+                        mutated_state,
+                        succeeded: is_ok,
+                        changeset_id: res.changeset_id,
+                        verification_status,
+                        cached_output: res.data.clone(),
+                    },
+                    step_meta,
+                );
                 return Ok(QuickChatToolExecOutcome::ToolMessage {
                     content: serde_json::to_string(&res.data)?,
                     is_error: !is_ok,
@@ -628,7 +910,8 @@ pub async fn execute_quick_chat_tool_call(
             }
 
             let is_unverified = res.status == ExecutionStatus::RequestedUnverified
-                || res.verification.state == intentos_protocol::VerificationState::RequestedUnverified
+                || res.verification.state
+                    == intentos_protocol::VerificationState::RequestedUnverified
                 || res.data.get("simulated").and_then(|v| v.as_bool()) == Some(true);
 
             if is_ok && is_unverified {
@@ -666,9 +949,12 @@ pub async fn execute_quick_chat_tool_call(
 
             effect_ledger.tool_steps_json.push(json!({
                 "step_id": step_id,
+                "call_id": step_ctx.call_id,
+                "attempt_id": attempt_id,
+                "policy": policy,
                 "idempotency_key": idempotency_key,
                 "capability_id": canonical_tool,
-                "arguments": parsed_args,
+                "arguments": sanitized_input_args,
                 "status": res.status,
                 "duration_ms": res.duration_ms,
                 "changeset_id": res.changeset_id,
@@ -678,7 +964,7 @@ pub async fn execute_quick_chat_tool_call(
             effect_ledger.task_steps.push(TaskStep {
                 step_id: step_id.clone(),
                 capability_id: canonical_tool.clone(),
-                arguments_summary: parsed_args.to_string(),
+                arguments_summary: sanitized_input_args.to_string(),
                 status: res.status,
                 verification: res.verification,
                 changeset_id: res.changeset_id.clone(),
@@ -686,18 +972,21 @@ pub async fn execute_quick_chat_tool_call(
                 data: res.data.clone(),
                 duration_ms: res.duration_ms,
             });
-            effect_ledger.record_step(StepExecutionRecord {
-                step_id,
-                idempotency_key,
-                capability_id: canonical_tool,
-                canonical_args_json: canonical_args,
-                effect,
-                mutated_state,
-                succeeded: is_ok,
-                changeset_id: res.changeset_id,
-                verification_status,
-                cached_output: out_val.clone(),
-            });
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id,
+                    idempotency_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state,
+                    succeeded: is_ok,
+                    changeset_id: res.changeset_id,
+                    verification_status,
+                    cached_output: out_val.clone(),
+                },
+                step_meta,
+            );
 
             Ok(QuickChatToolExecOutcome::ToolMessage {
                 content: serde_json::to_string(&out_val)?,
@@ -761,23 +1050,53 @@ pub async fn execute_quick_chat_tool_call(
         }
 
         BrokerDispatchOutcome::Denied { reason } => {
-            let step_id = effect_ledger.next_step_id();
-            let err_val = json!({ "error": reason });
+            let step_id = step_ctx
+                .trusted_step_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| effect_ledger.next_step_id());
+            let epoch = effect_ledger.state_epoch();
+            let idempotency_key = effect_ledger.compute_step_idempotency_key(
+                policy,
+                &step_id,
+                &attempt_id,
+                &canonical_tool,
+                &canonical_args,
+                epoch,
+            );
+            let err_val = json!({
+                "error": reason,
+                "was_denied": true,
+            });
             effect_ledger
                 .trace_dots
                 .push(TraceDot::tool_err(&canonical_tool, reason.clone(), 0));
-            effect_ledger.record_step(StepExecutionRecord {
-                step_id,
-                idempotency_key,
-                capability_id: canonical_tool,
-                canonical_args_json: canonical_args,
-                effect,
-                mutated_state: false,
-                succeeded: false,
-                changeset_id: None,
+            let step_meta = StepExecutionMeta {
+                step_id: step_id.clone(),
+                call_id: step_ctx.call_id,
+                attempt_id,
+                policy,
+                pre_state_epoch: epoch,
+                post_state_epoch: epoch,
+                is_error: true,
+                was_denied: true,
                 verification_status: "Denied".to_string(),
-                cached_output: err_val.clone(),
-            });
+            };
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id,
+                    idempotency_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state: false,
+                    succeeded: false,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    cached_output: err_val.clone(),
+                },
+                step_meta,
+            );
             Ok(QuickChatToolExecOutcome::ToolMessage {
                 content: serde_json::to_string(&err_val)?,
                 is_error: true,
@@ -796,15 +1115,27 @@ pub fn record_approved_step_into_ledger(
     task_changeset_ids: &[String],
 ) {
     let step_id = effect_ledger.next_step_id();
-    let canonical_args = canonicalize_json_for_dedup(paused_args_val);
-    let idempotency_key =
-        effect_ledger.compute_idempotency_key(&step.capability_id, &canonical_args);
+    let sanitized_args = strip_untrusted_step_meta_fields(paused_args_val);
+    let canonical_args = canonicalize_json_for_dedup(&sanitized_args);
     let effect = resolve_capability_effect(core, &step.capability_id);
+    let policy = classify_capability_idempotency(&step.capability_id, effect, &sanitized_args);
+    // Always advance `state_epoch` on user approval (new scope/grant or state mutation)!
+    let pre_epoch = effect_ledger.state_epoch();
+    let post_epoch = effect_ledger.bump_state_epoch();
+    let idempotency_key = effect_ledger.compute_step_idempotency_key(
+        policy,
+        &step_id,
+        "approved_attempt_1",
+        &step.capability_id,
+        &canonical_args,
+        post_epoch,
+    );
     let is_ok = matches!(
         step.status,
         ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
     );
     let mutated_state = effect > Effect::Observe && is_ok;
+    let verification_status = format!("{:?}", step.verification.state);
 
     for csid in task_changeset_ids {
         if !effect_ledger.changeset_ids.contains(csid) {
@@ -823,11 +1154,11 @@ pub fn record_approved_step_into_ledger(
         .map(String::from);
     if let Some(fp) = step_discovered_file {
         effect_ledger.last_resource_path = Some(fp);
-    } else if let Some(p) = paused_args_val
+    } else if let Some(p) = sanitized_args
         .get("path")
-        .or_else(|| paused_args_val.get("target"))
-        .or_else(|| paused_args_val.get("source"))
-        .or_else(|| paused_args_val.get("directory"))
+        .or_else(|| sanitized_args.get("target"))
+        .or_else(|| sanitized_args.get("source"))
+        .or_else(|| sanitized_args.get("directory"))
         .and_then(|v| v.as_str())
     {
         effect_ledger.last_resource_path = Some(p.to_string());
@@ -844,9 +1175,10 @@ pub fn record_approved_step_into_ledger(
     ));
     effect_ledger.tool_steps_json.push(json!({
         "step_id": step_id,
+        "policy": policy,
         "idempotency_key": idempotency_key,
         "capability_id": step.capability_id,
-        "arguments": paused_args_val,
+        "arguments": sanitized_args,
         "status": step.status,
         "duration_ms": step.duration_ms,
         "changeset_id": step.changeset_id,
@@ -855,22 +1187,36 @@ pub fn record_approved_step_into_ledger(
         "approved_by_user": true,
     }));
     effect_ledger.task_steps.push(step.clone());
-    effect_ledger.record_step(StepExecutionRecord {
-        step_id,
-        idempotency_key,
-        capability_id: step.capability_id.clone(),
-        canonical_args_json: canonical_args,
-        effect,
-        mutated_state,
-        succeeded: is_ok,
-        changeset_id: step.changeset_id.clone(),
-        verification_status: format!("{:?}", step.verification.state),
-        cached_output: json!({
-            "approved_by_user": true,
-            "message": step.message,
-            "data": step.data,
-        }),
-    });
+    let step_meta = StepExecutionMeta {
+        step_id: step_id.clone(),
+        call_id: step.step_id.clone(),
+        attempt_id: "approved_attempt_1".to_string(),
+        policy,
+        pre_state_epoch: pre_epoch,
+        post_state_epoch: post_epoch,
+        is_error: !is_ok,
+        was_denied: false,
+        verification_status: verification_status.clone(),
+    };
+    effect_ledger.record_step_with_meta(
+        StepExecutionRecord {
+            step_id,
+            idempotency_key,
+            capability_id: step.capability_id.clone(),
+            canonical_args_json: canonical_args,
+            effect,
+            mutated_state,
+            succeeded: is_ok,
+            changeset_id: step.changeset_id.clone(),
+            verification_status,
+            cached_output: json!({
+                "approved_by_user": true,
+                "message": step.message,
+                "data": step.data,
+            }),
+        },
+        step_meta,
+    );
 }
 
 fn expand_tilde_local(raw: &str) -> PathBuf {
@@ -910,7 +1256,10 @@ pub fn extract_approval_grant_target(
                 && let Some(parent) = p.parent()
                 && parent != Path::new("/")
             {
-                return Some(("directory".to_string(), parent.to_string_lossy().to_string()));
+                return Some((
+                    "directory".to_string(),
+                    parent.to_string_lossy().to_string(),
+                ));
             }
             return Some(("directory".to_string(), p.to_string_lossy().to_string()));
         }
@@ -1217,7 +1566,13 @@ pub fn synthesize_rich_approved_step_markdown(user_text: &str, steps: &[TaskStep
                 if path.is_empty() {
                     lines.push(format!("{}. **{}** ({} B)", idx + 1, name, size));
                 } else {
-                    lines.push(format!("{}. **{}** — `{}` ({} B)", idx + 1, name, path, size));
+                    lines.push(format!(
+                        "{}. **{}** — `{}` ({} B)",
+                        idx + 1,
+                        name,
+                        path,
+                        size
+                    ));
                 }
             }
             if files.len() > 15 {
@@ -1389,10 +1744,7 @@ pub fn finalize_completed_turn_outcome(
     let combined_thinking = if effect_ledger.accumulated_thoughts.is_empty() {
         None
     } else {
-        Some(
-            std::mem::take(&mut effect_ledger.accumulated_thoughts)
-                .join("\n\n"),
-        )
+        Some(std::mem::take(&mut effect_ledger.accumulated_thoughts).join("\n\n"))
     };
 
     TurnExecutionOutcome {
@@ -1567,7 +1919,8 @@ pub fn build_halted_side_effect_outcome(
 ) -> TurnExecutionOutcome {
     let changeset_ids = effect_ledger.committed_changeset_ids();
     let mut summary_lines = vec![
-        "已完成前置系统操作，但后续模型响应异常；为防止重复执行副作用，已安全中止自动回退重试：".to_string(),
+        "已完成前置系统操作，但后续模型响应异常；为防止重复执行副作用，已安全中止自动回退重试："
+            .to_string(),
     ];
     for rec in effect_ledger.records().iter().filter(|r| r.succeeded) {
         if let Some(ref csid) = rec.changeset_id {
@@ -1635,10 +1988,7 @@ pub fn build_halted_side_effect_outcome(
     let combined_thinking = if effect_ledger.accumulated_thoughts.is_empty() {
         None
     } else {
-        Some(
-            std::mem::take(&mut effect_ledger.accumulated_thoughts)
-                .join("\n\n"),
-        )
+        Some(std::mem::take(&mut effect_ledger.accumulated_thoughts).join("\n\n"))
     };
 
     TurnExecutionOutcome {
@@ -1656,5 +2006,712 @@ pub fn build_halted_side_effect_outcome(
         changeset_ids,
         handoff_command,
         pending_approval: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, BrainConfig, XdgPaths};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn setup_bridge_test_core() -> (TempDir, PathBuf, Arc<IntentOsCore>) {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("base");
+        let ws = temp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let xdg = XdgPaths::resolve(Some(&base), repo_root.clone());
+        xdg.ensure_dirs().unwrap();
+        let cfg = AppConfig {
+            authorized_directories: vec![ws.to_string_lossy().to_string()],
+            allow_simulated_hardware_fallback: true,
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            xdg.config_dir.join("config.toml"),
+            toml::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.config_dir.join("brain.toml"),
+            toml::to_string_pretty(&BrainConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        let core = IntentOsCore::initialize(Some(&base), repo_root).expect("init core");
+        (temp, ws, core)
+    }
+
+    fn dummy_active_selection() -> ActiveBackendSelection {
+        ActiveBackendSelection {
+            backend: "openai".to_string(),
+            provider: "test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            reasoning_effort: "medium".to_string(),
+            base_url: None,
+            pinned: false,
+            auto_selected: true,
+            direct_http_capable: true,
+            pill_label: "OpenAI".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn h02_read_write_read_gets_updated_value_and_invalidates_search_cache() {
+        let (_tmp, ws, core) = setup_bridge_test_core();
+        core.policy
+            .add_session_grant("directory", &ws.to_string_lossy(), 30);
+        let session = core.sessions.get_or_create(Some("ses_h02_rw"));
+        let active = dummy_active_selection();
+        let mut ledger = TurnEffectLedger::new("turn_h02_rw");
+
+        let note_path = ws.join("status_note.md");
+        std::fs::write(&note_path, "alpha_v1").unwrap();
+
+        // 1. Read #1 (`memory_inspect_document` -> AlwaysRefresh) gets "alpha_v1"
+        let r1 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_r1",
+            "memory_inspect_document",
+            &json!({ "path": note_path.to_string_lossy() }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match r1 {
+            QuickChatToolExecOutcome::ToolMessage {
+                content,
+                is_error,
+                duplicate_blocked,
+            } => {
+                assert!(!is_error);
+                assert!(!duplicate_blocked);
+                assert!(content.contains("alpha_v1"));
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+
+        // 2. Search #1 (`file.search` -> CacheUntilStateChanged) finds 1 file at epoch 0
+        let s1 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_s1",
+            "file_search",
+            &json!({ "directory": ws.to_string_lossy(), "query": "status_note" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        if let QuickChatToolExecOutcome::ToolMessage {
+            duplicate_blocked,
+            is_error,
+            ..
+        } = s1
+        {
+            assert!(!is_error);
+            assert!(!duplicate_blocked);
+        } else {
+            panic!("expected ToolMessage");
+        }
+
+        // 3. Search #2 before any mutation -> hits CacheUntilStateChanged!
+        let s2 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_s2",
+            "file_search",
+            &json!({ "query": "status_note", "directory": format!("{}/.", ws.display()) }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        if let QuickChatToolExecOutcome::ToolMessage {
+            duplicate_blocked,
+            is_error,
+            ..
+        } = s2
+        {
+            assert!(!is_error);
+            assert!(
+                duplicate_blocked,
+                "file.search must be cached within unchanged state_epoch"
+            );
+        } else {
+            panic!("expected ToolMessage");
+        }
+
+        // 4. Mutating `file.write` updates status_note.md -> "beta_v2" and bumps state_epoch!
+        let epoch_before = ledger.state_epoch();
+        let w1 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_w1",
+            "file_write",
+            &json!({
+                "path": note_path.to_string_lossy(),
+                "content": "beta_v2"
+            }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        if let QuickChatToolExecOutcome::ToolMessage {
+            is_error,
+            duplicate_blocked,
+            ..
+        } = w1
+        {
+            assert!(!is_error);
+            assert!(!duplicate_blocked);
+        } else {
+            panic!("expected ToolMessage for file.write");
+        }
+        assert!(
+            ledger.state_epoch() > epoch_before,
+            "mutating tool must bump state_epoch"
+        );
+
+        let extra_note = ws.join("status_note_2.md");
+        let _ = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_w2",
+            "file_write",
+            &json!({
+                "path": extra_note.to_string_lossy(),
+                "content": "extra_file"
+            }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+
+        // 5. Read #2 (`memory_inspect_document` -> AlwaysRefresh) gets fresh "beta_v2"!
+        let r2 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_r2",
+            "memory_inspect_document",
+            &json!({ "path": note_path.to_string_lossy() }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match r2 {
+            QuickChatToolExecOutcome::ToolMessage {
+                content,
+                is_error,
+                duplicate_blocked,
+            } => {
+                assert!(!is_error);
+                assert!(!duplicate_blocked, "read after write must NEVER be blocked");
+                assert!(
+                    content.contains("beta_v2"),
+                    "read after write must return updated content, got: {content}"
+                );
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+
+        // 6. Search #3 after mutation -> CacheUntilStateChanged invalidated, sees new file!
+        let s3 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_rw",
+            &session,
+            "read update read",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_s3",
+            "file_search",
+            &json!({ "directory": ws.to_string_lossy(), "query": "status_note" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match s3 {
+            QuickChatToolExecOutcome::ToolMessage {
+                content,
+                is_error,
+                duplicate_blocked,
+            } => {
+                assert!(!is_error);
+                assert!(
+                    !duplicate_blocked,
+                    "CacheUntilStateChanged must invalidate when state_epoch advances"
+                );
+                assert!(content.contains("status_note_2.md"));
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+    }
+
+    #[tokio::test]
+    async fn h02_consecutive_media_next_and_relative_volume_both_execute_while_same_step_replays_once()
+     {
+        let (_tmp, _ws, core) = setup_bridge_test_core();
+        let session = core.sessions.get_or_create(Some("ses_h02_seq"));
+        let active = dummy_active_selection();
+        let mut ledger = TurnEffectLedger::new("turn_h02_seq");
+
+        assert_eq!(
+            derive_tool_idempotency_policy(&core, "media.control", &json!({ "action": "next" })),
+            ToolIdempotencyPolicy::ExactlyOncePerStep
+        );
+        assert_eq!(
+            derive_tool_idempotency_policy(
+                &core,
+                "sound.volume.set",
+                &json!({ "relative": "up", "value": 5 })
+            ),
+            ToolIdempotencyPolicy::ExactlyOncePerStep
+        );
+        assert_eq!(
+            derive_tool_idempotency_policy(&core, "sound.volume.set", &json!({ "value": 55 })),
+            ToolIdempotencyPolicy::IdempotentMutation
+        );
+
+        // 1. Two consecutive `media.control("next")` steps -> BOTH execute!
+        for call_id in ["call_next_1", "call_next_2"] {
+            let out = execute_quick_chat_tool_call(
+                &core,
+                &active,
+                BackendExecutionMode::ManagedBrokerTools,
+                "task_h02_seq",
+                &session,
+                "skip two tracks",
+                false,
+                &[Taint::User],
+                DataClass::Public,
+                call_id,
+                "media_control",
+                &json!({ "action": "next" }),
+                &mut ledger,
+            )
+            .await
+            .unwrap();
+            match out {
+                QuickChatToolExecOutcome::ToolMessage {
+                    duplicate_blocked, ..
+                } => {
+                    assert!(
+                        !duplicate_blocked,
+                        "distinct logical media.control('next') steps must both execute ({call_id})"
+                    );
+                }
+                _ => panic!("expected ToolMessage"),
+            }
+        }
+        assert_eq!(ledger.records().len(), 2);
+        assert_eq!(ledger.records()[0].step_id, "step_1");
+        assert_eq!(ledger.records()[1].step_id, "step_2");
+
+        // 2. Duplicate replay of trusted `step_1` executes AT MOST ONCE!
+        let replay_step1 = execute_quick_chat_tool_call_with_step(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_seq",
+            &session,
+            "skip two tracks",
+            false,
+            &[Taint::User],
+            DataClass::Public,
+            StepInvocationContext::for_trusted_step("step_1", "call_next_1_retry", "attempt_2"),
+            "media_control",
+            &json!({ "action": "next" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match replay_step1 {
+            QuickChatToolExecOutcome::ToolMessage {
+                duplicate_blocked, ..
+            } => {
+                assert!(
+                    duplicate_blocked,
+                    "replaying the same trusted step_id must not execute a second time"
+                );
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+        assert_eq!(ledger.records().len(), 2);
+
+        // 3. Two consecutive relative `sound.volume.set` steps -> BOTH execute!
+        for call_id in ["call_rel_vol_1", "call_rel_vol_2"] {
+            let out = execute_quick_chat_tool_call(
+                &core,
+                &active,
+                BackendExecutionMode::ManagedBrokerTools,
+                "task_h02_seq",
+                &session,
+                "raise volume twice",
+                false,
+                &[Taint::User],
+                DataClass::Public,
+                call_id,
+                "sound_volume_set",
+                &json!({ "relative": "up", "value": 5, "step_id": "step_1" }),
+                &mut ledger,
+            )
+            .await
+            .unwrap();
+            match out {
+                QuickChatToolExecOutcome::ToolMessage {
+                    duplicate_blocked, ..
+                } => {
+                    assert!(
+                        !duplicate_blocked,
+                        "relative volume steps must both execute and ignore untrusted model step_id"
+                    );
+                }
+                _ => panic!("expected ToolMessage"),
+            }
+        }
+        assert_eq!(ledger.records().len(), 4);
+
+        // 4. Absolute `sound.volume.set({"value": 55})` deduplicates immediate repeat even if model injects forged `step_id`
+        let abs1 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_seq",
+            &session,
+            "set volume 55",
+            false,
+            &[Taint::User],
+            DataClass::Public,
+            "call_abs_1",
+            "sound_volume_set",
+            &json!({ "value": 55 }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            abs1,
+            QuickChatToolExecOutcome::ToolMessage {
+                duplicate_blocked: false,
+                is_error: false,
+                ..
+            }
+        ));
+
+        let abs2 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_seq",
+            &session,
+            "set volume 55",
+            false,
+            &[Taint::User],
+            DataClass::Public,
+            "call_abs_2",
+            "sound_volume_set",
+            &json!({ "value": 55, "step_id": "forged_step_999" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            abs2,
+            QuickChatToolExecOutcome::ToolMessage {
+                duplicate_blocked: true,
+                is_error: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn h02_denied_call_stays_is_error_true_and_transient_read_allows_single_retry() {
+        let (_tmp, _ws, core) = setup_bridge_test_core();
+        let session = core.sessions.get_or_create(Some("ses_h02_deny"));
+        let active = dummy_active_selection();
+        let mut ledger = TurnEffectLedger::new("turn_h02_deny");
+
+        // 1. Forbidden path `~/.ssh/id_ed25519` -> Denied (`is_error: true`)
+        let d1 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_deny",
+            &session,
+            "write ssh key",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_deny_1",
+            "file_write",
+            &json!({ "path": "~/.ssh/id_ed25519", "content": "unauthorized" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match d1 {
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error,
+                duplicate_blocked,
+                ..
+            } => {
+                assert!(is_error, "initial policy denial must set is_error = true");
+                assert!(!duplicate_blocked);
+            }
+            _ => panic!("expected ToolMessage on policy denial"),
+        }
+
+        // 2. Duplicate call in same turn AND replay of same `step_1` MUST stay `is_error: true`!
+        let d2 = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_deny",
+            &session,
+            "write ssh key",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_deny_2",
+            "file_write",
+            &json!({ "content": "unauthorized", "path": "~/.ssh/./id_ed25519" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        match d2 {
+            QuickChatToolExecOutcome::ToolMessage {
+                content,
+                is_error,
+                duplicate_blocked,
+            } => {
+                assert!(duplicate_blocked);
+                assert!(
+                    is_error,
+                    "cached policy denial must NEVER flip is_error to false!"
+                );
+                let parsed: Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(parsed["was_denied"], true);
+                assert_eq!(parsed["idempotent_dedup"], false);
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+
+        let d3 = execute_quick_chat_tool_call_with_step(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h02_deny",
+            &session,
+            "write ssh key",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::for_trusted_step("step_1", "call_deny_retry", "attempt_2"),
+            "file_write",
+            &json!({ "path": "~/.ssh/id_ed25519", "content": "unauthorized" }),
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            d3,
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error: true,
+                duplicate_blocked: true,
+                ..
+            }
+        ));
+
+        // 3. Transient read-only failure allows AT MOST 1 retry; failed mutation allows 0 blind retries
+        let mut retry_ledger = TurnEffectLedger::new("turn_h02_retry");
+        let read_args = r#"{"interface":"wlan0"}"#;
+        let k_a1 = retry_ledger.compute_step_idempotency_key(
+            ToolIdempotencyPolicy::AlwaysRefresh,
+            "step_1",
+            "attempt_1",
+            "network.status",
+            read_args,
+            0,
+        );
+        retry_ledger.record_step_with_meta(
+            StepExecutionRecord {
+                step_id: "step_1".into(),
+                idempotency_key: k_a1,
+                capability_id: "network.status".into(),
+                canonical_args_json: read_args.into(),
+                effect: Effect::Observe,
+                mutated_state: false,
+                succeeded: false,
+                changeset_id: None,
+                verification_status: "Failed".into(),
+                cached_output: json!({ "error": "transient dbus timeout" }),
+            },
+            StepExecutionMeta {
+                step_id: "step_1".into(),
+                call_id: "c1".into(),
+                attempt_id: "attempt_1".into(),
+                policy: ToolIdempotencyPolicy::AlwaysRefresh,
+                pre_state_epoch: 0,
+                post_state_epoch: 0,
+                is_error: true,
+                was_denied: false,
+                verification_status: "Failed".into(),
+            },
+        );
+        // Same (step_1, attempt_1) -> CachedHit with is_error = true
+        assert!(matches!(
+            retry_ledger.evaluate_idempotency(
+                ToolIdempotencyPolicy::AlwaysRefresh,
+                Some("step_1"),
+                "attempt_1",
+                "network.status",
+                read_args
+            ),
+            IdempotencyDecision::CachedHit { record, .. } if record.is_error()
+        ));
+        // 1st retry (step_1, attempt_2) on transient read error -> Proceed!
+        assert!(matches!(
+            retry_ledger.evaluate_idempotency(
+                ToolIdempotencyPolicy::AlwaysRefresh,
+                Some("step_1"),
+                "attempt_2",
+                "network.status",
+                read_args
+            ),
+            IdempotencyDecision::Proceed
+        ));
+        // Record 2nd failure on attempt_2 -> attempt_3 must now be blocked!
+        let k_a2 = retry_ledger.compute_step_idempotency_key(
+            ToolIdempotencyPolicy::AlwaysRefresh,
+            "step_1",
+            "attempt_2",
+            "network.status",
+            read_args,
+            0,
+        );
+        retry_ledger.record_step_with_meta(
+            StepExecutionRecord {
+                step_id: "step_1".into(),
+                idempotency_key: k_a2,
+                capability_id: "network.status".into(),
+                canonical_args_json: read_args.into(),
+                effect: Effect::Observe,
+                mutated_state: false,
+                succeeded: false,
+                changeset_id: None,
+                verification_status: "Failed".into(),
+                cached_output: json!({ "error": "transient dbus timeout 2" }),
+            },
+            StepExecutionMeta {
+                step_id: "step_1".into(),
+                call_id: "c1_r1".into(),
+                attempt_id: "attempt_2".into(),
+                policy: ToolIdempotencyPolicy::AlwaysRefresh,
+                pre_state_epoch: 0,
+                post_state_epoch: 0,
+                is_error: true,
+                was_denied: false,
+                verification_status: "Failed".into(),
+            },
+        );
+        assert!(matches!(
+            retry_ledger.evaluate_idempotency(
+                ToolIdempotencyPolicy::AlwaysRefresh,
+                Some("step_1"),
+                "attempt_3",
+                "network.status",
+                read_args
+            ),
+            IdempotencyDecision::CachedHit {
+                record,
+                reason: "read_retry_exhausted",
+                ..
+            } if record.is_error()
+        ));
+    }
+
+    #[test]
+    fn h02_json_key_order_and_path_normalization_invariance() {
+        let ledger = TurnEffectLedger::new("turn_h02_canon");
+        let a = json!({
+            "b": 1,
+            "nested": { "z": true, "a": [1, 2] },
+            "path": "/tmp/ws/./sub/../notes//report.md/",
+            "step_id": "untrusted_model_spoof_1"
+        });
+        let b = json!({
+            "path": "/tmp/ws/notes/report.md",
+            "nested": { "a": [1, 2], "z": true },
+            "b": 1,
+            "_step_id": "untrusted_model_spoof_2"
+        });
+
+        let ca = canonicalize_json_for_dedup(&a);
+        let cb = canonicalize_json_for_dedup(&b);
+        assert_eq!(ca, cb);
+        assert!(!ca.contains("untrusted_model_spoof"));
+
+        let ka = ledger.compute_idempotency_key("file.write", &a.to_string());
+        let kb = ledger.compute_idempotency_key("file.write", &b.to_string());
+        assert_eq!(ka, kb);
+
+        // URLs must NOT have `https://` mangled by path normalization
+        let url_args = json!({ "target": "https://example.com/a//b" });
+        assert!(canonicalize_json_for_dedup(&url_args).contains("https://example.com/a//b"));
     }
 }
