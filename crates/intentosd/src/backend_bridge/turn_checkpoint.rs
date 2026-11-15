@@ -13,21 +13,28 @@
 //!    OpenAI HTTP, Anthropic HTTP, and Controlled CLI backends when `CapabilityBroker` issues `PendingApproval`.
 
 use crate::backend_bridge::broker_bridge::{
-    BackendExecutionMode, TraceDot, record_approved_step_into_ledger,
+    BackendExecutionMode, TraceDot, extract_approval_grant_target,
+    record_approved_step_into_ledger, supplement_approved_dir_file_search,
 };
 use crate::backend_bridge::detector::{
-    ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, scrub_json_secrets,
+    ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, lookup_ephemeral_backend_key,
+    scrub_json_secrets,
 };
 use crate::backend_bridge::providers_cli::continue_resumed_cli_turn;
 use crate::backend_bridge::providers_http::{
     continue_resumed_anthropic_turn, continue_resumed_openai_turn,
 };
+use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
+pub use crate::db::StepExecState;
+use crate::db::{StateDb, StepExecutionLogRow, SuspendedCheckpointRow};
 use crate::runtime::SessionState;
-use crate::security_guard::PrivacySessionPolicy;
+use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard, UnifiedTaskStateMachine};
+use chrono::{DateTime, Utc};
 use intentos_protocol::{
-    ContextBlock, DataClass, Effect, ExecutionStatus, PendingApproval, ProviderTrust, Taint,
-    TaskStep,
+    CapabilityCall, ChatMessage, ContextBlock, DataClass, Effect, ExecutionStatus,
+    InvocationOrigin, PendingApproval, PolicyDecision, ProviderTrust, RouteLayer, Taint, Task,
+    TaskBudget, TaskStatus, TaskStep, TaskTrigger,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -315,6 +322,10 @@ impl StepInvocationContext {
     }
 }
 
+fn default_step_exec_state() -> StepExecState {
+    StepExecState::Verified
+}
+
 /// Rich per-step metadata tracked alongside `StepExecutionRecord` inside `TurnEffectLedger`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepExecutionMeta {
@@ -324,9 +335,13 @@ pub struct StepExecutionMeta {
     pub policy: ToolIdempotencyPolicy,
     pub pre_state_epoch: u64,
     pub post_state_epoch: u64,
+    #[serde(default = "default_step_exec_state")]
+    pub exec_state: StepExecState,
     pub is_error: bool,
     pub was_denied: bool,
     pub verification_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
 }
 
 /// Immutable execution ledger entry for a single tool step within a turn.
@@ -393,20 +408,33 @@ pub struct TurnEffectLedger {
     #[serde(skip)]
     by_idempotency_key: HashMap<String, usize>,
 
+    #[serde(default)]
+    privacy: PrivacySessionPolicy,
+    #[serde(default)]
+    privacy_explicit: bool,
+    #[serde(default)]
+    bound_task_id: Option<String>,
+    #[serde(default)]
+    bound_session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) pending_approval_step_id: Option<String>,
+    #[serde(skip)]
+    state_db: Option<Arc<StateDb>>,
+
     // Runtime progress buffers preserved across mid-turn backend failures and checkpoints:
-    #[serde(skip)]
+    #[serde(default)]
     pub trace_dots: Vec<TraceDot>,
-    #[serde(skip)]
+    #[serde(default)]
     pub adapter_actions: Vec<Value>,
-    #[serde(skip)]
+    #[serde(default)]
     pub tool_steps_json: Vec<Value>,
-    #[serde(skip)]
+    #[serde(default)]
     pub task_steps: Vec<TaskStep>,
-    #[serde(skip)]
+    #[serde(default)]
     pub changeset_ids: Vec<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub accumulated_thoughts: Vec<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub last_resource_path: Option<String>,
 }
 
@@ -419,6 +447,12 @@ impl TurnEffectLedger {
             records: Vec::new(),
             step_metadata: Vec::new(),
             by_idempotency_key: HashMap::new(),
+            privacy: PrivacySessionPolicy::Standard,
+            privacy_explicit: false,
+            bound_task_id: None,
+            bound_session_id: None,
+            pending_approval_step_id: None,
+            state_db: None,
             trace_dots: Vec::new(),
             adapter_actions: Vec::new(),
             tool_steps_json: Vec::new(),
@@ -426,6 +460,74 @@ impl TurnEffectLedger {
             changeset_ids: Vec::new(),
             accumulated_thoughts: Vec::new(),
             last_resource_path: None,
+        }
+    }
+
+    pub fn with_privacy(mut self, privacy: PrivacySessionPolicy) -> Self {
+        self.privacy = privacy;
+        self.privacy_explicit = true;
+        self
+    }
+
+    pub fn set_privacy(&mut self, privacy: PrivacySessionPolicy) {
+        self.privacy = privacy;
+        self.privacy_explicit = true;
+    }
+
+    pub fn privacy(&self) -> PrivacySessionPolicy {
+        self.privacy
+    }
+
+    /// Explicitly bind SQLite `StateDb`, `task_id`, `session_id`, and `PrivacySessionPolicy`
+    /// onto this ledger (`H03` / `H05` / `H06`).
+    pub fn bind_persistence(
+        &mut self,
+        state_db: Arc<StateDb>,
+        task_id: impl Into<String>,
+        session_id: impl Into<String>,
+        privacy: PrivacySessionPolicy,
+    ) {
+        self.state_db = Some(state_db);
+        self.bound_task_id = Some(task_id.into());
+        self.bound_session_id = Some(session_id.into());
+        self.privacy = privacy;
+        self.privacy_explicit = true;
+    }
+
+    /// Ensure `state_db`, `task_id`, and `session_id` are attached, applying `fallback_privacy`
+    /// only when no explicit `PrivacySessionPolicy` was set via `set_privacy` / `bind_persistence`.
+    pub fn ensure_persistence_context(
+        &mut self,
+        state_db: Arc<StateDb>,
+        task_id: &str,
+        session_id: &str,
+        fallback_privacy: PrivacySessionPolicy,
+    ) {
+        self.state_db = Some(state_db);
+        self.bound_task_id = Some(task_id.to_string());
+        self.bound_session_id = Some(session_id.to_string());
+        if !self.privacy_explicit {
+            self.privacy = fallback_privacy;
+        }
+    }
+
+    pub fn state_db(&self) -> Option<&Arc<StateDb>> {
+        self.state_db.as_ref()
+    }
+
+    pub fn bound_task_id(&self) -> Option<&str> {
+        self.bound_task_id.as_deref()
+    }
+
+    pub fn bound_session_id(&self) -> Option<&str> {
+        self.bound_session_id.as_deref()
+    }
+
+    pub fn rebuild_indexes(&mut self) {
+        self.by_idempotency_key.clear();
+        for (idx, rec) in self.records.iter().enumerate() {
+            self.by_idempotency_key
+                .insert(rec.idempotency_key.clone(), idx);
         }
     }
 
@@ -564,6 +666,13 @@ impl TurnEffectLedger {
                         record: last_rec,
                         meta: last_meta,
                         reason: "step_policy_denied",
+                    };
+                }
+                if last_meta.is_some_and(|m| m.exec_state.is_uncertain_or_recovery()) {
+                    return IdempotencyDecision::CachedHit {
+                        record: last_rec,
+                        meta: last_meta,
+                        reason: "uncertain_side_effect_halt",
                     };
                 }
 
@@ -734,6 +843,26 @@ impl TurnEffectLedger {
         } else {
             ToolIdempotencyPolicy::IdempotentMutation
         };
+        let exec_state = if record.was_denied() {
+            StepExecState::Denied
+        } else if record.succeeded {
+            if record
+                .verification_status
+                .eq_ignore_ascii_case("requestedunverified")
+            {
+                StepExecState::Applied
+            } else {
+                StepExecState::Verified
+            }
+        } else if record.effect > Effect::Observe
+            && record
+                .verification_status
+                .eq_ignore_ascii_case("verificationfailed")
+        {
+            StepExecState::Unknown
+        } else {
+            StepExecState::FailedClean
+        };
         let meta = StepExecutionMeta {
             step_id: record.step_id.clone(),
             call_id: record.step_id.clone(),
@@ -741,9 +870,11 @@ impl TurnEffectLedger {
             policy: default_policy,
             pre_state_epoch: pre_epoch,
             post_state_epoch: post_epoch,
+            exec_state,
             is_error: record.is_error(),
             was_denied: record.was_denied(),
             verification_status: record.verification_status.clone(),
+            recovery_hint: None,
         };
         self.record_step_with_meta(record, meta);
     }
@@ -760,9 +891,33 @@ impl TurnEffectLedger {
         }
     }
 
-    /// Returns `true` if ANY step with `effect > Effect::Observe` has already executed and committed!
-    pub fn has_committed_side_effects(&self) -> bool {
+    /// Returns `true` if ANY mutating step entered `Executing` and finished in an unconfirmed/failed
+    /// side-effect state (`Executing`, `Unknown`, or `RecoveryRequired`).
+    pub fn has_uncertain_side_effects(&self) -> bool {
+        self.step_metadata
+            .iter()
+            .zip(self.records.iter())
+            .any(|(m, r)| r.effect > Effect::Observe && m.exec_state.is_uncertain_or_recovery())
+    }
+
+    /// Returns `true` if ANY step with `effect > Effect::Observe` either committed (`Verified` / `Applied`)
+    /// OR entered an uncertain side-effect state (`Executing` / `Unknown` / `RecoveryRequired`)!
+    pub fn has_uncertain_or_committed_side_effects(&self) -> bool {
         self.records.iter().any(|r| r.mutated_state)
+            || self
+                .step_metadata
+                .iter()
+                .zip(self.records.iter())
+                .any(|(m, r)| {
+                    r.effect > Effect::Observe
+                        && m.exec_state.has_potential_or_committed_side_effect()
+                })
+    }
+
+    /// Returns `true` if ANY step with `effect > Effect::Observe` has committed OR entered an uncertain
+    /// side-effect state (preventing whole-turn fallback replay across `turn_engine` and `runtime`).
+    pub fn has_committed_side_effects(&self) -> bool {
+        self.has_uncertain_or_committed_side_effects()
     }
 
     /// Returns all committed `changeset_id`s recorded in this turn (preserving execution order).
@@ -795,9 +950,12 @@ impl TurnEffectLedger {
     pub fn summary_json(&self) -> Value {
         json!({
             "turn_id": self.turn_id,
+            "privacy": self.privacy,
             "state_epoch": self.state_epoch,
             "total_steps": self.records.len(),
             "mutated_steps": self.records.iter().filter(|r| r.mutated_state).count(),
+            "has_uncertain_side_effects": self.has_uncertain_side_effects(),
+            "has_uncertain_or_committed_side_effects": self.has_uncertain_or_committed_side_effects(),
             "has_committed_side_effects": self.has_committed_side_effects(),
             "committed_changeset_ids": self.committed_changeset_ids(),
             "steps": self.records,
@@ -1685,6 +1843,295 @@ pub struct SuspendedTurnCheckpoint {
     pub dialect: SuspendedDialectState,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistedSessionStateDto {
+    session_id: String,
+    messages: Vec<ChatMessage>,
+    last_resource_path: Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<&SessionState> for PersistedSessionStateDto {
+    fn from(s: &SessionState) -> Self {
+        Self {
+            session_id: s.session_id.clone(),
+            messages: s.messages.clone(),
+            last_resource_path: s.last_resource_path.clone(),
+            updated_at: s.updated_at,
+        }
+    }
+}
+
+impl From<PersistedSessionStateDto> for SessionState {
+    fn from(dto: PersistedSessionStateDto) -> Self {
+        Self {
+            session_id: dto.session_id,
+            messages: dto.messages,
+            last_resource_path: dto.last_resource_path,
+            updated_at: dto.updated_at,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedDiscoveryOptionsDto {
+    home_dir: PathBuf,
+    extra_bin_dirs: Vec<PathBuf>,
+    include_system_paths: bool,
+    opt_zcode_cjs: Option<PathBuf>,
+    ollama_tags_url: Option<String>,
+    ollama_timeout_ms: u64,
+    allow_env_keys: bool,
+    probe_remote_models: bool,
+    force_refresh_models: bool,
+}
+
+impl From<&DiscoveryOptions> for PersistedDiscoveryOptionsDto {
+    fn from(o: &DiscoveryOptions) -> Self {
+        Self {
+            home_dir: o.home_dir.clone(),
+            extra_bin_dirs: o.extra_bin_dirs.clone(),
+            include_system_paths: o.include_system_paths,
+            opt_zcode_cjs: o.opt_zcode_cjs.clone(),
+            ollama_tags_url: o.ollama_tags_url.clone(),
+            ollama_timeout_ms: o.ollama_timeout_ms,
+            allow_env_keys: o.allow_env_keys,
+            probe_remote_models: o.probe_remote_models,
+            force_refresh_models: o.force_refresh_models,
+        }
+    }
+}
+
+impl From<PersistedDiscoveryOptionsDto> for DiscoveryOptions {
+    fn from(dto: PersistedDiscoveryOptionsDto) -> Self {
+        Self {
+            home_dir: dto.home_dir,
+            extra_bin_dirs: dto.extra_bin_dirs,
+            include_system_paths: dto.include_system_paths,
+            opt_zcode_cjs: dto.opt_zcode_cjs,
+            ollama_tags_url: dto.ollama_tags_url,
+            ollama_timeout_ms: dto.ollama_timeout_ms,
+            allow_env_keys: dto.allow_env_keys,
+            probe_remote_models: dto.probe_remote_models,
+            force_refresh_models: dto.force_refresh_models,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PersistedDialectStateDto {
+    OpenAi {
+        messages: Vec<Value>,
+        tools: Vec<Value>,
+    },
+    Anthropic {
+        base_url: String,
+        trust: ProviderTrust,
+        messages: Vec<Value>,
+        prior_tool_results: Vec<Value>,
+        tools: Vec<Value>,
+    },
+    Cli {
+        disc: DiscoveredBackend,
+        transcript_history: Vec<String>,
+        prior_round_tool_results: Vec<String>,
+        allow_broker_tools: bool,
+    },
+}
+
+impl From<&SuspendedDialectState> for PersistedDialectStateDto {
+    fn from(d: &SuspendedDialectState) -> Self {
+        match d {
+            SuspendedDialectState::OpenAi { messages, tools } => Self::OpenAi {
+                messages: messages.clone(),
+                tools: tools.clone(),
+            },
+            SuspendedDialectState::Anthropic {
+                base_url,
+                trust,
+                messages,
+                prior_tool_results,
+                tools,
+                ..
+            } => Self::Anthropic {
+                base_url: base_url.clone(),
+                trust: *trust,
+                messages: messages.clone(),
+                prior_tool_results: prior_tool_results.clone(),
+                tools: tools.clone(),
+            },
+            SuspendedDialectState::Cli {
+                disc,
+                transcript_history,
+                prior_round_tool_results,
+                allow_broker_tools,
+            } => Self::Cli {
+                disc: disc.clone(),
+                transcript_history: transcript_history.clone(),
+                prior_round_tool_results: prior_round_tool_results.clone(),
+                allow_broker_tools: *allow_broker_tools,
+            },
+        }
+    }
+}
+
+impl From<PersistedDialectStateDto> for SuspendedDialectState {
+    fn from(dto: PersistedDialectStateDto) -> Self {
+        match dto {
+            PersistedDialectStateDto::OpenAi { messages, tools } => {
+                Self::OpenAi { messages, tools }
+            }
+            PersistedDialectStateDto::Anthropic {
+                base_url,
+                trust,
+                messages,
+                prior_tool_results,
+                tools,
+            } => Self::Anthropic {
+                base_url,
+                api_key: None,
+                trust,
+                messages,
+                prior_tool_results,
+                tools,
+            },
+            PersistedDialectStateDto::Cli {
+                disc,
+                transcript_history,
+                prior_round_tool_results,
+                allow_broker_tools,
+            } => Self::Cli {
+                disc,
+                transcript_history,
+                prior_round_tool_results,
+                allow_broker_tools,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedCheckpointDto {
+    approval_id: String,
+    pending_approval: PendingApproval,
+    task_id: String,
+    session: PersistedSessionStateDto,
+    user_text: String,
+    incognito: bool,
+    active: ActiveBackendSelection,
+    discovery_opts: PersistedDiscoveryOptionsDto,
+    extra_blocks: Vec<ContextBlock>,
+    sys_text: String,
+    taints: Vec<Taint>,
+    data_class: DataClass,
+    memory_hits: Vec<Value>,
+    memory_dot: Option<TraceDot>,
+    context_compression: crate::memory_hub::ContextCompressionStats,
+    rounds_used: usize,
+    paused_call_id: String,
+    paused_canonical_tool: String,
+    paused_parsed_args: Value,
+    remaining_tool_calls: Vec<(String, String, Value)>,
+    effect_ledger: TurnEffectLedger,
+    dialect: PersistedDialectStateDto,
+}
+
+impl PersistedCheckpointDto {
+    fn from_checkpoint(cp: &SuspendedTurnCheckpoint) -> Self {
+        Self {
+            approval_id: cp.approval_id.clone(),
+            pending_approval: cp.pending_approval.clone(),
+            task_id: cp.task_id.clone(),
+            session: PersistedSessionStateDto::from(&cp.session),
+            user_text: cp.user_text.clone(),
+            incognito: cp.incognito,
+            active: cp.active.clone(),
+            discovery_opts: PersistedDiscoveryOptionsDto::from(&cp.discovery_opts),
+            extra_blocks: cp.extra_blocks.clone(),
+            sys_text: cp.sys_text.clone(),
+            taints: cp.taints.clone(),
+            data_class: cp.data_class,
+            memory_hits: cp.memory_hits.clone(),
+            memory_dot: cp.memory_dot.clone(),
+            context_compression: cp.context_compression.clone(),
+            rounds_used: cp.rounds_used,
+            paused_call_id: cp.paused_call_id.clone(),
+            paused_canonical_tool: cp.paused_canonical_tool.clone(),
+            paused_parsed_args: cp.paused_parsed_args.clone(),
+            remaining_tool_calls: cp.remaining_tool_calls.clone(),
+            effect_ledger: cp.effect_ledger.clone(),
+            dialect: PersistedDialectStateDto::from(&cp.dialect),
+        }
+    }
+
+    fn into_checkpoint(mut self) -> SuspendedTurnCheckpoint {
+        self.effect_ledger.rebuild_indexes();
+        SuspendedTurnCheckpoint {
+            created_at_instant: Instant::now(),
+            approval_id: self.approval_id,
+            pending_approval: self.pending_approval,
+            task_id: self.task_id,
+            session: SessionState::from(self.session),
+            user_text: self.user_text,
+            incognito: self.incognito,
+            active: self.active,
+            discovery_opts: DiscoveryOptions::from(self.discovery_opts),
+            extra_blocks: self.extra_blocks,
+            sys_text: self.sys_text,
+            taints: self.taints,
+            data_class: self.data_class,
+            memory_hits: self.memory_hits,
+            memory_dot: self.memory_dot,
+            context_compression: self.context_compression,
+            rounds_used: self.rounds_used,
+            paused_call_id: self.paused_call_id,
+            paused_canonical_tool: self.paused_canonical_tool,
+            paused_parsed_args: self.paused_parsed_args,
+            remaining_tool_calls: self.remaining_tool_calls,
+            effect_ledger: self.effect_ledger,
+            dialect: SuspendedDialectState::from(self.dialect),
+        }
+    }
+}
+
+/// Derive canonical `scope_kind:scope_value` bound to a `PendingApproval` for checkpoint verification.
+pub fn compute_checkpoint_target_scope(pa: &PendingApproval) -> String {
+    if let Some((kind, val)) = extract_approval_grant_target(None, None, Some(pa)) {
+        format!("{}:{}", kind, val)
+    } else {
+        format!("capability:{}", pa.capability_id)
+    }
+}
+
+fn persist_checkpoint_to_db(
+    state_db: &StateDb,
+    cp: &SuspendedTurnCheckpoint,
+    privacy: PrivacySessionPolicy,
+) -> anyhow::Result<bool> {
+    if !privacy.allows_task_persistence() || cp.incognito {
+        return Ok(false);
+    }
+    let dto = PersistedCheckpointDto::from_checkpoint(cp);
+    let mut dto_val = serde_json::to_value(&dto)?;
+    SensitiveDataGuard::redact_json(&mut dto_val);
+    let checkpoint_json = serde_json::to_string(&dto_val)?;
+
+    let row = SuspendedCheckpointRow {
+        approval_id: cp.pending_approval.approval_id.clone(),
+        turn_id: cp.effect_ledger.turn_id.clone(),
+        task_id: cp.task_id.clone(),
+        session_id: cp.session.session_id.clone(),
+        approval_digest: cp.pending_approval.digest.clone(),
+        capability_id: cp.pending_approval.capability_id.clone(),
+        target_scope: compute_checkpoint_target_scope(&cp.pending_approval),
+        checkpoint_json,
+        expires_at: cp.pending_approval.expires_at,
+        created_at: cp.pending_approval.created_at,
+    };
+    state_db.save_suspended_checkpoint_row(&row, privacy)
+}
+
 pub(crate) static SUSPENDED_APPROVAL_TURNS: OnceLock<
     Mutex<HashMap<String, SuspendedTurnCheckpoint>>,
 > = OnceLock::new();
@@ -1693,7 +2140,7 @@ fn suspended_approval_turns() -> &'static Mutex<HashMap<String, SuspendedTurnChe
     SUSPENDED_APPROVAL_TURNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn save_suspended_checkpoint(cp: SuspendedTurnCheckpoint) {
+fn insert_in_memory_suspended_checkpoint(cp: SuspendedTurnCheckpoint) {
     let mut map = suspended_approval_turns().lock().unwrap();
     let now = Instant::now();
     map.retain(|_, v| now.duration_since(v.created_at_instant) <= SUSPENDED_CHECKPOINT_TTL);
@@ -1710,11 +2157,649 @@ pub(crate) fn save_suspended_checkpoint(cp: SuspendedTurnCheckpoint) {
     map.insert(cp.pending_approval.approval_id.clone(), cp);
 }
 
-pub(crate) fn take_suspended_checkpoint(approval_id: &str) -> Option<SuspendedTurnCheckpoint> {
-    let mut map = suspended_approval_turns().lock().unwrap();
-    let now = Instant::now();
-    map.retain(|_, v| now.duration_since(v.created_at_instant) <= SUSPENDED_CHECKPOINT_TTL);
-    map.remove(approval_id)
+/// Explicitly save a `SuspendedTurnCheckpoint` to both in-memory registry and (when `privacy == Standard`)
+/// `StateDb` (`suspended_turn_checkpoints`), returning `Ok(true)` if persisted to SQLite or `Ok(false)`
+/// when `EphemeralReadOnly` / `StrictIsolated` kept it strictly in-memory.
+pub fn save_suspended_checkpoint_with_db(
+    state_db: &StateDb,
+    mut cp: SuspendedTurnCheckpoint,
+    privacy: PrivacySessionPolicy,
+) -> anyhow::Result<bool> {
+    cp.effect_ledger.set_privacy(privacy);
+    let persisted = persist_checkpoint_to_db(state_db, &cp, privacy)?;
+    insert_in_memory_suspended_checkpoint(cp);
+    Ok(persisted)
+}
+
+pub fn save_suspended_checkpoint(cp: SuspendedTurnCheckpoint) {
+    let effective_privacy = if cp.incognito {
+        PrivacySessionPolicy::StrictIsolated
+    } else if cp.effect_ledger.privacy_explicit {
+        cp.effect_ledger.privacy()
+    } else {
+        PrivacySessionPolicy::from_session(cp.incognito, Some(&cp.session.session_id))
+    };
+    if let Some(db) = cp.effect_ledger.state_db().cloned() {
+        let _ = persist_checkpoint_to_db(&db, &cp, effective_privacy);
+    }
+    insert_in_memory_suspended_checkpoint(cp);
+}
+
+pub fn take_suspended_checkpoint(approval_id: &str) -> Option<SuspendedTurnCheckpoint> {
+    let removed = {
+        let mut map = suspended_approval_turns().lock().unwrap();
+        let now = Instant::now();
+        map.retain(|_, v| now.duration_since(v.created_at_instant) <= SUSPENDED_CHECKPOINT_TTL);
+        map.remove(approval_id)
+    };
+    if let Some(ref cp) = removed
+        && let Some(db) = cp.effect_ledger.state_db()
+    {
+        let _ = db.delete_suspended_checkpoint_row(approval_id);
+    }
+    removed
+}
+
+/// Clear in-memory suspended approval checkpoints (used in daemon restart simulation tests).
+pub fn clear_in_memory_suspended_checkpoints() {
+    suspended_approval_turns().lock().unwrap().clear();
+}
+
+fn expand_tilde_checkpoint_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(trimmed)
+}
+
+fn collect_json_path_candidates(args: &Value) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Some(obj) = args.as_object() else {
+        return out;
+    };
+    for (k, v) in obj {
+        if is_path_argument_key(k)
+            && let Some(s) = v.as_str()
+            && !s.trim().is_empty()
+        {
+            out.push(expand_tilde_checkpoint_path(s));
+        } else if is_path_array_argument_key(k)
+            && let Some(arr) = v.as_array()
+        {
+            for item in arr {
+                if let Some(s) = item.as_str()
+                    && !s.trim().is_empty()
+                {
+                    out.push(expand_tilde_checkpoint_path(s));
+                }
+            }
+        } else if k == "params"
+            && let Some(pobj) = v.as_object()
+        {
+            for (pk, pv) in pobj {
+                if is_path_argument_key(pk)
+                    && let Some(s) = pv.as_str()
+                    && !s.trim().is_empty()
+                {
+                    out.push(expand_tilde_checkpoint_path(s));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn approve_non_forbidden_paths_for_resume(core: &IntentOsCore, args: &Value) {
+    for expanded in collect_json_path_candidates(args) {
+        if !expanded
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+            && !core.fs_engine.is_forbidden(&expanded)
+        {
+            let _ = core.fs_engine.approve_path_scope(&expanded);
+        }
+    }
+}
+
+/// Strictly re-verify `SafeFsEngine` forbidden/traversal invariants and `PolicyEngine::evaluate`
+/// scope rules on a reloaded `SuspendedTurnCheckpoint` before resuming across a restart (`H03`).
+pub fn verify_checkpoint_policy_scope(
+    core: &IntentOsCore,
+    cp: &SuspendedTurnCheckpoint,
+) -> anyhow::Result<()> {
+    for candidate in collect_json_path_candidates(&cp.pending_approval.arguments)
+        .into_iter()
+        .chain(collect_json_path_candidates(&cp.paused_parsed_args))
+    {
+        if candidate
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            anyhow::bail!(
+                "拒绝恢复包含路径穿越 ('..') 的持久化审批检查点: {}",
+                candidate.display()
+            );
+        }
+        if core.fs_engine.is_forbidden(&candidate) {
+            anyhow::bail!(
+                "拒绝恢复指向受禁路径 (forbidden path) 的审批检查点: {}",
+                candidate.display()
+            );
+        }
+    }
+
+    if !crate::app_adapter::is_adapter_tool(&cp.pending_approval.capability_id) {
+        let desc = core
+            .broker
+            .get_descriptor(&cp.pending_approval.capability_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "无法恢复未知或已移除的能力: {}",
+                    cp.pending_approval.capability_id
+                )
+            })?;
+        if let PolicyDecision::Deny { reason } = core.policy.evaluate(
+            desc,
+            &cp.pending_approval.arguments,
+            InvocationOrigin::L2AgentPlan,
+            &cp.taints,
+            1,
+            true,
+        ) {
+            anyhow::bail!("重启后安全策略重校验拒绝恢复: {}", reason);
+        }
+    }
+    Ok(())
+}
+
+fn canonical_args_without_injected_session(cap_id: &str, v: &Value) -> String {
+    if crate::memory_hub::is_memory_tool(cap_id)
+        && let Some(obj) = v.as_object()
+    {
+        let mut copy = obj.clone();
+        copy.remove("session_id");
+        return canonicalize_tool_args_value(&Value::Object(copy));
+    }
+    canonicalize_tool_args_value(v)
+}
+
+/// Reload a `SuspendedTurnCheckpoint` from `StateDb` across daemon restart, strictly re-verifying:
+/// 1. Non-expired `expires_at` timestamp;
+/// 2. Exact `session_id` match;
+/// 3. Exact `approval_digest` match AND cryptographic recomputation of `PendingApproval::compute_digest`;
+/// 4. Consistency between `paused_parsed_args`, `pending_approval.arguments`, and `target_scope`
+///    (plus optional caller-supplied `(scope_kind, scope_value)` match);
+/// 5. Current `PolicyEngine` + `SafeFsEngine` scope rules (`verify_checkpoint_policy_scope`).
+///
+/// Consumes (deletes) the persisted row upon successful verification so it can never be replayed.
+pub fn load_and_verify_persisted_checkpoint(
+    core: &IntentOsCore,
+    approval_id: &str,
+    expected_session_id: &str,
+    expected_digest: &str,
+    requested_scope: Option<(&str, &str)>,
+) -> anyhow::Result<SuspendedTurnCheckpoint> {
+    let row = core
+        .state_db
+        .get_suspended_checkpoint_row(approval_id)?
+        .ok_or_else(|| anyhow::anyhow!("持久化审批检查点不存在或已被消费（拒绝重放）"))?;
+
+    if Utc::now() > row.expires_at {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        anyhow::bail!("持久化审批检查点已过期");
+    }
+
+    let clean_expected_sid = expected_session_id.trim();
+    if clean_expected_sid.is_empty() || row.session_id != clean_expected_sid {
+        anyhow::bail!("持久化审批检查点会话校验失败：session_id 不匹配（拒绝跨会话恢复）");
+    }
+
+    let clean_expected_digest = expected_digest.trim();
+    if clean_expected_digest.is_empty() || row.approval_digest != clean_expected_digest {
+        anyhow::bail!("持久化审批检查点摘要校验失败：approval_digest 不匹配");
+    }
+
+    let dto: PersistedCheckpointDto = serde_json::from_str(&row.checkpoint_json)
+        .map_err(|e| anyhow::anyhow!("反序列化持久化审批检查点失败: {}", e))?;
+    let mut cp = dto.into_checkpoint();
+
+    if cp.pending_approval.approval_id != approval_id
+        || cp.session.session_id != row.session_id
+        || cp.task_id != row.task_id
+        || cp.pending_approval.capability_id != row.capability_id
+        || cp.pending_approval.digest != row.approval_digest
+    {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        anyhow::bail!("持久化审批检查点元数据绑定不一致（检测到篡改）");
+    }
+
+    let recomputed_digest = PendingApproval::compute_digest(
+        &cp.pending_approval.capability_id,
+        &cp.pending_approval.arguments,
+    );
+    if recomputed_digest != row.approval_digest {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        anyhow::bail!("持久化审批检查点参数摘要重算不一致（参数已被脱敏改写或篡改）");
+    }
+
+    let canon_pa_args = canonical_args_without_injected_session(
+        &cp.pending_approval.capability_id,
+        &cp.pending_approval.arguments,
+    );
+    let canon_paused_args = canonical_args_without_injected_session(
+        &cp.pending_approval.capability_id,
+        &cp.paused_parsed_args,
+    );
+    if canon_pa_args != canon_paused_args {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        anyhow::bail!("持久化审批检查点 paused_parsed_args 与授权参数不一致");
+    }
+
+    let recomputed_scope = compute_checkpoint_target_scope(&cp.pending_approval);
+    if recomputed_scope != row.target_scope {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        anyhow::bail!(
+            "持久化审批检查点 target_scope 校验失败（期望 '{}', 实际 '{}'）",
+            recomputed_scope,
+            row.target_scope
+        );
+    }
+
+    if let Some((req_kind, req_val)) = requested_scope {
+        let normalized_req = extract_approval_grant_target(
+            Some(req_kind),
+            Some(req_val),
+            Some(&cp.pending_approval),
+        )
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .unwrap_or_default();
+        if normalized_req != row.target_scope {
+            anyhow::bail!(
+                "请求的授权作用域 '{}' 与持久化检查点绑定作用域 '{}' 不一致（拒绝越权恢复）",
+                normalized_req,
+                row.target_scope
+            );
+        }
+    }
+
+    if let Err(policy_err) = verify_checkpoint_policy_scope(core, &cp) {
+        let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
+        return Err(policy_err);
+    }
+
+    cp.effect_ledger.bind_persistence(
+        core.state_db.clone(),
+        cp.task_id.clone(),
+        cp.session.session_id.clone(),
+        PrivacySessionPolicy::Standard,
+    );
+
+    core.state_db.delete_suspended_checkpoint_row(approval_id)?;
+    Ok(cp)
+}
+
+/// Resume (or deny) a persisted `SuspendedTurnCheckpoint` across a daemon restart (`H03`).
+///
+/// Strictly re-verifies `session_id`, `approval_digest` (`digest`), optional `nonce`,
+/// non-expired `expires_at`, `target_scope`, and `PolicyEngine` scope before executing!
+pub async fn resume_persisted_checkpoint_across_restart(
+    core: &IntentOsCore,
+    payload: &Value,
+    opts: &DiscoveryOptions,
+) -> anyhow::Result<Value> {
+    let approval_id = payload
+        .get("approval_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("resume_persisted_checkpoint 缺少 approval_id"))?
+        .to_string();
+
+    let raw_decision = payload
+        .get("decision")
+        .or_else(|| payload.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("once")
+        .trim()
+        .to_ascii_lowercase();
+    let decision = match raw_decision.as_str() {
+        "approve" | "once" => "once",
+        "session" => "session",
+        "scope" => "scope",
+        "deny" | "reject" | "cancel" => "deny",
+        other => anyhow::bail!(
+            "不支持的审批决策 '{}'（仅支持 once / session / scope / deny）",
+            other
+        ),
+    };
+
+    let req_session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let req_digest = payload
+        .get("digest")
+        .or_else(|| payload.get("approval_digest"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let req_nonce = payload
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let req_scope_kind = payload
+        .get("scope_kind")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let req_scope_value = payload
+        .get("scope_value")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let ttl_minutes = payload
+        .get("ttl_minutes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(60)
+        .clamp(1, 24 * 60);
+
+    let resume_turn_id = format!(
+        "resume_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+
+    if decision == "deny" {
+        let row = core
+            .state_db
+            .get_suspended_checkpoint_row(&approval_id)?
+            .ok_or_else(|| anyhow::anyhow!("持久化审批检查点不存在或已被消费"))?;
+        if !req_session_id.is_empty() && row.session_id != req_session_id {
+            anyhow::bail!("拒绝操作会话标识不匹配");
+        }
+        let dto: Option<PersistedCheckpointDto> = serde_json::from_str(&row.checkpoint_json).ok();
+        let cp = dto.map(|d| d.into_checkpoint());
+        let pa_ref = cp.as_ref().map(|c| c.pending_approval.clone());
+        let _ = core.state_db.delete_suspended_checkpoint_row(&approval_id);
+        if let Some(ref c) = cp
+            && let Some(ref prep_step_id) = c.effect_ledger.pending_approval_step_id
+            && let Ok(Some(mut step_row)) = core
+                .state_db
+                .get_step_execution_log(&c.task_id, prep_step_id)
+        {
+            step_row.exec_state = StepExecState::Denied;
+            step_row.verification_status = "Denied".to_string();
+            step_row.updated_at = Utc::now();
+            let _ = core
+                .state_db
+                .upsert_step_execution_log(&step_row, PrivacySessionPolicy::Standard);
+        }
+        if let Ok(Some(mut task)) = core.state_db.get_task(&row.task_id) {
+            task.pending_approval = None;
+            task.status = TaskStatus::Cancelled;
+            task.updated_at = Utc::now();
+            let _ = core.state_db.upsert_task(&task);
+        }
+        return build_denied_resume_response(
+            core,
+            payload,
+            &approval_id,
+            &resume_turn_id,
+            pa_ref,
+            cp,
+        );
+    }
+
+    let requested_scope = match (req_scope_kind, req_scope_value) {
+        (Some(k), Some(v)) => Some((k, v)),
+        (None, Some(v)) => Some(("", v)),
+        _ => None,
+    };
+
+    let cp = load_and_verify_persisted_checkpoint(
+        core,
+        &approval_id,
+        req_session_id,
+        req_digest,
+        requested_scope,
+    )?;
+
+    if let Some(nonce) = req_nonce
+        && nonce != cp.pending_approval.nonce
+    {
+        anyhow::bail!("持久化审批检查点 nonce 校验失败（拒绝伪造）");
+    }
+
+    if core
+        .state_db
+        .task_has_uncertain_or_recovery_steps(&cp.task_id)?
+    {
+        anyhow::bail!(
+            "任务 '{}' 存在未确认副作用或处于 recovery_required 状态，已阻止自动恢复执行",
+            cp.task_id
+        );
+    }
+
+    if matches!(decision, "session" | "scope")
+        && let Some((sk, sv)) = extract_approval_grant_target(
+            req_scope_kind,
+            req_scope_value,
+            Some(&cp.pending_approval),
+        )
+    {
+        let grant_out = core.policy.add_session_grant(&sk, &sv, ttl_minutes);
+        if grant_out.get("rejected").and_then(|v| v.as_bool()) == Some(true) {
+            anyhow::bail!("会话授权作用域被安全策略拒绝: {}", sv);
+        }
+    }
+
+    // Transition step `Prepared -> Executing` in SQLite before running the approved OS action
+    let pa = cp.pending_approval.clone();
+    let cap_effect = core
+        .broker
+        .get_descriptor(&pa.capability_id)
+        .map(|d| d.max_effect())
+        .unwrap_or(Effect::WriteReversible);
+    let tracked_step_id = cp
+        .effect_ledger
+        .pending_approval_step_id
+        .clone()
+        .unwrap_or_else(|| format!("step_{}", cp.effect_ledger.next_step_seq + 1));
+    let now_exec = Utc::now();
+    if cap_effect > Effect::Observe {
+        let exec_row = StepExecutionLogRow {
+            task_id: cp.task_id.clone(),
+            turn_id: cp.effect_ledger.turn_id.clone(),
+            session_id: cp.session.session_id.clone(),
+            step_id: tracked_step_id.clone(),
+            attempt_id: "approved_attempt_1".to_string(),
+            idempotency_key: cp
+                .effect_ledger
+                .compute_idempotency_key(&pa.capability_id, &pa.arguments.to_string()),
+            capability_id: pa.capability_id.clone(),
+            effect: cap_effect.as_str().to_string(),
+            exec_state: StepExecState::Executing,
+            expected_summary: pa.summary.clone(),
+            changeset_id: None,
+            verification_status: "Executing".to_string(),
+            recovery_hint: None,
+            created_at: now_exec,
+            updated_at: now_exec,
+        };
+        core.state_db
+            .upsert_step_execution_log(&exec_row, PrivacySessionPolicy::Standard)?;
+    }
+
+    approve_non_forbidden_paths_for_resume(core, &pa.arguments);
+
+    let exec_res = if crate::app_adapter::is_adapter_tool(&pa.capability_id) {
+        let call = CapabilityCall {
+            request_id: pa.approval_id.clone(),
+            task_id: cp.task_id.clone(),
+            capability_id: pa.capability_id.clone(),
+            arguments: pa.arguments.clone(),
+            origin: InvocationOrigin::UserExplicit,
+            taints: vec![Taint::User],
+        };
+        match core.broker.dispatch(&call).await {
+            Ok(BrokerDispatchOutcome::Executed(r)) => Ok(r),
+            Ok(BrokerDispatchOutcome::Denied { reason }) => {
+                Err(anyhow::anyhow!("转译层执行被拒绝: {}", reason))
+            }
+            Ok(BrokerDispatchOutcome::RequiresApproval(_)) => {
+                Err(anyhow::anyhow!("转译层在已确认状态下仍请求重复确认"))
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        let desc = core
+            .broker
+            .get_descriptor(&pa.capability_id)
+            .ok_or_else(|| anyhow::anyhow!("未找到能力: {}", pa.capability_id))?;
+        core.broker
+            .execute_approved(&pa.approval_id, &cp.task_id, desc, &pa.arguments)
+            .await
+    };
+
+    let res = match exec_res {
+        Ok(r) => r,
+        Err(err) => {
+            if cap_effect > Effect::Observe {
+                let rec_row = StepExecutionLogRow {
+                    task_id: cp.task_id.clone(),
+                    turn_id: cp.effect_ledger.turn_id.clone(),
+                    session_id: cp.session.session_id.clone(),
+                    step_id: tracked_step_id,
+                    attempt_id: "approved_attempt_1".to_string(),
+                    idempotency_key: cp
+                        .effect_ledger
+                        .compute_idempotency_key(&pa.capability_id, &pa.arguments.to_string()),
+                    capability_id: pa.capability_id.clone(),
+                    effect: cap_effect.as_str().to_string(),
+                    exec_state: StepExecState::RecoveryRequired,
+                    expected_summary: pa.summary.clone(),
+                    changeset_id: None,
+                    verification_status: "ErrorDuringExecution".to_string(),
+                    recovery_hint: Some(format!(
+                        "已授权步骤执行期间返回错误 ({})，实际副作用未知；已标记为 recovery_required 并阻止盲目重放。",
+                        err
+                    )),
+                    created_at: now_exec,
+                    updated_at: Utc::now(),
+                };
+                let _ = core
+                    .state_db
+                    .upsert_step_execution_log(&rec_row, PrivacySessionPolicy::Standard);
+                if let Ok(Some(mut t)) = core.state_db.get_task(&cp.task_id) {
+                    t.pending_approval = None;
+                    t.status = TaskStatus::RecoveryRequired;
+                    t.updated_at = Utc::now();
+                    let _ = core.state_db.upsert_task(&t);
+                }
+            }
+            return Err(err);
+        }
+    };
+
+    let mut approved_changeset_ids = cp.effect_ledger.committed_changeset_ids();
+    if let Some(ref csid) = res.changeset_id
+        && !approved_changeset_ids.contains(csid)
+    {
+        approved_changeset_ids.push(csid.clone());
+    }
+
+    let mut step = TaskStep {
+        step_id: pa.approval_id.clone(),
+        capability_id: pa.capability_id.clone(),
+        arguments_summary: pa.arguments.to_string(),
+        status: res.status,
+        verification: res.verification,
+        changeset_id: res.changeset_id.clone(),
+        message: res.message.clone(),
+        data: res.data,
+        duration_ms: res.duration_ms,
+    };
+
+    if step.capability_id == "file.search" {
+        supplement_approved_dir_file_search(core, &pa.arguments, &mut step.message, &mut step.data);
+    }
+
+    // Update persisted Task in `StateDb` before continuing resumed model turn
+    let mut task_record = core
+        .state_db
+        .get_task(&cp.task_id)?
+        .unwrap_or_else(|| Task {
+            id: cp.task_id.clone(),
+            goal: cp.user_text.clone(),
+            session_id: Some(cp.session.session_id.clone()),
+            project_id: None,
+            trigger: TaskTrigger::Resume,
+            route: RouteLayer::L2,
+            status: TaskStatus::AwaitingApproval,
+            steps: Vec::new(),
+            changeset_ids: Vec::new(),
+            pending_approval: None,
+            candidates_for_disambiguation: Vec::new(),
+            assistant_message: None,
+            result_summary: None,
+            handoff_command: None,
+            taint: cp.taints.clone(),
+            data_class: cp.data_class,
+            budget: TaskBudget::default(),
+            created_at: now_exec,
+            updated_at: now_exec,
+        });
+    task_record.pending_approval = None;
+    let step_ok = matches!(
+        step.status,
+        ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
+    );
+    let next_task_status = if step_ok {
+        TaskStatus::Completed
+    } else if cap_effect > Effect::Observe {
+        TaskStatus::RecoveryRequired
+    } else {
+        TaskStatus::Failed
+    };
+    if UnifiedTaskStateMachine::can_transition(task_record.status, next_task_status) {
+        let _ = UnifiedTaskStateMachine::transition_task(&mut task_record, next_task_status, None);
+    } else {
+        task_record.status = next_task_status;
+    }
+    task_record.changeset_ids = approved_changeset_ids.clone();
+    task_record.steps.push(step.clone());
+    task_record.updated_at = Utc::now();
+    core.state_db.upsert_task(&task_record)?;
+
+    // Restore session context into in-memory `SessionBuffer` after daemon restart
+    for msg in &cp.session.messages {
+        if msg.role == "user" {
+            let _ = core.sessions.get_or_create(Some(&cp.session.session_id));
+        }
+    }
+    if let Some(ref rp) = cp.session.last_resource_path {
+        core.sessions
+            .set_last_resource_path(&cp.session.session_id, rp.clone());
+    }
+
+    resume_suspended_checkpoint_and_finalize(
+        core,
+        cp,
+        opts,
+        &resume_turn_id,
+        &step,
+        &pa.arguments,
+        &approved_changeset_ids,
+    )
+    .await
 }
 
 pub(crate) async fn resume_suspended_checkpoint_and_finalize(
@@ -1726,6 +2811,15 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
     paused_args_val: &Value,
     approved_changeset_ids: &[String],
 ) -> anyhow::Result<Value> {
+    let fallback_privacy =
+        PrivacySessionPolicy::from_session(cp.incognito, Some(&cp.session.session_id));
+    cp.effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        &cp.task_id,
+        &cp.session.session_id,
+        fallback_privacy,
+    );
+
     record_approved_step_into_ledger(
         core,
         &mut cp.effect_ledger,
@@ -1781,12 +2875,20 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
             prior_tool_results,
             tools,
         } => {
+            let resolved_key = api_key.or_else(|| {
+                lookup_ephemeral_backend_key(
+                    &core.paths,
+                    &cp.active.backend,
+                    &cp.active.provider,
+                    eff_opts.allow_env_keys,
+                )
+            });
             continue_resumed_anthropic_turn(
                 core,
                 &mut cp,
                 &eff_opts,
                 base_url,
-                api_key,
+                resolved_key,
                 trust,
                 messages,
                 prior_tool_results,
@@ -1832,7 +2934,10 @@ pub(crate) async fn resume_suspended_checkpoint_and_finalize(
     }
     final_dots.extend(outcome.trace_dots);
 
-    if !cp.incognito && outcome.pending_approval.is_none() {
+    if !cp.incognito
+        && cp.effect_ledger.privacy().allows_memory_write()
+        && outcome.pending_approval.is_none()
+    {
         let dots_val = serde_json::to_value(&final_dots)
             .ok()
             .and_then(|v| v.as_array().cloned())
@@ -1888,6 +2993,7 @@ pub(crate) fn build_denied_resume_response(
     pa_ref: Option<PendingApproval>,
     checkpoint: Option<SuspendedTurnCheckpoint>,
 ) -> anyhow::Result<Value> {
+    let _ = core.state_db.delete_suspended_checkpoint_row(approval_id);
     let denied_task = core.deny_pending(approval_id).ok();
     let cap_id = pa_ref
         .as_ref()
@@ -1936,7 +3042,7 @@ pub(crate) fn build_denied_resume_response(
         final_dots.extend(cp.effect_ledger.trace_dots.clone());
         final_dots.push(denied_dot);
 
-        if !cp.incognito {
+        if !cp.incognito && cp.effect_ledger.privacy().allows_memory_write() {
             core.sessions.append_turn(
                 &cp.session.session_id,
                 &cp.user_text,
@@ -2460,5 +3566,362 @@ mod tests {
             }
             _ => panic!("completed entry older than 300s TTL must be evicted"),
         }
+    }
+
+    #[tokio::test]
+    async fn h03_cross_restart_checkpoint_resume_succeeds_and_rejects_tampered_digest_session_or_scope()
+     {
+        use crate::backend_bridge::broker_bridge::{
+            QuickChatToolExecOutcome, execute_quick_chat_tool_call,
+        };
+        use crate::config::{AppConfig, BrainConfig, XdgPaths};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("base");
+        let auth_ws = tmp.path().join("auth_workspace");
+        let external_dir = tmp.path().join("external_requires_approval");
+        let fake_home = tmp.path().join("fake_home");
+        std::fs::create_dir_all(&auth_ws).unwrap();
+        std::fs::create_dir_all(&external_dir).unwrap();
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let xdg = XdgPaths::resolve(Some(&base), repo_root.clone());
+        xdg.ensure_dirs().unwrap();
+        let cfg = AppConfig {
+            authorized_directories: vec![auth_ws.to_string_lossy().to_string()],
+            allow_simulated_hardware_fallback: true,
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            xdg.config_dir.join("config.toml"),
+            toml::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.config_dir.join("brain.toml"),
+            toml::to_string_pretty(&BrainConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        let offline_opts = DiscoveryOptions {
+            home_dir: fake_home.clone(),
+            extra_bin_dirs: Vec::new(),
+            include_system_paths: false,
+            opt_zcode_cjs: None,
+            ollama_tags_url: None,
+            ollama_timeout_ms: 50,
+            allow_env_keys: false,
+            probe_remote_models: false,
+            force_refresh_models: false,
+        };
+        let active = ActiveBackendSelection {
+            backend: "openai".into(),
+            provider: "test".into(),
+            model: "gpt-4o-mini".into(),
+            reasoning_effort: "medium".into(),
+            base_url: None,
+            pinned: false,
+            auto_selected: true,
+            direct_http_capable: true,
+            pill_label: "OpenAI".into(),
+        };
+
+        let approved_file = external_dir.join("resumed_after_restart.txt");
+        let raw_secret = "sk-restartSecretToken1234567890abcdef";
+        let (approval_id, valid_digest, valid_nonce, task_id) = {
+            // --- Daemon Instance #1 (`core1`) ---
+            let core1 = IntentOsCore::initialize(Some(&base), repo_root.clone()).unwrap();
+            let session = core1.sessions.get_or_create(Some("ses_h03_restart_owner"));
+            let mut ledger = TurnEffectLedger::new("turn_h03_suspend")
+                .with_privacy(PrivacySessionPolicy::Standard);
+            let task_id = "task_h03_restart_01".to_string();
+            let write_args = json!({
+                "path": approved_file.to_string_lossy(),
+                "content": "verified across daemon restart!"
+            });
+
+            let out = execute_quick_chat_tool_call(
+                &core1,
+                &active,
+                BackendExecutionMode::ManagedBrokerTools,
+                &task_id,
+                &session,
+                "write external report",
+                false,
+                &[Taint::User],
+                DataClass::Personal,
+                "call_pause_1",
+                "file_write",
+                &write_args,
+                &mut ledger,
+            )
+            .await
+            .expect("tool dispatch");
+
+            let pa = match out {
+                QuickChatToolExecOutcome::PausedForApproval { outcome, .. } => outcome
+                    .pending_approval
+                    .expect("must carry PendingApproval"),
+                other => panic!(
+                    "expected PausedForApproval, got {:?}",
+                    matches!(other, QuickChatToolExecOutcome::ToolMessage { .. })
+                ),
+            };
+
+            // Step must be recorded as `Prepared` (`AwaitingApproval`) before approval
+            let prep_log = core1
+                .state_db
+                .get_step_execution_log(&task_id, "step_1")
+                .unwrap()
+                .expect("Prepared step row must exist");
+            assert_eq!(prep_log.exec_state, StepExecState::Prepared);
+
+            let cp = SuspendedTurnCheckpoint {
+                created_at_instant: Instant::now(),
+                approval_id: pa.approval_id.clone(),
+                pending_approval: pa.clone(),
+                task_id: task_id.clone(),
+                session,
+                user_text: "write external report".into(),
+                incognito: false,
+                active: active.clone(),
+                discovery_opts: offline_opts.clone(),
+                extra_blocks: Vec::new(),
+                sys_text: "system".into(),
+                taints: vec![Taint::User],
+                data_class: DataClass::Personal,
+                memory_hits: Vec::new(),
+                memory_dot: None,
+                context_compression: crate::memory_hub::ContextCompressionStats::default(),
+                rounds_used: 1,
+                paused_call_id: "call_pause_1".into(),
+                paused_canonical_tool: "file.write".into(),
+                paused_parsed_args: write_args,
+                remaining_tool_calls: Vec::new(),
+                effect_ledger: ledger,
+                dialect: SuspendedDialectState::Anthropic {
+                    base_url: "http://127.0.0.1:9".into(),
+                    api_key: Some(raw_secret.into()),
+                    trust: ProviderTrust::Trusted,
+                    messages: vec![json!({
+                        "role": "user",
+                        "content": format!("context note with token {}", raw_secret)
+                    })],
+                    prior_tool_results: Vec::new(),
+                    tools: Vec::new(),
+                },
+            };
+            save_suspended_checkpoint(cp);
+
+            let saved_row = core1
+                .state_db
+                .get_suspended_checkpoint_row(&pa.approval_id)
+                .unwrap()
+                .expect("Standard checkpoint must be persisted to SQLite");
+            assert!(
+                !saved_row.checkpoint_json.contains(raw_secret),
+                "SensitiveDataGuard + PersistedDialectStateDto must scrub raw API keys from SQLite"
+            );
+
+            // Also verify EphemeralReadOnly & StrictIsolated checkpoints NEVER touch SQLite!
+            let mut incog_cp = SUSPENDED_APPROVAL_TURNS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get(&pa.approval_id)
+                .unwrap()
+                .clone();
+            incog_cp.approval_id = "apr_ephemeral_only".into();
+            incog_cp.pending_approval.approval_id = "apr_ephemeral_only".into();
+            assert!(
+                !save_suspended_checkpoint_with_db(
+                    &core1.state_db,
+                    incog_cp.clone(),
+                    PrivacySessionPolicy::EphemeralReadOnly,
+                )
+                .unwrap()
+            );
+            incog_cp.approval_id = "apr_strict_isolated".into();
+            incog_cp.pending_approval.approval_id = "apr_strict_isolated".into();
+            assert!(
+                !save_suspended_checkpoint_with_db(
+                    &core1.state_db,
+                    incog_cp,
+                    PrivacySessionPolicy::StrictIsolated,
+                )
+                .unwrap()
+            );
+            assert_eq!(core1.state_db.count_suspended_checkpoints().unwrap(), 1);
+
+            (pa.approval_id, pa.digest, pa.nonce, task_id)
+        };
+
+        // Simulate full daemon restart: wipe all in-memory checkpoints and open a fresh `Core 2`!
+        clear_in_memory_suspended_checkpoints();
+        assert!(!approved_file.exists());
+
+        let core2 = IntentOsCore::initialize(Some(&base), repo_root).unwrap();
+
+        // (a) Reject wrong `session_id` (cross-session hijack attempt) without consuming valid checkpoint
+        let bad_session_err = resume_persisted_checkpoint_across_restart(
+            &core2,
+            &json!({
+                "approval_id": approval_id,
+                "session_id": "ses_attacker_other",
+                "digest": valid_digest,
+                "decision": "once"
+            }),
+            &offline_opts,
+        )
+        .await
+        .expect_err("mismatched session_id must be rejected");
+        assert!(bad_session_err.to_string().contains("session_id"));
+
+        // (b) Reject tampered `approval_digest`
+        let bad_digest_err = resume_persisted_checkpoint_across_restart(
+            &core2,
+            &json!({
+                "approval_id": approval_id,
+                "session_id": "ses_h03_restart_owner",
+                "digest": "0000000000000000deadbeef",
+                "decision": "once"
+            }),
+            &offline_opts,
+        )
+        .await
+        .expect_err("tampered approval_digest must be rejected");
+        assert!(bad_digest_err.to_string().contains("approval_digest"));
+
+        // (c) Reject mismatched/escalated `scope_value`
+        let bad_scope_err = resume_persisted_checkpoint_across_restart(
+            &core2,
+            &json!({
+                "approval_id": approval_id,
+                "session_id": "ses_h03_restart_owner",
+                "digest": valid_digest,
+                "decision": "session",
+                "scope_kind": "directory",
+                "scope_value": "/etc"
+            }),
+            &offline_opts,
+        )
+        .await
+        .expect_err("tampered scope_value must be rejected");
+        assert!(bad_scope_err.to_string().contains("作用域"));
+
+        // (d) Reject tampered checkpoint in SQLite pointing to forbidden `~/.ssh/id_ed25519`
+        {
+            let mut poisoned_row = core2
+                .state_db
+                .get_suspended_checkpoint_row(&approval_id)
+                .unwrap()
+                .unwrap();
+            let mut poisoned_dto: PersistedCheckpointDto =
+                serde_json::from_str(&poisoned_row.checkpoint_json).unwrap();
+            let forbidden_args = json!({
+                "path": "~/.ssh/id_ed25519",
+                "content": "malicious key overwrite"
+            });
+            let forbidden_digest = PendingApproval::compute_digest("file.write", &forbidden_args);
+            poisoned_dto.approval_id = "apr_poisoned_ssh".into();
+            poisoned_dto.pending_approval.approval_id = "apr_poisoned_ssh".into();
+            poisoned_dto.pending_approval.arguments = forbidden_args.clone();
+            poisoned_dto.pending_approval.digest = forbidden_digest.clone();
+            poisoned_dto.paused_parsed_args = forbidden_args;
+            poisoned_row.approval_id = "apr_poisoned_ssh".into();
+            poisoned_row.approval_digest = forbidden_digest.clone();
+            poisoned_row.target_scope =
+                compute_checkpoint_target_scope(&poisoned_dto.pending_approval);
+            poisoned_row.checkpoint_json = serde_json::to_string(&poisoned_dto).unwrap();
+            core2
+                .state_db
+                .save_suspended_checkpoint_row(&poisoned_row, PrivacySessionPolicy::Standard)
+                .unwrap();
+
+            let ssh_err = resume_persisted_checkpoint_across_restart(
+                &core2,
+                &json!({
+                    "approval_id": "apr_poisoned_ssh",
+                    "session_id": "ses_h03_restart_owner",
+                    "digest": forbidden_digest,
+                    "decision": "once"
+                }),
+                &offline_opts,
+            )
+            .await
+            .expect_err(
+                "forbidden ~/.ssh checkpoint must be rejected by PolicyEngine/SafeFsEngine",
+            );
+            assert!(
+                ssh_err.to_string().contains("forbidden")
+                    || ssh_err.to_string().contains("受禁")
+                    || ssh_err.to_string().contains("拒绝")
+            );
+            assert!(
+                core2
+                    .state_db
+                    .get_suspended_checkpoint_row("apr_poisoned_ssh")
+                    .unwrap()
+                    .is_none(),
+                "poisoned checkpoint must be purged upon rejection"
+            );
+        }
+
+        // (e) Legitimate approval resume across daemon restart succeeds and verifies!
+        let resumed = resume_persisted_checkpoint_across_restart(
+            &core2,
+            &json!({
+                "approval_id": approval_id,
+                "session_id": "ses_h03_restart_owner",
+                "digest": valid_digest,
+                "nonce": valid_nonce,
+                "decision": "once"
+            }),
+            &offline_opts,
+        )
+        .await
+        .expect("valid cross-restart checkpoint resume must succeed");
+
+        assert_eq!(resumed["status"], "completed");
+        assert_eq!(resumed["approval_resolved"], "approved");
+        assert_eq!(
+            std::fs::read_to_string(&approved_file).unwrap(),
+            "verified across daemon restart!"
+        );
+
+        let post_step = core2
+            .state_db
+            .get_step_execution_log(&task_id, "step_1")
+            .unwrap()
+            .expect("step_1 must be updated in step_execution_log");
+        assert_eq!(post_step.exec_state, StepExecState::Verified);
+        assert!(post_step.changeset_id.is_some());
+
+        // Checkpoint row consumed: a second replay with the same valid payload must fail!
+        assert_eq!(core2.state_db.count_suspended_checkpoints().unwrap(), 0);
+        assert!(
+            resume_persisted_checkpoint_across_restart(
+                &core2,
+                &json!({
+                    "approval_id": approval_id,
+                    "session_id": "ses_h03_restart_owner",
+                    "digest": valid_digest,
+                    "decision": "once"
+                }),
+                &offline_opts,
+            )
+            .await
+            .is_err(),
+            "consumed checkpoint must never replay a second time"
+        );
     }
 }

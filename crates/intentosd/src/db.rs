@@ -2,18 +2,125 @@
 
 //! SQLite WAL persistence: `state.db` (authoritative state) and `index.db` (rebuildable local index + FTS5) (§16.2).
 
+use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard};
 use chrono::{DateTime, Utc};
 use intentos_protocol::{ChangeSet, ChangeSetStatus, DataClass, MemoryEntry, Task, TaskStatus};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_v0_1_shell.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_v0_2_step_ledger.sql");
+
+/// Persistent execution state for a side-effecting or audited step in `step_execution_log` (`H03`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepExecState {
+    Prepared,
+    Executing,
+    Applied,
+    Unknown,
+    Verified,
+    Denied,
+    FailedClean,
+    RecoveryRequired,
+}
+
+impl StepExecState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Executing => "executing",
+            Self::Applied => "applied",
+            Self::Unknown => "unknown",
+            Self::Verified => "verified",
+            Self::Denied => "denied",
+            Self::FailedClean => "failed_clean",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "prepared" => Some(Self::Prepared),
+            "executing" => Some(Self::Executing),
+            "applied" => Some(Self::Applied),
+            "unknown" => Some(Self::Unknown),
+            "verified" => Some(Self::Verified),
+            "denied" => Some(Self::Denied),
+            "failed_clean" => Some(Self::FailedClean),
+            "recovery_required" => Some(Self::RecoveryRequired),
+            _ => None,
+        }
+    }
+
+    /// True when the step began execution (`Executing`) and its real OS effect is unconfirmed or failed mid-flight.
+    pub fn is_uncertain_or_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::Executing | Self::Unknown | Self::RecoveryRequired
+        )
+    }
+
+    /// True when a side effect either committed (`Verified` / `Applied`) or may have occurred (`Executing` / `Unknown` / `RecoveryRequired`).
+    pub fn has_potential_or_committed_side_effect(self) -> bool {
+        matches!(
+            self,
+            Self::Executing
+                | Self::Applied
+                | Self::Unknown
+                | Self::Verified
+                | Self::RecoveryRequired
+        )
+    }
+}
+
+/// Authoritative row in `step_execution_log` (`PRIMARY KEY (task_id, step_id)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepExecutionLogRow {
+    pub task_id: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub step_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub capability_id: String,
+    pub effect: String,
+    pub exec_state: StepExecState,
+    pub expected_summary: String,
+    pub changeset_id: Option<String>,
+    pub verification_status: String,
+    pub recovery_hint: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Authoritative row in `suspended_turn_checkpoints` (`approval_id PRIMARY KEY`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspendedCheckpointRow {
+    pub approval_id: String,
+    pub turn_id: String,
+    pub task_id: String,
+    pub session_id: String,
+    pub approval_digest: String,
+    pub capability_id: String,
+    pub target_scope: String,
+    pub checkpoint_json: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
 
 pub struct StateDb {
     conn: Mutex<Connection>,
+}
+
+impl std::fmt::Debug for StateDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateDb").finish_non_exhaustive()
+    }
 }
 
 impl StateDb {
@@ -57,11 +164,23 @@ impl StateDb {
                 params![Utc::now().to_rfc3339()],
             )?;
         }
+        if current_ver < 3 {
+            if existed && current_ver >= 1 {
+                let bak = path.with_extension("db.bak-pre-v3");
+                let _ = std::fs::copy(path, bak);
+            }
+            conn.execute_batch(MIGRATION_0003)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (3, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+        }
 
         let db = Self {
             conn: Mutex::new(conn),
         };
-        // Any task left in 'running' or 'planning' across a daemon restart enters recovery_required (§13.2, A26).
+        // Any task or mutating step left in 'running'/'planning'/'executing' across a daemon restart
+        // enters recovery_required (§13.2, A26, H03).
         db.mark_interrupted_tasks_recovery_required()?;
         Ok(db)
     }
@@ -71,6 +190,7 @@ impl StateDb {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(MIGRATION_0001)?;
         conn.execute_batch(MIGRATION_0002)?;
+        conn.execute_batch(MIGRATION_0003)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -78,12 +198,88 @@ impl StateDb {
 
     pub fn mark_interrupted_tasks_recovery_required(&self) -> anyhow::Result<usize> {
         let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE tasks SET status = 'recovery_required', updated_at = ?1
-             WHERE status IN ('running', 'planning', 'verifying')",
-            params![Utc::now().to_rfc3339()],
+        let now_rfc3339 = Utc::now().to_rfc3339();
+        let crash_hint = "守护进程在副作用步骤执行途中异常重启，实际系统状态未知；已阻止自动重放，请先检查真实状态或变更集后再执行恢复。";
+
+        // 1. Transition any steps left in `executing` across a crash to `recovery_required`.
+        let interrupted_steps = conn.execute(
+            "UPDATE step_execution_log
+             SET exec_state = 'recovery_required',
+                 verification_status = CASE
+                     WHEN verification_status IN ('', 'Executing', 'Prepared') THEN 'UnknownAfterCrash'
+                     ELSE verification_status
+                 END,
+                 recovery_hint = COALESCE(recovery_hint, ?2),
+                 updated_at = ?1
+             WHERE exec_state = 'executing'",
+            params![now_rfc3339, crash_hint],
         )?;
-        Ok(changed)
+
+        // 2. Ensure any crashed mutating step whose parent Quick-Chat/Agent task had not yet been
+        //    written to `tasks` creates a conservative `recovery_required` task record.
+        {
+            let mut orphan_stmt = conn.prepare(
+                "SELECT s.task_id, s.capability_id, s.expected_summary, s.changeset_id, s.created_at
+                 FROM step_execution_log s
+                 LEFT JOIN tasks t ON t.id = s.task_id
+                 WHERE s.exec_state IN ('unknown', 'recovery_required') AND t.id IS NULL
+                 GROUP BY s.task_id",
+            )?;
+            let orphans: Vec<(String, String, String, Option<String>, String)> = orphan_stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (tid, cap_id, exp_sum, cs_opt, created_s) in orphans {
+                let goal = if exp_sum.trim().is_empty() {
+                    format!("中断的步骤恢复检查 ({})", cap_id)
+                } else {
+                    exp_sum
+                };
+                let cs_json = match cs_opt {
+                    Some(cs) => serde_json::to_string(&vec![cs]).unwrap_or_else(|_| "[]".into()),
+                    None => "[]".into(),
+                };
+                let budget_json = serde_json::to_string(&intentos_protocol::TaskBudget::default())
+                    .unwrap_or_else(|_| "{}".into());
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO tasks (
+                        id, goal, project_id, trigger_kind, route, status, steps_json,
+                        changeset_ids_json, pending_approval_json, assistant_message,
+                        result_summary, taint_json, data_class, budget_json, created_at, updated_at
+                     ) VALUES (?1, ?2, NULL, 'user', 'L2', 'recovery_required', '[]', ?3, NULL, ?4, ?4, '[\"user\"]', 'personal', ?5, ?6, ?7)",
+                    params![
+                        tid,
+                        SensitiveDataGuard::redact_text(&goal).0,
+                        cs_json,
+                        crash_hint,
+                        budget_json,
+                        created_s,
+                        now_rfc3339,
+                    ],
+                );
+            }
+        }
+
+        // 3. Transition active tasks and tasks owning `unknown` / `recovery_required` steps to `recovery_required`.
+        let changed_tasks = conn.execute(
+            "UPDATE tasks SET status = 'recovery_required', updated_at = ?1
+             WHERE status IN ('running', 'planning', 'verifying')
+                OR (status NOT IN ('completed', 'cancelled', 'failed', 'recovery_required')
+                    AND id IN (
+                        SELECT DISTINCT task_id FROM step_execution_log
+                        WHERE exec_state IN ('unknown', 'recovery_required')
+                    ))",
+            params![now_rfc3339],
+        )?;
+
+        // 4. Evict expired persisted approval checkpoints on startup.
+        let _ = conn.execute(
+            "DELETE FROM suspended_turn_checkpoints WHERE expires_at <= ?1",
+            params![now_rfc3339],
+        );
+
+        Ok(changed_tasks + interrupted_steps)
     }
 
     pub fn upsert_task(&self, task: &Task) -> anyhow::Result<()> {
@@ -237,7 +433,8 @@ impl StateDb {
     }
 
     pub fn save_changeset(&self, cs: &ChangeSet) -> anyhow::Result<()> {
-        let clean_cs = crate::security_guard::SensitiveDataGuard::sanitize_changeset_for_storage(cs);
+        let clean_cs =
+            crate::security_guard::SensitiveDataGuard::sanitize_changeset_for_storage(cs);
         let conn = self.conn.lock().unwrap();
         let ops_json = serde_json::to_string(&clean_cs.operations)?;
         let status_str = serde_json::to_value(clean_cs.status)?
@@ -256,14 +453,16 @@ impl StateDb {
             params![
                 clean_cs.id,
                 clean_cs.task_id,
-                clean_cs.created_at
+                clean_cs
+                    .created_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                 clean_cs.capability_id,
                 clean_cs.layer,
                 ops_json,
                 clean_cs.backup_bytes as i64,
                 status_str,
-                clean_cs.undo_expires_at
+                clean_cs
+                    .undo_expires_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                 clean_cs.summary,
             ],
@@ -629,6 +828,303 @@ impl StateDb {
         };
         rows.flatten().collect()
     }
+
+    fn row_to_step_execution_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepExecutionLogRow> {
+        let state_s: String = row.get(8)?;
+        let created_s: String = row.get(13)?;
+        let updated_s: String = row.get(14)?;
+        Ok(StepExecutionLogRow {
+            task_id: row.get(0)?,
+            turn_id: row.get(1)?,
+            session_id: row.get(2)?,
+            step_id: row.get(3)?,
+            attempt_id: row.get(4)?,
+            idempotency_key: row.get(5)?,
+            capability_id: row.get(6)?,
+            effect: row.get(7)?,
+            exec_state: StepExecState::parse(&state_s).unwrap_or(StepExecState::Unknown),
+            expected_summary: row.get(9)?,
+            changeset_id: row.get(10)?,
+            verification_status: row.get(11)?,
+            recovery_hint: row.get(12)?,
+            created_at: DateTime::parse_from_rfc3339(&created_s)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            updated_at: DateTime::parse_from_rfc3339(&updated_s)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+        })
+    }
+
+    /// Persist or update a `StepExecutionLogRow` in `state.db` (`H03`).
+    ///
+    /// - Strictly returns `Ok(false)` (0 SQLite writes!) when `!privacy.allows_task_persistence()`
+    ///   (`EphemeralReadOnly` and `StrictIsolated` remain 100% in-memory).
+    /// - Sanitizes all text fields via `SensitiveDataGuard` BEFORE SQLite write.
+    pub fn upsert_step_execution_log(
+        &self,
+        row: &StepExecutionLogRow,
+        privacy: PrivacySessionPolicy,
+    ) -> anyhow::Result<bool> {
+        if !privacy.allows_task_persistence() {
+            return Ok(false);
+        }
+
+        let clean_task_id = SensitiveDataGuard::redact_text(&row.task_id).0;
+        let clean_turn_id = SensitiveDataGuard::redact_text(&row.turn_id).0;
+        let clean_session_id = SensitiveDataGuard::redact_text(&row.session_id).0;
+        let clean_expected = SensitiveDataGuard::redact_text(&row.expected_summary).0;
+        let clean_verif = SensitiveDataGuard::redact_text(&row.verification_status).0;
+        let clean_hint = row
+            .recovery_hint
+            .as_deref()
+            .map(|h| SensitiveDataGuard::redact_text(h).0);
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO step_execution_log (
+                task_id, turn_id, session_id, step_id, attempt_id, idempotency_key,
+                capability_id, effect, exec_state, expected_summary, changeset_id,
+                verification_status, recovery_hint, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(task_id, step_id) DO UPDATE SET
+                turn_id = excluded.turn_id,
+                session_id = excluded.session_id,
+                attempt_id = excluded.attempt_id,
+                idempotency_key = excluded.idempotency_key,
+                capability_id = excluded.capability_id,
+                effect = excluded.effect,
+                exec_state = excluded.exec_state,
+                expected_summary = CASE
+                    WHEN excluded.expected_summary != '' THEN excluded.expected_summary
+                    ELSE step_execution_log.expected_summary
+                END,
+                changeset_id = COALESCE(excluded.changeset_id, step_execution_log.changeset_id),
+                verification_status = excluded.verification_status,
+                recovery_hint = excluded.recovery_hint,
+                updated_at = excluded.updated_at",
+            params![
+                clean_task_id,
+                clean_turn_id,
+                clean_session_id,
+                row.step_id,
+                row.attempt_id,
+                row.idempotency_key,
+                row.capability_id,
+                row.effect,
+                row.exec_state.as_str(),
+                clean_expected,
+                row.changeset_id,
+                clean_verif,
+                clean_hint,
+                row.created_at.to_rfc3339(),
+                row.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(true)
+    }
+
+    pub fn get_step_execution_log(
+        &self,
+        task_id: &str,
+        step_id: &str,
+    ) -> anyhow::Result<Option<StepExecutionLogRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT task_id, turn_id, session_id, step_id, attempt_id, idempotency_key,
+                    capability_id, effect, exec_state, expected_summary, changeset_id,
+                    verification_status, recovery_hint, created_at, updated_at
+             FROM step_execution_log
+             WHERE task_id = ?1 AND step_id = ?2",
+        )?;
+        let row = stmt
+            .query_row(params![task_id, step_id], Self::row_to_step_execution_log)
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn list_step_execution_logs_for_task(
+        &self,
+        task_id: &str,
+    ) -> anyhow::Result<Vec<StepExecutionLogRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT task_id, turn_id, session_id, step_id, attempt_id, idempotency_key,
+                    capability_id, effect, exec_state, expected_summary, changeset_id,
+                    verification_status, recovery_hint, created_at, updated_at
+             FROM step_execution_log
+             WHERE task_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let iter = stmt.query_map(params![task_id], Self::row_to_step_execution_log)?;
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_step_execution_logs_for_turn(
+        &self,
+        turn_id: &str,
+    ) -> anyhow::Result<Vec<StepExecutionLogRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT task_id, turn_id, session_id, step_id, attempt_id, idempotency_key,
+                    capability_id, effect, exec_state, expected_summary, changeset_id,
+                    verification_status, recovery_hint, created_at, updated_at
+             FROM step_execution_log
+             WHERE turn_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let iter = stmt.query_map(params![turn_id], Self::row_to_step_execution_log)?;
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    /// Returns `true` if `task_id` is in `recovery_required` status OR has any step in
+    /// `executing`, `unknown`, or `recovery_required`.
+    pub fn task_has_uncertain_or_recovery_steps(&self, task_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let step_uncertain: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM step_execution_log
+             WHERE task_id = ?1 AND exec_state IN ('executing', 'unknown', 'recovery_required')",
+            params![task_id],
+            |r| r.get(0),
+        )?;
+        if step_uncertain > 0 {
+            return Ok(true);
+        }
+        let task_recovery: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM tasks WHERE id = ?1 AND status = 'recovery_required'",
+            params![task_id],
+            |r| r.get(0),
+        )?;
+        Ok(task_recovery > 0)
+    }
+
+    /// Returns `true` if `turn_id` has any step in `executing`, `unknown`, or `recovery_required`.
+    pub fn turn_has_uncertain_or_recovery_steps(&self, turn_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM step_execution_log
+             WHERE turn_id = ?1 AND exec_state IN ('executing', 'unknown', 'recovery_required')",
+            params![turn_id],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn count_step_execution_logs(&self) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 =
+            conn.query_row("SELECT COUNT(1) FROM step_execution_log", [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
+    /// Persist a `SuspendedCheckpointRow` in `state.db` (`H03`).
+    ///
+    /// - Strictly returns `Ok(false)` (0 SQLite writes!) when `!privacy.allows_task_persistence()`
+    ///   (`EphemeralReadOnly` and `StrictIsolated` remain strictly in-memory).
+    /// - Sanitizes `checkpoint_json` and `target_scope` through `SensitiveDataGuard` BEFORE SQLite write.
+    pub fn save_suspended_checkpoint_row(
+        &self,
+        row: &SuspendedCheckpointRow,
+        privacy: PrivacySessionPolicy,
+    ) -> anyhow::Result<bool> {
+        if !privacy.allows_task_persistence() {
+            return Ok(false);
+        }
+
+        let clean_checkpoint_json = if let Ok(mut parsed) =
+            serde_json::from_str::<serde_json::Value>(&row.checkpoint_json)
+        {
+            SensitiveDataGuard::redact_json(&mut parsed);
+            serde_json::to_string(&parsed)?
+        } else {
+            SensitiveDataGuard::redact_text(&row.checkpoint_json).0
+        };
+        let clean_scope = SensitiveDataGuard::redact_text(&row.target_scope).0;
+        let clean_session = SensitiveDataGuard::redact_text(&row.session_id).0;
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO suspended_turn_checkpoints (
+                approval_id, turn_id, task_id, session_id, approval_digest,
+                capability_id, target_scope, checkpoint_json, expires_at, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                row.approval_id,
+                row.turn_id,
+                row.task_id,
+                clean_session,
+                row.approval_digest,
+                row.capability_id,
+                clean_scope,
+                clean_checkpoint_json,
+                row.expires_at.to_rfc3339(),
+                row.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(true)
+    }
+
+    pub fn get_suspended_checkpoint_row(
+        &self,
+        approval_id: &str,
+    ) -> anyhow::Result<Option<SuspendedCheckpointRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT approval_id, turn_id, task_id, session_id, approval_digest,
+                    capability_id, target_scope, checkpoint_json, expires_at, created_at
+             FROM suspended_turn_checkpoints
+             WHERE approval_id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![approval_id], |r| {
+                let exp_s: String = r.get(8)?;
+                let cre_s: String = r.get(9)?;
+                Ok(SuspendedCheckpointRow {
+                    approval_id: r.get(0)?,
+                    turn_id: r.get(1)?,
+                    task_id: r.get(2)?,
+                    session_id: r.get(3)?,
+                    approval_digest: r.get(4)?,
+                    capability_id: r.get(5)?,
+                    target_scope: r.get(6)?,
+                    checkpoint_json: r.get(7)?,
+                    expires_at: DateTime::parse_from_rfc3339(&exp_s)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    created_at: DateTime::parse_from_rfc3339(&cre_s)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn delete_suspended_checkpoint_row(&self, approval_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM suspended_turn_checkpoints WHERE approval_id = ?1",
+            params![approval_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn count_suspended_checkpoints(&self) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 =
+            conn.query_row("SELECT COUNT(1) FROM suspended_turn_checkpoints", [], |r| {
+                r.get(0)
+            })?;
+        Ok(count as usize)
+    }
 }
 
 /// Redact potential credential keys and secret values before writing to audit log (§5.6, §24.5).
@@ -659,9 +1155,9 @@ pub fn redact_json_value(val: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Array(arr) => {
             serde_json::Value::Array(arr.iter().map(redact_json_value).collect())
         }
-        serde_json::Value::String(s) => serde_json::Value::String(
-            crate::security_guard::SensitiveDataGuard::redact_text(s).0,
-        ),
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(crate::security_guard::SensitiveDataGuard::redact_text(s).0)
+        }
         other => other.clone(),
     }
 }
@@ -888,5 +1384,249 @@ impl IndexDb {
             return Vec::new();
         };
         rows.flatten().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+    use intentos_protocol::{RouteLayer, Taint, TaskBudget, TaskTrigger};
+    use tempfile::TempDir;
+
+    #[test]
+    fn h03_step_execution_log_crash_recovery_secret_redaction_and_privacy_isolation() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("state.db");
+        let now = Utc::now();
+
+        {
+            let db = StateDb::open(&db_path).expect("open state db v3");
+
+            // 1. EphemeralReadOnly & StrictIsolated write ZERO rows to step_execution_log / suspended_turn_checkpoints
+            let eph_row = StepExecutionLogRow {
+                task_id: "task_eph".into(),
+                turn_id: "turn_eph".into(),
+                session_id: "ephemeral_ro_01".into(),
+                step_id: "step_1".into(),
+                attempt_id: "attempt_1".into(),
+                idempotency_key: "idem_eph".into(),
+                capability_id: "file.write".into(),
+                effect: "write_reversible".into(),
+                exec_state: StepExecState::Executing,
+                expected_summary: "ephemeral write".into(),
+                changeset_id: None,
+                verification_status: "Executing".into(),
+                recovery_hint: None,
+                created_at: now,
+                updated_at: now,
+            };
+            assert!(
+                !db.upsert_step_execution_log(&eph_row, PrivacySessionPolicy::EphemeralReadOnly)
+                    .unwrap()
+            );
+            assert!(
+                !db.upsert_step_execution_log(&eph_row, PrivacySessionPolicy::StrictIsolated)
+                    .unwrap()
+            );
+            assert_eq!(db.count_step_execution_logs().unwrap(), 0);
+
+            let eph_cp = SuspendedCheckpointRow {
+                approval_id: "apr_eph".into(),
+                turn_id: "turn_eph".into(),
+                task_id: "task_eph".into(),
+                session_id: "ephemeral_ro_01".into(),
+                approval_digest: "digest_eph".into(),
+                capability_id: "file.write".into(),
+                target_scope: "directory:/tmp".into(),
+                checkpoint_json: r#"{"secret":"sk-ephemeralSecretToken1234567890"}"#.into(),
+                expires_at: now + ChronoDuration::minutes(10),
+                created_at: now,
+            };
+            assert!(
+                !db.save_suspended_checkpoint_row(&eph_cp, PrivacySessionPolicy::EphemeralReadOnly)
+                    .unwrap()
+            );
+            assert!(
+                !db.save_suspended_checkpoint_row(&eph_cp, PrivacySessionPolicy::StrictIsolated)
+                    .unwrap()
+            );
+            assert_eq!(db.count_suspended_checkpoints().unwrap(), 0);
+
+            // 2. Standard privacy persists with SensitiveDataGuard redaction AND tracks mid-flight Executing state
+            let running_task = Task {
+                id: "task_crash_tracked".into(),
+                goal: "write config".into(),
+                session_id: Some("ses_std_1".into()),
+                project_id: None,
+                trigger: TaskTrigger::User,
+                route: RouteLayer::L2,
+                status: TaskStatus::Running,
+                steps: Vec::new(),
+                changeset_ids: Vec::new(),
+                pending_approval: None,
+                candidates_for_disambiguation: Vec::new(),
+                assistant_message: None,
+                result_summary: None,
+                handoff_command: None,
+                taint: vec![Taint::User],
+                data_class: DataClass::Personal,
+                budget: TaskBudget::default(),
+                created_at: now,
+                updated_at: now,
+            };
+            db.upsert_task(&running_task).unwrap();
+
+            let raw_secret = "sk-liveCrashSecretToken1234567890abcd";
+            let crash_step = StepExecutionLogRow {
+                task_id: "task_crash_tracked".into(),
+                turn_id: "turn_crash_1".into(),
+                session_id: "ses_std_1".into(),
+                step_id: "step_1".into(),
+                attempt_id: "attempt_1".into(),
+                idempotency_key: "idem_crash_1".into(),
+                capability_id: "file.write".into(),
+                effect: "write_reversible".into(),
+                exec_state: StepExecState::Executing,
+                expected_summary: format!("write token {}", raw_secret),
+                changeset_id: None,
+                verification_status: "Executing".into(),
+                recovery_hint: None,
+                created_at: now,
+                updated_at: now,
+            };
+            assert!(
+                db.upsert_step_execution_log(&crash_step, PrivacySessionPolicy::Standard)
+                    .unwrap()
+            );
+            let stored_pre_crash = db
+                .get_step_execution_log("task_crash_tracked", "step_1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored_pre_crash.exec_state, StepExecState::Executing);
+            assert!(!stored_pre_crash.expected_summary.contains(raw_secret));
+            assert!(
+                stored_pre_crash
+                    .expected_summary
+                    .contains("[REDACTED_SECRET]")
+            );
+
+            // Also insert an interrupted Quick-Chat Executing step whose parent `tasks` row wasn't written yet
+            let orphan_crash_step = StepExecutionLogRow {
+                task_id: "task_crash_quickchat_orphan".into(),
+                turn_id: "turn_crash_2".into(),
+                session_id: "ses_std_2".into(),
+                step_id: "step_1".into(),
+                attempt_id: "attempt_1".into(),
+                idempotency_key: "idem_crash_2".into(),
+                capability_id: "file.move".into(),
+                effect: "write_reversible".into(),
+                exec_state: StepExecState::Executing,
+                expected_summary: "move report.md".into(),
+                changeset_id: None,
+                verification_status: "Executing".into(),
+                recovery_hint: None,
+                created_at: now,
+                updated_at: now,
+            };
+            db.upsert_step_execution_log(&orphan_crash_step, PrivacySessionPolicy::Standard)
+                .unwrap();
+
+            // Persist one valid checkpoint (with secret to scrub) + one already-expired checkpoint
+            db.save_suspended_checkpoint_row(
+                &SuspendedCheckpointRow {
+                    approval_id: "apr_valid".into(),
+                    turn_id: "turn_cp_1".into(),
+                    task_id: "task_cp_1".into(),
+                    session_id: "ses_std_1".into(),
+                    approval_digest: "dig_1".into(),
+                    capability_id: "file.write".into(),
+                    target_scope: "directory:/tmp/ws".into(),
+                    checkpoint_json: format!(
+                        r#"{{"note":"Bearer {}","api_key":"{}"}}"#,
+                        raw_secret, raw_secret
+                    ),
+                    expires_at: now + ChronoDuration::minutes(30),
+                    created_at: now,
+                },
+                PrivacySessionPolicy::Standard,
+            )
+            .unwrap();
+            db.save_suspended_checkpoint_row(
+                &SuspendedCheckpointRow {
+                    approval_id: "apr_expired".into(),
+                    turn_id: "turn_cp_exp".into(),
+                    task_id: "task_cp_exp".into(),
+                    session_id: "ses_std_1".into(),
+                    approval_digest: "dig_exp".into(),
+                    capability_id: "file.write".into(),
+                    target_scope: "directory:/tmp/ws".into(),
+                    checkpoint_json: "{}".into(),
+                    expires_at: now - ChronoDuration::minutes(5),
+                    created_at: now - ChronoDuration::minutes(15),
+                },
+                PrivacySessionPolicy::Standard,
+            )
+            .unwrap();
+        }
+
+        // 3. Reopen StateDb (simulating daemon restart after crash mid-Executing)
+        let db2 = StateDb::open(&db_path).expect("reopen state db after crash");
+
+        let rec_step_1 = db2
+            .get_step_execution_log("task_crash_tracked", "step_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec_step_1.exec_state, StepExecState::RecoveryRequired);
+        assert_eq!(rec_step_1.verification_status, "UnknownAfterCrash");
+        assert!(rec_step_1.recovery_hint.is_some());
+
+        let rec_step_2 = db2
+            .get_step_execution_log("task_crash_quickchat_orphan", "step_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec_step_2.exec_state, StepExecState::RecoveryRequired);
+
+        let task_1 = db2.get_task("task_crash_tracked").unwrap().unwrap();
+        assert_eq!(task_1.status, TaskStatus::RecoveryRequired);
+        let task_2 = db2
+            .get_task("task_crash_quickchat_orphan")
+            .unwrap()
+            .expect("orphan crashed step must synthesize recovery_required task row");
+        assert_eq!(task_2.status, TaskStatus::RecoveryRequired);
+
+        assert!(
+            db2.task_has_uncertain_or_recovery_steps("task_crash_tracked")
+                .unwrap()
+        );
+        assert!(
+            db2.task_has_uncertain_or_recovery_steps("task_crash_quickchat_orphan")
+                .unwrap()
+        );
+        assert!(
+            db2.turn_has_uncertain_or_recovery_steps("turn_crash_1")
+                .unwrap()
+        );
+        assert!(
+            db2.turn_has_uncertain_or_recovery_steps("turn_crash_2")
+                .unwrap()
+        );
+
+        // Expired checkpoint evicted on startup; valid checkpoint preserved with secrets scrubbed
+        assert!(
+            db2.get_suspended_checkpoint_row("apr_expired")
+                .unwrap()
+                .is_none()
+        );
+        let valid_cp = db2
+            .get_suspended_checkpoint_row("apr_valid")
+            .unwrap()
+            .expect("valid checkpoint must survive restart");
+        assert!(
+            !valid_cp
+                .checkpoint_json
+                .contains("sk-liveCrashSecretToken1234567890abcd")
+        );
+        assert!(valid_cp.checkpoint_json.contains("[REDACTED_SECRET]"));
     }
 }

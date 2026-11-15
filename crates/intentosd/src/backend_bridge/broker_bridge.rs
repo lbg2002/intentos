@@ -8,24 +8,28 @@
 
 use crate::backend_bridge::detector::ActiveBackendSelection;
 pub use crate::backend_bridge::turn_checkpoint::{
-    IdempotencyDecision, StepExecutionMeta, StepInvocationContext, ToolIdempotencyPolicy,
+    IdempotencyDecision, StepExecState, StepExecutionMeta, StepInvocationContext,
+    ToolIdempotencyPolicy,
 };
 use crate::backend_bridge::turn_checkpoint::{
     StepExecutionRecord, TurnEffectLedger, canonicalize_tool_args_value,
 };
 use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
+use crate::db::StepExecutionLogRow;
 use crate::runtime::{SessionState, build_context_blocks};
+use crate::security_guard::PrivacySessionPolicy;
 use chrono::Utc;
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
-    CapabilityCall, ContextBlock, DataClass, Effect, ExecutionStatus, InvocationOrigin,
-    PendingApproval, RouteLayer, Taint, Task, TaskBudget, TaskStatus, TaskStep, TaskTrigger,
-    ToolSpec,
+    CapabilityCall, CapabilityResult, ContextBlock, DataClass, Effect, ExecutionStatus,
+    InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskBudget, TaskStatus, TaskStep,
+    TaskTrigger, ToolSpec, VerificationReport, VerificationState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 /// Explicit runtime execution mode reported on every Quick-Chat turn response.
@@ -593,6 +597,444 @@ pub async fn execute_quick_chat_tool_call(
     .await
 }
 
+fn classify_executed_step_state(
+    effect: Effect,
+    step_id: &str,
+    capability_id: &str,
+    res: &CapabilityResult,
+) -> (StepExecState, bool, bool, Option<String>) {
+    if res.status == ExecutionStatus::Denied {
+        return (StepExecState::Denied, false, true, None);
+    }
+    if res.status == ExecutionStatus::VerificationFailed
+        || res.verification.state == VerificationState::VerificationFailed
+    {
+        if effect > Effect::Observe {
+            return (
+                StepExecState::Unknown,
+                false,
+                false,
+                Some(format!(
+                    "步骤 '{}' ({}) 执行后校验失败 ({})，可能已产生未确认副作用；已标记为 unknown 并阻止盲目重放。",
+                    step_id, capability_id, res.message
+                )),
+            );
+        }
+        return (StepExecState::FailedClean, false, false, None);
+    }
+    if res.status == ExecutionStatus::RequestedUnverified
+        || res.verification.state == VerificationState::RequestedUnverified
+    {
+        return (StepExecState::Applied, true, false, None);
+    }
+    if res.status == ExecutionStatus::Exited {
+        return (StepExecState::Verified, true, false, None);
+    }
+    if effect > Effect::Observe {
+        (
+            StepExecState::Unknown,
+            false,
+            false,
+            Some(format!(
+                "步骤 '{}' ({}) 执行状态异常 ({:?}: {})，可能已产生部分副作用；已阻止盲目重放。",
+                step_id, capability_id, res.status, res.message
+            )),
+        )
+    } else {
+        (StepExecState::FailedClean, false, false, None)
+    }
+}
+
+/// Transactional `CapabilityBroker` step dispatcher (`H03` / `H06`) for `L0` / `L1` / `L2` unified
+/// step execution: enforces semantic idempotency, `Prepared -> Executing` pre-execution WAL journaling,
+/// post-execution `Verified | Applied | Unknown | Denied | FailedClean | RecoveryRequired` transitions,
+/// and three-tier `PrivacySessionPolicy` gating.
+pub async fn dispatch_broker_call_transactional(
+    core: &IntentOsCore,
+    session_id: &str,
+    privacy: PrivacySessionPolicy,
+    step_ctx: StepInvocationContext,
+    call: &CapabilityCall,
+    effect_ledger: &mut TurnEffectLedger,
+) -> anyhow::Result<BrokerDispatchOutcome> {
+    effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        &call.task_id,
+        session_id,
+        privacy,
+    );
+    let effective_privacy =
+        if call.task_id.starts_with("incog_") || session_id.starts_with("incog_") {
+            PrivacySessionPolicy::StrictIsolated
+        } else {
+            effect_ledger.privacy()
+        };
+
+    let canonical_tool = resolve_tool_name_to_capability(&call.capability_id, core);
+    let sanitized_input_args = strip_untrusted_step_meta_fields(&call.arguments);
+    let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
+    let effect = resolve_capability_effect(core, &canonical_tool);
+    let policy = classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
+    let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+        "attempt_1".to_string()
+    } else {
+        step_ctx.attempt_id.trim().to_string()
+    };
+
+    match effect_ledger.evaluate_idempotency(
+        policy,
+        step_ctx.trusted_step_id.as_deref(),
+        &attempt_id,
+        &canonical_tool,
+        &canonical_args,
+    ) {
+        IdempotencyDecision::StepIdentityConflict {
+            step_id,
+            existing_capability,
+        } => {
+            return Ok(BrokerDispatchOutcome::Denied {
+                reason: format!(
+                    "步骤标识冲突: step_id '{}' 已绑定能力 '{}'，拒绝重用于 '{}'",
+                    step_id, existing_capability, canonical_tool
+                ),
+            });
+        }
+        IdempotencyDecision::CachedHit {
+            record: prev,
+            meta,
+            reason,
+        } => {
+            if prev.was_denied() {
+                let msg = prev
+                    .cached_output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("策略已拒绝该调用（命中去重缓存）")
+                    .to_string();
+                return Ok(BrokerDispatchOutcome::Denied { reason: msg });
+            }
+            let exec_state = meta.map(|m| m.exec_state).unwrap_or(if prev.succeeded {
+                StepExecState::Verified
+            } else {
+                StepExecState::FailedClean
+            });
+            let status = match exec_state {
+                StepExecState::Verified => ExecutionStatus::Exited,
+                StepExecState::Applied => ExecutionStatus::RequestedUnverified,
+                StepExecState::Denied => ExecutionStatus::Denied,
+                _ => ExecutionStatus::VerificationFailed,
+            };
+            let verif_state = match exec_state {
+                StepExecState::Verified => VerificationState::Passed,
+                StepExecState::Applied => VerificationState::RequestedUnverified,
+                _ => VerificationState::VerificationFailed,
+            };
+            return Ok(BrokerDispatchOutcome::Executed(CapabilityResult {
+                request_id: step_ctx.call_id,
+                capability_id: canonical_tool,
+                status,
+                exit_code: Some(if prev.succeeded { 0 } else { 1 }),
+                message: format!("幂等去重命中 ({})", reason),
+                data: prev.cached_output.clone(),
+                stdout_preview: String::new(),
+                stderr_preview: String::new(),
+                truncated: false,
+                duration_ms: 0,
+                changeset_id: prev.changeset_id.clone(),
+                verification: VerificationReport {
+                    state: verif_state,
+                    method: "turn_effect_ledger_dedup".to_string(),
+                    checks: vec![reason.to_string()],
+                    details: meta.and_then(|m| m.recovery_hint.clone()),
+                },
+                backend_mode: "turn_effect_ledger".to_string(),
+            }));
+        }
+        IdempotencyDecision::Proceed => {}
+    }
+
+    if effect > Effect::Observe {
+        let db_halted = if effective_privacy.allows_task_persistence() {
+            core.state_db
+                .task_has_uncertain_or_recovery_steps(&call.task_id)?
+                || core
+                    .state_db
+                    .turn_has_uncertain_or_recovery_steps(&effect_ledger.turn_id)?
+        } else {
+            false
+        };
+        if effect_ledger.has_uncertain_side_effects() || db_halted {
+            anyhow::bail!(
+                "前置变更步骤存在未确认副作用 (unknown / recovery_required)，已安全阻止继续执行 '{}'",
+                canonical_tool
+            );
+        }
+    }
+
+    let step_id = step_ctx
+        .trusted_step_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| effect_ledger.next_step_id());
+    let pre_epoch = effect_ledger.state_epoch();
+    let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+        policy,
+        &step_id,
+        &attempt_id,
+        &canonical_tool,
+        &canonical_args,
+        pre_epoch,
+    );
+    let step_started_at = Utc::now();
+    let expected_summary = format!("{} {}", canonical_tool, canonical_args);
+
+    if effect > Effect::Observe {
+        let mut log_row = StepExecutionLogRow {
+            task_id: call.task_id.clone(),
+            turn_id: effect_ledger.turn_id.clone(),
+            session_id: session_id.to_string(),
+            step_id: step_id.clone(),
+            attempt_id: attempt_id.clone(),
+            idempotency_key: pre_idem_key.clone(),
+            capability_id: canonical_tool.clone(),
+            effect: effect.as_str().to_string(),
+            exec_state: StepExecState::Prepared,
+            expected_summary: expected_summary.clone(),
+            changeset_id: None,
+            verification_status: "Prepared".to_string(),
+            recovery_hint: None,
+            created_at: step_started_at,
+            updated_at: step_started_at,
+        };
+        core.state_db
+            .upsert_step_execution_log(&log_row, effective_privacy)?;
+        log_row.exec_state = StepExecState::Executing;
+        log_row.verification_status = "Executing".to_string();
+        log_row.updated_at = Utc::now();
+        core.state_db
+            .upsert_step_execution_log(&log_row, effective_privacy)?;
+    }
+
+    match core.broker.dispatch(call).await {
+        Ok(BrokerDispatchOutcome::Executed(res)) => {
+            let (exec_state, is_ok, was_denied, recovery_hint) =
+                classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
+            let post_epoch = if effect > Effect::Observe && !was_denied {
+                effect_ledger.bump_state_epoch()
+            } else {
+                pre_epoch
+            };
+            let idempotency_key = effect_ledger.compute_step_idempotency_key(
+                policy,
+                &step_id,
+                &attempt_id,
+                &canonical_tool,
+                &canonical_args,
+                post_epoch,
+            );
+            let verification_status = if was_denied {
+                "Denied".to_string()
+            } else {
+                format!("{:?}", res.verification.state)
+            };
+            if effect > Effect::Observe {
+                let done_row = StepExecutionLogRow {
+                    task_id: call.task_id.clone(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session_id.to_string(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state,
+                    expected_summary,
+                    changeset_id: res.changeset_id.clone(),
+                    verification_status: verification_status.clone(),
+                    recovery_hint: recovery_hint.clone(),
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&done_row, effective_privacy)?;
+            }
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id: step_id.clone(),
+                    idempotency_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state: effect > Effect::Observe && is_ok,
+                    succeeded: is_ok,
+                    changeset_id: res.changeset_id.clone(),
+                    verification_status: verification_status.clone(),
+                    cached_output: res.data.clone(),
+                },
+                StepExecutionMeta {
+                    step_id,
+                    call_id: step_ctx.call_id,
+                    attempt_id,
+                    policy,
+                    pre_state_epoch: pre_epoch,
+                    post_state_epoch: post_epoch,
+                    exec_state,
+                    is_error: !is_ok,
+                    was_denied,
+                    verification_status,
+                    recovery_hint,
+                },
+            );
+            Ok(BrokerDispatchOutcome::Executed(res))
+        }
+        Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            effect_ledger.pending_approval_step_id = Some(step_id.clone());
+            if effect > Effect::Observe {
+                let prep_row = StepExecutionLogRow {
+                    task_id: call.task_id.clone(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session_id.to_string(),
+                    step_id,
+                    attempt_id,
+                    idempotency_key: pre_idem_key,
+                    capability_id: canonical_tool,
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::Prepared,
+                    expected_summary: pa.summary.clone(),
+                    changeset_id: None,
+                    verification_status: "AwaitingApproval".to_string(),
+                    recovery_hint: None,
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&prep_row, effective_privacy)?;
+            }
+            Ok(BrokerDispatchOutcome::RequiresApproval(pa))
+        }
+        Ok(BrokerDispatchOutcome::Denied { reason }) => {
+            if effect > Effect::Observe {
+                let denied_row = StepExecutionLogRow {
+                    task_id: call.task_id.clone(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session_id.to_string(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: pre_idem_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::Denied,
+                    expected_summary,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&denied_row, effective_privacy)?;
+            }
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id: step_id.clone(),
+                    idempotency_key: pre_idem_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state: false,
+                    succeeded: false,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    cached_output: json!({ "error": reason, "was_denied": true }),
+                },
+                StepExecutionMeta {
+                    step_id,
+                    call_id: step_ctx.call_id,
+                    attempt_id,
+                    policy,
+                    pre_state_epoch: pre_epoch,
+                    post_state_epoch: pre_epoch,
+                    exec_state: StepExecState::Denied,
+                    is_error: true,
+                    was_denied: true,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                },
+            );
+            Ok(BrokerDispatchOutcome::Denied { reason })
+        }
+        Err(err) => {
+            if effect > Effect::Observe {
+                let post_epoch = effect_ledger.bump_state_epoch();
+                let idempotency_key = effect_ledger.compute_step_idempotency_key(
+                    policy,
+                    &step_id,
+                    &attempt_id,
+                    &canonical_tool,
+                    &canonical_args,
+                    post_epoch,
+                );
+                let hint = format!(
+                    "步骤 '{}' ({}) 在进入 Executing 后返回错误 ({})，实际副作用状态未知；已标记为 recovery_required 并阻止整轮回退重放。",
+                    step_id, canonical_tool, err
+                );
+                let rec_row = StepExecutionLogRow {
+                    task_id: call.task_id.clone(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session_id.to_string(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::RecoveryRequired,
+                    expected_summary,
+                    changeset_id: None,
+                    verification_status: "ErrorDuringExecution".to_string(),
+                    recovery_hint: Some(hint.clone()),
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                let _ = core
+                    .state_db
+                    .upsert_step_execution_log(&rec_row, effective_privacy);
+                effect_ledger.record_step_with_meta(
+                    StepExecutionRecord {
+                        step_id: step_id.clone(),
+                        idempotency_key,
+                        capability_id: canonical_tool,
+                        canonical_args_json: canonical_args,
+                        effect,
+                        mutated_state: false,
+                        succeeded: false,
+                        changeset_id: None,
+                        verification_status: "ErrorDuringExecution".to_string(),
+                        cached_output: json!({
+                            "error": err.to_string(),
+                            "exec_state": "recovery_required",
+                            "recovery_hint": hint,
+                        }),
+                    },
+                    StepExecutionMeta {
+                        step_id,
+                        call_id: step_ctx.call_id,
+                        attempt_id,
+                        policy,
+                        pre_state_epoch: pre_epoch,
+                        post_state_epoch: post_epoch,
+                        exec_state: StepExecState::RecoveryRequired,
+                        is_error: true,
+                        was_denied: false,
+                        verification_status: "ErrorDuringExecution".to_string(),
+                        recovery_hint: Some(hint),
+                    },
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Execute a Quick-Chat tool call with explicit separation of trusted `step_id` (from `TurnEffectLedger`
 /// or trusted orchestrator), transport `call_id`, and `attempt_id`.
 #[allow(clippy::too_many_arguments)]
@@ -611,6 +1053,61 @@ pub async fn execute_quick_chat_tool_call_with_step(
     parsed_args: &Value,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<QuickChatToolExecOutcome> {
+    execute_quick_chat_tool_call_with_dispatcher(
+        core,
+        active,
+        execution_mode,
+        task_id,
+        session,
+        user_text,
+        incognito,
+        taints,
+        data_class,
+        step_ctx,
+        fn_name,
+        parsed_args,
+        effect_ledger,
+        |call| async move { core.broker.dispatch(&call).await },
+    )
+    .await
+}
+
+/// Execute a Quick-Chat tool call with an injectable async dispatcher (used by `execute_quick_chat_tool_call_with_step`
+/// in production and by deterministic fault-injection tests in `H03`).
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_quick_chat_tool_call_with_dispatcher<F, Fut>(
+    core: &IntentOsCore,
+    active: &ActiveBackendSelection,
+    execution_mode: BackendExecutionMode,
+    task_id: &str,
+    session: &SessionState,
+    user_text: &str,
+    incognito: bool,
+    taints: &[Taint],
+    data_class: DataClass,
+    step_ctx: StepInvocationContext,
+    fn_name: &str,
+    parsed_args: &Value,
+    effect_ledger: &mut TurnEffectLedger,
+    dispatcher: F,
+) -> anyhow::Result<QuickChatToolExecOutcome>
+where
+    F: FnOnce(CapabilityCall) -> Fut,
+    Fut: Future<Output = anyhow::Result<BrokerDispatchOutcome>>,
+{
+    let fallback_privacy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
+    effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        task_id,
+        &session.session_id,
+        fallback_privacy,
+    );
+    let effective_privacy = if incognito {
+        PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+
     let canonical_tool = resolve_tool_name_to_capability(fn_name, core);
     let is_mem = crate::memory_hub::is_memory_tool(&canonical_tool);
     let is_adap = crate::app_adapter::is_adapter_tool(&canonical_tool);
@@ -661,16 +1158,26 @@ pub async fn execute_quick_chat_tool_call_with_step(
 
         IdempotencyDecision::CachedHit {
             record: prev,
+            meta,
             reason,
-            ..
         } => {
             let is_err = prev.is_error();
             let was_denied = prev.was_denied();
+            let exec_state = meta.map(|m| m.exec_state).unwrap_or(if was_denied {
+                StepExecState::Denied
+            } else if is_err {
+                StepExecState::FailedClean
+            } else {
+                StepExecState::Verified
+            });
+            let recovery_hint = meta.and_then(|m| m.recovery_hint.clone());
             let feedback = serde_json::to_string(&json!({
                 "duplicate_call_blocked": true,
                 "idempotent_dedup": !is_err,
                 "dedup_reason": reason,
                 "policy": policy,
+                "exec_state": exec_state,
+                "recovery_hint": recovery_hint,
                 "idempotency_key": prev.idempotency_key,
                 "step_id": prev.step_id,
                 "tool": canonical_tool,
@@ -681,6 +1188,8 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 "cached_output": prev.cached_output,
                 "instruction": if was_denied {
                     "该操作已被安全策略拒绝（Denied），重复调用同样被拦截。请不要再次尝试访问受禁路径或权限范围。"
+                } else if exec_state.is_uncertain_or_recovery() {
+                    "前置步骤副作用状态未确认（Unknown / RecoveryRequired），系统已严禁自动重放以避免造成二次破坏。请如实告知用户检查现场或执行撤销。"
                 } else if is_err {
                     "该步骤此前执行失败，为防止未知副作用已阻止盲目重放。请向用户如实说明错误原因。"
                 } else {
@@ -697,9 +1206,42 @@ pub async fn execute_quick_chat_tool_call_with_step(
         IdempotencyDecision::Proceed => {}
     }
 
+    // H03 Safety Halt: block any mutating step if an earlier step in this turn or persisted task/turn
+    // left an unconfirmed side effect (`Executing` / `Unknown` / `RecoveryRequired`)!
+    if effect > Effect::Observe {
+        let db_halted = if effective_privacy.allows_task_persistence() {
+            core.state_db
+                .task_has_uncertain_or_recovery_steps(task_id)?
+                || core
+                    .state_db
+                    .turn_has_uncertain_or_recovery_steps(&effect_ledger.turn_id)?
+        } else {
+            false
+        };
+        if effect_ledger.has_uncertain_side_effects() || db_halted {
+            let err_payload = serde_json::to_string(&json!({
+                "duplicate_call_blocked": true,
+                "idempotent_dedup": false,
+                "is_error": true,
+                "was_denied": false,
+                "exec_state": StepExecState::RecoveryRequired,
+                "dedup_reason": "recovery_required_halt",
+                "tool": canonical_tool,
+                "error": "前置变更步骤存在未确认副作用或处于 recovery_required 状态，系统已安全阻止继续执行或重放写操作。",
+                "instruction": "前置副作用状态未知（Unknown / RecoveryRequired），严禁盲目重放或追加破坏性操作；请如实告知用户需要确认现场状态或回滚。",
+            }))?;
+            return Ok(QuickChatToolExecOutcome::ToolMessage {
+                content: err_payload,
+                is_error: true,
+                duplicate_blocked: true,
+            });
+        }
+    }
+
     let mut effective_args = sanitized_input_args.clone();
     if is_mem
         && !incognito
+        && effective_privacy.allows_memory_read()
         && let Some(obj) = effective_args.as_object_mut()
     {
         obj.entry("session_id".to_string())
@@ -725,15 +1267,56 @@ pub async fn execute_quick_chat_tool_call_with_step(
         taints: taints.to_vec(),
     };
 
-    match core.broker.dispatch(&call).await? {
-        BrokerDispatchOutcome::Executed(mut res) => {
-            let step_id = step_ctx
-                .trusted_step_id
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| effect_ledger.next_step_id());
-            let pre_epoch = effect_ledger.state_epoch();
-            let post_epoch = if effect > Effect::Observe {
+    // Allocate trusted `step_id` and journal `Prepared -> Executing` BEFORE `dispatcher(call)` (`H03`)!
+    let step_id = step_ctx
+        .trusted_step_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| effect_ledger.next_step_id());
+    let pre_epoch = effect_ledger.state_epoch();
+    let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+        policy,
+        &step_id,
+        &attempt_id,
+        &canonical_tool,
+        &canonical_args,
+        pre_epoch,
+    );
+    let step_started_at = Utc::now();
+    let expected_summary = format!("{} {}", canonical_tool, canonical_args);
+
+    if effect > Effect::Observe {
+        let mut log_row = StepExecutionLogRow {
+            task_id: task_id.to_string(),
+            turn_id: effect_ledger.turn_id.clone(),
+            session_id: session.session_id.clone(),
+            step_id: step_id.clone(),
+            attempt_id: attempt_id.clone(),
+            idempotency_key: pre_idem_key.clone(),
+            capability_id: canonical_tool.clone(),
+            effect: effect.as_str().to_string(),
+            exec_state: StepExecState::Prepared,
+            expected_summary: expected_summary.clone(),
+            changeset_id: None,
+            verification_status: "Prepared".to_string(),
+            recovery_hint: None,
+            created_at: step_started_at,
+            updated_at: step_started_at,
+        };
+        core.state_db
+            .upsert_step_execution_log(&log_row, effective_privacy)?;
+        log_row.exec_state = StepExecState::Executing;
+        log_row.verification_status = "Executing".to_string();
+        log_row.updated_at = Utc::now();
+        core.state_db
+            .upsert_step_execution_log(&log_row, effective_privacy)?;
+    }
+
+    match dispatcher(call.clone()).await {
+        Ok(BrokerDispatchOutcome::Executed(mut res)) => {
+            let (exec_state, is_ok, was_denied, recovery_hint) =
+                classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
+            let post_epoch = if effect > Effect::Observe && !was_denied {
                 effect_ledger.bump_state_epoch()
             } else {
                 pre_epoch
@@ -765,12 +1348,35 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 effect_ledger.last_resource_path = Some(p.to_string());
             }
 
-            let is_ok = matches!(
-                res.status,
-                ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
-            );
             let mutated_state = effect > Effect::Observe && is_ok;
-            let verification_status = format!("{:?}", res.verification.state);
+            let verification_status = if was_denied {
+                "Denied".to_string()
+            } else {
+                format!("{:?}", res.verification.state)
+            };
+
+            if effect > Effect::Observe {
+                let done_row = StepExecutionLogRow {
+                    task_id: task_id.to_string(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session.session_id.clone(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state,
+                    expected_summary,
+                    changeset_id: res.changeset_id.clone(),
+                    verification_status: verification_status.clone(),
+                    recovery_hint: recovery_hint.clone(),
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&done_row, effective_privacy)?;
+            }
+
             let step_meta = StepExecutionMeta {
                 step_id: step_id.clone(),
                 call_id: step_ctx.call_id.clone(),
@@ -778,9 +1384,11 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 policy,
                 pre_state_epoch: pre_epoch,
                 post_state_epoch: post_epoch,
+                exec_state,
                 is_error: !is_ok,
-                was_denied: false,
+                was_denied,
                 verification_status: verification_status.clone(),
+                recovery_hint: recovery_hint.clone(),
             };
 
             if is_mem {
@@ -795,6 +1403,7 @@ pub async fn execute_quick_chat_tool_call_with_step(
                     "call_id": step_ctx.call_id,
                     "attempt_id": attempt_id,
                     "policy": policy,
+                    "exec_state": exec_state,
                     "idempotency_key": idempotency_key,
                     "capability_id": canonical_tool,
                     "tool": canonical_tool,
@@ -868,6 +1477,7 @@ pub async fn execute_quick_chat_tool_call_with_step(
                     "call_id": step_ctx.call_id,
                     "attempt_id": attempt_id,
                     "policy": policy,
+                    "exec_state": exec_state,
                     "idempotency_key": idempotency_key,
                     "capability_id": canonical_tool,
                     "tool": canonical_tool,
@@ -942,16 +1552,34 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 ));
             }
 
-            let out_val = json!({
-                "message": res.message,
-                "data": res.data,
-            });
+            let out_val = if let Some(ref hint) = recovery_hint {
+                json!({
+                    "message": res.message,
+                    "data": res.data,
+                    "exec_state": exec_state,
+                    "was_denied": was_denied,
+                    "recovery_hint": hint,
+                })
+            } else if was_denied {
+                json!({
+                    "message": res.message,
+                    "data": res.data,
+                    "was_denied": true,
+                })
+            } else {
+                json!({
+                    "message": res.message,
+                    "data": res.data,
+                })
+            };
 
             effect_ledger.tool_steps_json.push(json!({
                 "step_id": step_id,
                 "call_id": step_ctx.call_id,
                 "attempt_id": attempt_id,
                 "policy": policy,
+                "exec_state": exec_state,
+                "recovery_hint": recovery_hint,
                 "idempotency_key": idempotency_key,
                 "capability_id": canonical_tool,
                 "arguments": sanitized_input_args,
@@ -995,7 +1623,30 @@ pub async fn execute_quick_chat_tool_call_with_step(
             })
         }
 
-        BrokerDispatchOutcome::RequiresApproval(pa) => {
+        Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            effect_ledger.pending_approval_step_id = Some(step_id.clone());
+            if effect > Effect::Observe {
+                let prep_row = StepExecutionLogRow {
+                    task_id: task_id.to_string(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session.session_id.clone(),
+                    step_id,
+                    attempt_id,
+                    idempotency_key: pre_idem_key,
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::Prepared,
+                    expected_summary: pa.summary.clone(),
+                    changeset_id: None,
+                    verification_status: "AwaitingApproval".to_string(),
+                    recovery_hint: None,
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&prep_row, effective_privacy)?;
+            }
+
             let now = Utc::now();
             let awaiting_task = Task {
                 id: task_id.to_string(),
@@ -1018,7 +1669,8 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 created_at: now,
                 updated_at: now,
             };
-            let _ = core.persist_or_ephemeral(&awaiting_task, incognito);
+            let _ = core
+                .persist_or_ephemeral(&awaiting_task, !effective_privacy.allows_task_persistence());
 
             let combined_thinking = if effect_ledger.accumulated_thoughts.is_empty() {
                 None
@@ -1049,21 +1701,29 @@ pub async fn execute_quick_chat_tool_call_with_step(
             })
         }
 
-        BrokerDispatchOutcome::Denied { reason } => {
-            let step_id = step_ctx
-                .trusted_step_id
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| effect_ledger.next_step_id());
-            let epoch = effect_ledger.state_epoch();
-            let idempotency_key = effect_ledger.compute_step_idempotency_key(
-                policy,
-                &step_id,
-                &attempt_id,
-                &canonical_tool,
-                &canonical_args,
-                epoch,
-            );
+        Ok(BrokerDispatchOutcome::Denied { reason }) => {
+            if effect > Effect::Observe {
+                let denied_row = StepExecutionLogRow {
+                    task_id: task_id.to_string(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session.session_id.clone(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: pre_idem_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::Denied,
+                    expected_summary,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                core.state_db
+                    .upsert_step_execution_log(&denied_row, effective_privacy)?;
+            }
+
             let err_val = json!({
                 "error": reason,
                 "was_denied": true,
@@ -1076,16 +1736,18 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 call_id: step_ctx.call_id,
                 attempt_id,
                 policy,
-                pre_state_epoch: epoch,
-                post_state_epoch: epoch,
+                pre_state_epoch: pre_epoch,
+                post_state_epoch: pre_epoch,
+                exec_state: StepExecState::Denied,
                 is_error: true,
                 was_denied: true,
                 verification_status: "Denied".to_string(),
+                recovery_hint: None,
             };
             effect_ledger.record_step_with_meta(
                 StepExecutionRecord {
                     step_id,
-                    idempotency_key,
+                    idempotency_key: pre_idem_key,
                     capability_id: canonical_tool,
                     canonical_args_json: canonical_args,
                     effect,
@@ -1103,6 +1765,94 @@ pub async fn execute_quick_chat_tool_call_with_step(
                 duplicate_blocked: false,
             })
         }
+
+        Err(err) => {
+            if effect > Effect::Observe {
+                let post_epoch = effect_ledger.bump_state_epoch();
+                let idempotency_key = effect_ledger.compute_step_idempotency_key(
+                    policy,
+                    &step_id,
+                    &attempt_id,
+                    &canonical_tool,
+                    &canonical_args,
+                    post_epoch,
+                );
+                let hint = format!(
+                    "步骤 '{}' ({}) 在进入 Executing 后返回错误 ({})，实际副作用状态未知；已标记为 recovery_required 并阻止整轮回退重放。",
+                    step_id, canonical_tool, err
+                );
+                let rec_row = StepExecutionLogRow {
+                    task_id: task_id.to_string(),
+                    turn_id: effect_ledger.turn_id.clone(),
+                    session_id: session.session_id.clone(),
+                    step_id: step_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    capability_id: canonical_tool.clone(),
+                    effect: effect.as_str().to_string(),
+                    exec_state: StepExecState::RecoveryRequired,
+                    expected_summary,
+                    changeset_id: None,
+                    verification_status: "ErrorDuringExecution".to_string(),
+                    recovery_hint: Some(hint.clone()),
+                    created_at: step_started_at,
+                    updated_at: Utc::now(),
+                };
+                let _ = core
+                    .state_db
+                    .upsert_step_execution_log(&rec_row, effective_privacy);
+                effect_ledger.trace_dots.push(TraceDot::tool_err(
+                    &canonical_tool,
+                    err.to_string(),
+                    0,
+                ));
+                effect_ledger.tool_steps_json.push(json!({
+                    "step_id": step_id,
+                    "call_id": step_ctx.call_id,
+                    "attempt_id": attempt_id,
+                    "policy": policy,
+                    "exec_state": StepExecState::RecoveryRequired,
+                    "recovery_hint": hint,
+                    "idempotency_key": idempotency_key,
+                    "capability_id": canonical_tool,
+                    "arguments": sanitized_input_args,
+                    "status": "recovery_required",
+                    "error": err.to_string(),
+                }));
+                effect_ledger.record_step_with_meta(
+                    StepExecutionRecord {
+                        step_id: step_id.clone(),
+                        idempotency_key,
+                        capability_id: canonical_tool,
+                        canonical_args_json: canonical_args,
+                        effect,
+                        mutated_state: false,
+                        succeeded: false,
+                        changeset_id: None,
+                        verification_status: "ErrorDuringExecution".to_string(),
+                        cached_output: json!({
+                            "error": err.to_string(),
+                            "exec_state": "recovery_required",
+                            "recovery_hint": hint,
+                        }),
+                    },
+                    StepExecutionMeta {
+                        step_id,
+                        call_id: step_ctx.call_id,
+                        attempt_id,
+                        policy,
+                        pre_state_epoch: pre_epoch,
+                        post_state_epoch: post_epoch,
+                        exec_state: StepExecState::RecoveryRequired,
+                        is_error: true,
+                        was_denied: false,
+                        verification_status: "ErrorDuringExecution".to_string(),
+                        recovery_hint: Some(hint),
+                    },
+                );
+            }
+            Err(err)
+        }
     }
 }
 
@@ -1114,7 +1864,10 @@ pub fn record_approved_step_into_ledger(
     paused_args_val: &Value,
     task_changeset_ids: &[String],
 ) {
-    let step_id = effect_ledger.next_step_id();
+    let step_id = effect_ledger
+        .pending_approval_step_id
+        .take()
+        .unwrap_or_else(|| effect_ledger.next_step_id());
     let sanitized_args = strip_untrusted_step_meta_fields(paused_args_val);
     let canonical_args = canonicalize_json_for_dedup(&sanitized_args);
     let effect = resolve_capability_effect(core, &step.capability_id);
@@ -1130,12 +1883,77 @@ pub fn record_approved_step_into_ledger(
         &canonical_args,
         post_epoch,
     );
-    let is_ok = matches!(
-        step.status,
-        ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
-    );
+    let was_denied = step.status == ExecutionStatus::Denied;
+    let verif_failed = step.status == ExecutionStatus::VerificationFailed
+        || step.verification.state == VerificationState::VerificationFailed;
+    let req_unverified = step.status == ExecutionStatus::RequestedUnverified
+        || step.verification.state == VerificationState::RequestedUnverified;
+    let is_ok = !was_denied
+        && !verif_failed
+        && matches!(
+            step.status,
+            ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
+        );
+    let (exec_state, recovery_hint) = if was_denied {
+        (StepExecState::Denied, None)
+    } else if verif_failed {
+        if effect > Effect::Observe {
+            (
+                StepExecState::Unknown,
+                Some(format!(
+                    "已授权步骤 '{}' ({}) 校验失败 ({})，可能已产生未确认副作用。",
+                    step_id, step.capability_id, step.message
+                )),
+            )
+        } else {
+            (StepExecState::FailedClean, None)
+        }
+    } else if req_unverified {
+        (StepExecState::Applied, None)
+    } else if is_ok {
+        (StepExecState::Verified, None)
+    } else if effect > Effect::Observe {
+        (
+            StepExecState::Unknown,
+            Some(format!(
+                "已授权步骤 '{}' ({}) 执行状态异常 ({:?})。",
+                step_id, step.capability_id, step.status
+            )),
+        )
+    } else {
+        (StepExecState::FailedClean, None)
+    };
     let mutated_state = effect > Effect::Observe && is_ok;
-    let verification_status = format!("{:?}", step.verification.state);
+    let verification_status = if was_denied {
+        "Denied".to_string()
+    } else {
+        format!("{:?}", step.verification.state)
+    };
+
+    if effect > Effect::Observe
+        && let (Some(db), Some(tid)) = (effect_ledger.state_db(), effect_ledger.bound_task_id())
+    {
+        let sid = effect_ledger.bound_session_id().unwrap_or("");
+        let now = Utc::now();
+        let row = StepExecutionLogRow {
+            task_id: tid.to_string(),
+            turn_id: effect_ledger.turn_id.clone(),
+            session_id: sid.to_string(),
+            step_id: step_id.clone(),
+            attempt_id: "approved_attempt_1".to_string(),
+            idempotency_key: idempotency_key.clone(),
+            capability_id: step.capability_id.clone(),
+            effect: effect.as_str().to_string(),
+            exec_state,
+            expected_summary: format!("{} {}", step.capability_id, canonical_args),
+            changeset_id: step.changeset_id.clone(),
+            verification_status: verification_status.clone(),
+            recovery_hint: recovery_hint.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let _ = db.upsert_step_execution_log(&row, effect_ledger.privacy());
+    }
 
     for csid in task_changeset_ids {
         if !effect_ledger.changeset_ids.contains(csid) {
@@ -1176,6 +1994,8 @@ pub fn record_approved_step_into_ledger(
     effect_ledger.tool_steps_json.push(json!({
         "step_id": step_id,
         "policy": policy,
+        "exec_state": exec_state,
+        "recovery_hint": recovery_hint,
         "idempotency_key": idempotency_key,
         "capability_id": step.capability_id,
         "arguments": sanitized_args,
@@ -1194,9 +2014,11 @@ pub fn record_approved_step_into_ledger(
         policy,
         pre_state_epoch: pre_epoch,
         post_state_epoch: post_epoch,
+        exec_state,
         is_error: !is_ok,
-        was_denied: false,
+        was_denied,
         verification_status: verification_status.clone(),
+        recovery_hint,
     };
     effect_ledger.record_step_with_meta(
         StepExecutionRecord {
@@ -1705,11 +2527,29 @@ pub fn finalize_completed_turn_outcome(
             .map(String::from)
     });
 
+    let fallback_privacy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
+    effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        task_id,
+        &session.session_id,
+        fallback_privacy,
+    );
+    let effective_privacy = if incognito {
+        PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+
     let changeset_ids = effect_ledger.committed_changeset_ids();
     let task_steps = std::mem::take(&mut effect_ledger.task_steps);
     let last_resource_path = effect_ledger.last_resource_path.take();
+    let task_status = if effect_ledger.has_uncertain_side_effects() {
+        TaskStatus::RecoveryRequired
+    } else {
+        TaskStatus::Completed
+    };
 
-    if !incognito {
+    if effective_privacy.allows_task_persistence() {
         let now = Utc::now();
         let completed_task = Task {
             id: task_id.to_string(),
@@ -1718,7 +2558,7 @@ pub fn finalize_completed_turn_outcome(
             project_id: None,
             trigger: TaskTrigger::User,
             route: RouteLayer::L2,
-            status: TaskStatus::Completed,
+            status: task_status,
             steps: task_steps,
             changeset_ids: changeset_ids.clone(),
             pending_approval: None,
@@ -1733,6 +2573,8 @@ pub fn finalize_completed_turn_outcome(
             updated_at: now,
         };
         let _ = core.state_db.upsert_task(&completed_task);
+    }
+    if effective_privacy.allows_memory_write() {
         core.sessions.append_turn(
             &session.session_id,
             user_text,
@@ -1917,21 +2759,49 @@ pub fn build_halted_side_effect_outcome(
     effect_ledger: &mut TurnEffectLedger,
     upstream_err_msg: &str,
 ) -> TurnExecutionOutcome {
+    let fallback_privacy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
+    effect_ledger.ensure_persistence_context(
+        core.state_db.clone(),
+        task_id,
+        &session.session_id,
+        fallback_privacy,
+    );
+    let effective_privacy = if incognito {
+        PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+
     let changeset_ids = effect_ledger.committed_changeset_ids();
-    let mut summary_lines = vec![
+    let has_uncertain = effect_ledger.has_uncertain_side_effects();
+    let mut summary_lines = vec![if has_uncertain {
+        "检测到变更步骤存在未确认副作用或执行中断；为防止重复执行或二次破坏，已将任务标记为待恢复（recovery_required）并安全中止自动回退重试：".to_string()
+    } else {
         "已完成前置系统操作，但后续模型响应异常；为防止重复执行副作用，已安全中止自动回退重试："
-            .to_string(),
-    ];
-    for rec in effect_ledger.records().iter().filter(|r| r.succeeded) {
-        if let Some(ref csid) = rec.changeset_id {
+            .to_string()
+    }];
+    for (idx, rec) in effect_ledger.records().iter().enumerate() {
+        let meta = effect_ledger.step_metadata().get(idx);
+        if rec.succeeded {
+            if let Some(ref csid) = rec.changeset_id {
+                summary_lines.push(format!(
+                    "- **{}** (`{}`)：已执行成功（可撤销凭证：`{}`）",
+                    rec.step_id, rec.capability_id, csid
+                ));
+            } else {
+                summary_lines.push(format!(
+                    "- **{}** (`{}`)：已执行成功",
+                    rec.step_id, rec.capability_id
+                ));
+            }
+        } else if meta.is_some_and(|m| m.exec_state.is_uncertain_or_recovery()) {
+            let state_label = meta.map(|m| m.exec_state.as_str()).unwrap_or("unknown");
+            let hint = meta
+                .and_then(|m| m.recovery_hint.as_deref())
+                .unwrap_or("执行中断，实际副作用状态待核实");
             summary_lines.push(format!(
-                "- **{}** (`{}`)：已执行成功（可撤销凭证：`{}`）",
-                rec.step_id, rec.capability_id, csid
-            ));
-        } else {
-            summary_lines.push(format!(
-                "- **{}** (`{}`)：已执行成功",
-                rec.step_id, rec.capability_id
+                "- **{}** (`{}`)：状态 `{}` — {}",
+                rec.step_id, rec.capability_id, state_label, hint
             ));
         }
     }
@@ -1952,8 +2822,13 @@ pub fn build_halted_side_effect_outcome(
     });
     let task_steps = std::mem::take(&mut effect_ledger.task_steps);
     let last_resource_path = effect_ledger.last_resource_path.take();
+    let task_status = if has_uncertain {
+        TaskStatus::RecoveryRequired
+    } else {
+        TaskStatus::Completed
+    };
 
-    if !incognito {
+    if effective_privacy.allows_task_persistence() {
         let now = Utc::now();
         let partial_task = Task {
             id: task_id.to_string(),
@@ -1962,7 +2837,7 @@ pub fn build_halted_side_effect_outcome(
             project_id: None,
             trigger: TaskTrigger::User,
             route: RouteLayer::L2,
-            status: TaskStatus::Completed,
+            status: task_status,
             steps: task_steps,
             changeset_ids: changeset_ids.clone(),
             pending_approval: None,
@@ -1977,6 +2852,8 @@ pub fn build_halted_side_effect_outcome(
             updated_at: now,
         };
         let _ = core.state_db.upsert_task(&partial_task);
+    }
+    if effective_privacy.allows_memory_write() {
         core.sessions.append_turn(
             &session.session_id,
             user_text,
@@ -2608,9 +3485,11 @@ mod tests {
                 policy: ToolIdempotencyPolicy::AlwaysRefresh,
                 pre_state_epoch: 0,
                 post_state_epoch: 0,
+                exec_state: StepExecState::FailedClean,
                 is_error: true,
                 was_denied: false,
                 verification_status: "Failed".into(),
+                recovery_hint: None,
             },
         );
         // Same (step_1, attempt_1) -> CachedHit with is_error = true
@@ -2664,9 +3543,11 @@ mod tests {
                 policy: ToolIdempotencyPolicy::AlwaysRefresh,
                 pre_state_epoch: 0,
                 post_state_epoch: 0,
+                exec_state: StepExecState::FailedClean,
                 is_error: true,
                 was_denied: false,
                 verification_status: "Failed".into(),
+                recovery_hint: None,
             },
         );
         assert!(matches!(
@@ -2713,5 +3594,519 @@ mod tests {
         // URLs must NOT have `https://` mangled by path normalization
         let url_args = json!({ "target": "https://example.com/a//b" });
         assert!(canonicalize_json_for_dedup(&url_args).contains("https://example.com/a//b"));
+    }
+
+    #[tokio::test]
+    async fn h03_mutating_tool_err_and_verification_failed_mark_unknown_and_halt_replay() {
+        let (_tmp, ws, core) = setup_bridge_test_core();
+        core.policy
+            .add_session_grant("directory", &ws.to_string_lossy(), 30);
+        let session = core.sessions.get_or_create(Some("ses_h03_uncertain"));
+        let active = dummy_active_selection();
+
+        // --- Part A: Mutating tool enters `Executing`, mutates file, then returns `Err` ---
+        let mut ledger_err =
+            TurnEffectLedger::new("turn_h03_err").with_privacy(PrivacySessionPolicy::Standard);
+        let partial_file = ws.join("partial_mutated.txt");
+        let write_args = json!({
+            "path": partial_file.to_string_lossy(),
+            "content": "side_effect_happened_before_err"
+        });
+
+        let core_in_dispatch = core.clone();
+        let pf_clone = partial_file.clone();
+        let dispatch_res = execute_quick_chat_tool_call_with_dispatcher(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h03_err_01",
+            &session,
+            "write important file",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::new_call("call_err_1"),
+            "file_write",
+            &write_args,
+            &mut ledger_err,
+            move |_call| async move {
+                // Verify pre-execution WAL invariant: step MUST already be `Executing` in SQLite!
+                let mid_row = core_in_dispatch
+                    .state_db
+                    .get_step_execution_log("task_h03_err_01", "step_1")
+                    .unwrap()
+                    .expect("step_1 must be persisted as Executing before dispatcher runs");
+                assert_eq!(mid_row.exec_state, StepExecState::Executing);
+
+                // Perform OS mutation, then fail before returning clean completion!
+                std::fs::write(&pf_clone, "side_effect_happened_before_err").unwrap();
+                anyhow::bail!("simulated transport/worker crash after mutation")
+            },
+        )
+        .await;
+
+        assert!(dispatch_res.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&partial_file).unwrap(),
+            "side_effect_happened_before_err"
+        );
+
+        // Must NOT pretend zero side effect occurred!
+        assert!(ledger_err.has_uncertain_side_effects());
+        assert!(ledger_err.has_uncertain_or_committed_side_effects());
+        assert!(ledger_err.has_committed_side_effects());
+
+        let post_err_row = core
+            .state_db
+            .get_step_execution_log("task_h03_err_01", "step_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(post_err_row.exec_state, StepExecState::RecoveryRequired);
+        assert!(post_err_row.recovery_hint.is_some());
+
+        // Subsequent mutating tool call on this ledger/task MUST be halted without executing!
+        let mut replay_executed = false;
+        let blocked_replay = execute_quick_chat_tool_call_with_dispatcher(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h03_err_01",
+            &session,
+            "write important file",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::new_call("call_err_2"),
+            "file_write",
+            &json!({
+                "path": ws.join("second_file.txt").to_string_lossy(),
+                "content": "must never write"
+            }),
+            &mut ledger_err,
+            |_call| {
+                replay_executed = true;
+                async move { unreachable!("dispatcher must not run after RecoveryRequired halt") }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!replay_executed);
+        match blocked_replay {
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error,
+                duplicate_blocked,
+                content,
+            } => {
+                assert!(is_error);
+                assert!(duplicate_blocked);
+                assert!(content.contains("recovery_required"));
+            }
+            _ => panic!("expected halted ToolMessage"),
+        }
+        assert!(!ws.join("second_file.txt").exists());
+
+        // Halted turn finalizer marks TaskStatus::RecoveryRequired
+        let halted_outcome = build_halted_side_effect_outcome(
+            &core,
+            &active,
+            "task_h03_err_01",
+            &session,
+            "write important file",
+            false,
+            vec![Taint::User],
+            DataClass::Personal,
+            &mut ledger_err,
+            "simulated transport/worker crash after mutation",
+        );
+        assert!(halted_outcome.side_effect_replay_prevented);
+        let stored_task = core
+            .state_db
+            .get_task("task_h03_err_01")
+            .unwrap()
+            .expect("task persisted");
+        assert_eq!(stored_task.status, TaskStatus::RecoveryRequired);
+
+        // --- Part B: `Executed` with `VerificationState::VerificationFailed` -> `Unknown` & halts replay ---
+        let mut ledger_vf =
+            TurnEffectLedger::new("turn_h03_vf").with_privacy(PrivacySessionPolicy::Standard);
+        let vf_file = ws.join("verif_failed.txt");
+        let vf_clone = vf_file.clone();
+        let vf_out = execute_quick_chat_tool_call_with_dispatcher(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h03_vf_01",
+            &session,
+            "write and verify",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::for_trusted_step("step_1", "call_vf_1", "attempt_1"),
+            "file_write",
+            &json!({
+                "path": vf_file.to_string_lossy(),
+                "content": "unverified_bytes"
+            }),
+            &mut ledger_vf,
+            move |call| async move {
+                std::fs::write(&vf_clone, "unverified_bytes").unwrap();
+                Ok(BrokerDispatchOutcome::Executed(CapabilityResult {
+                    request_id: call.request_id,
+                    capability_id: call.capability_id,
+                    status: ExecutionStatus::VerificationFailed,
+                    exit_code: Some(1),
+                    message: "post-write sha256 mismatch".into(),
+                    data: json!({ "written": true }),
+                    stdout_preview: String::new(),
+                    stderr_preview: "sha256 mismatch".into(),
+                    truncated: false,
+                    duration_ms: 4,
+                    changeset_id: None,
+                    verification: VerificationReport {
+                        state: VerificationState::VerificationFailed,
+                        method: "sha256_readback".into(),
+                        checks: vec!["sha256_mismatch".into()],
+                        details: Some("expected abc, got def".into()),
+                    },
+                    backend_mode: "e3_openat2".into(),
+                }))
+            },
+        )
+        .await
+        .unwrap();
+
+        match vf_out {
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error,
+                duplicate_blocked,
+                content,
+            } => {
+                assert!(is_error);
+                assert!(!duplicate_blocked);
+                assert!(content.contains("unknown"));
+            }
+            _ => panic!("expected ToolMessage"),
+        }
+        assert!(ledger_vf.has_uncertain_side_effects());
+        assert!(ledger_vf.has_uncertain_or_committed_side_effects());
+        let vf_row = core
+            .state_db
+            .get_step_execution_log("task_h03_vf_01", "step_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(vf_row.exec_state, StepExecState::Unknown);
+
+        // Replaying same `step_1` on `attempt_2` MUST NOT re-execute!
+        let vf_replay = execute_quick_chat_tool_call_with_dispatcher(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_h03_vf_01",
+            &session,
+            "write and verify",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::for_trusted_step("step_1", "call_vf_2", "attempt_2"),
+            "file_write",
+            &json!({
+                "path": vf_file.to_string_lossy(),
+                "content": "unverified_bytes"
+            }),
+            &mut ledger_vf,
+            |_call| async move { unreachable!("Unknown step must never blindly replay") },
+        )
+        .await
+        .unwrap();
+        match vf_replay {
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error,
+                duplicate_blocked,
+                content,
+            } => {
+                assert!(is_error);
+                assert!(duplicate_blocked);
+                assert!(content.contains("uncertain_side_effect_halt"));
+            }
+            _ => panic!("expected cached halt ToolMessage"),
+        }
+    }
+
+    #[tokio::test]
+    async fn h03_crash_mid_executing_reopen_marks_recovery_required_and_blocks_blind_replay() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("base");
+        let ws = temp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let xdg = XdgPaths::resolve(Some(&base), repo_root.clone());
+        xdg.ensure_dirs().unwrap();
+        let cfg = AppConfig {
+            authorized_directories: vec![ws.to_string_lossy().to_string()],
+            allow_simulated_hardware_fallback: true,
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            xdg.config_dir.join("config.toml"),
+            toml::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.config_dir.join("brain.toml"),
+            toml::to_string_pretty(&BrainConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        let active = dummy_active_selection();
+        let target_file = ws.join("crash_target.txt");
+
+        // --- Core 1: Abort mid-`Executing` (simulating SIGKILL / power loss mid-step!) ---
+        {
+            let core1 = IntentOsCore::initialize(Some(&base), repo_root.clone()).unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+            let (_never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
+
+            let core1_task = core1.clone();
+            let active_task = active.clone();
+            let tf_task = target_file.clone();
+            let spawned = tokio::spawn(async move {
+                let session = core1_task.sessions.get_or_create(Some("ses_crash_mid"));
+                let mut ledger = TurnEffectLedger::new("turn_crash_mid_01")
+                    .with_privacy(PrivacySessionPolicy::Standard);
+                let _ = execute_quick_chat_tool_call_with_dispatcher(
+                    &core1_task,
+                    &active_task,
+                    BackendExecutionMode::ManagedBrokerTools,
+                    "task_crash_mid_01",
+                    &session,
+                    "write crash target",
+                    false,
+                    &[Taint::User],
+                    DataClass::Personal,
+                    StepInvocationContext::new_call("call_crash_1"),
+                    "file_write",
+                    &json!({
+                        "path": tf_task.to_string_lossy(),
+                        "content": "half_written_before_sigkill"
+                    }),
+                    &mut ledger,
+                    move |_call| async move {
+                        std::fs::write(&tf_task, "half_written_before_sigkill").unwrap();
+                        let _ = entered_tx.send(());
+                        let _ = never_rx.await;
+                        unreachable!()
+                    },
+                )
+                .await;
+            });
+
+            entered_rx.await.unwrap();
+            // Confirm `step_execution_log` is literally in `Executing` right before crash!
+            let mid = core1
+                .state_db
+                .get_step_execution_log("task_crash_mid_01", "step_1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(mid.exec_state, StepExecState::Executing);
+
+            // Hard-abort the running task (zero post-dispatch cleanup runs!) and drop `core1`
+            spawned.abort();
+            let _ = spawned.await;
+        }
+
+        // --- Core 2: Reopen daemon over the same `state.db` ---
+        let core2 = IntentOsCore::initialize(Some(&base), repo_root).unwrap();
+        core2
+            .policy
+            .add_session_grant("directory", &ws.to_string_lossy(), 30);
+
+        let recovered_step = core2
+            .state_db
+            .get_step_execution_log("task_crash_mid_01", "step_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered_step.exec_state, StepExecState::RecoveryRequired);
+
+        let recovered_task = core2
+            .state_db
+            .get_task("task_crash_mid_01")
+            .unwrap()
+            .expect("recovery_required task must exist after startup scan");
+        assert_eq!(recovered_task.status, TaskStatus::RecoveryRequired);
+
+        // Attempting to replay `file_write` on `task_crash_mid_01` (or `turn_crash_mid_01`) with a fresh ledger MUST be blocked!
+        let session2 = core2.sessions.get_or_create(Some("ses_crash_mid"));
+        let mut fresh_ledger =
+            TurnEffectLedger::new("turn_crash_mid_01").with_privacy(PrivacySessionPolicy::Standard);
+        let replay_attempt = execute_quick_chat_tool_call_with_dispatcher(
+            &core2,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "task_crash_mid_01",
+            &session2,
+            "write crash target",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            StepInvocationContext::new_call("call_after_restart"),
+            "file_write",
+            &json!({
+                "path": target_file.to_string_lossy(),
+                "content": "blind_replay_overwrite"
+            }),
+            &mut fresh_ledger,
+            |_call| async move {
+                unreachable!("must never blindly replay mutating step on recovery_required task")
+            },
+        )
+        .await
+        .unwrap();
+
+        match replay_attempt {
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error,
+                duplicate_blocked,
+                content,
+            } => {
+                assert!(is_error);
+                assert!(duplicate_blocked);
+                assert!(content.contains("recovery_required_halt"));
+            }
+            _ => panic!("expected recovery_required_halt ToolMessage"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&target_file).unwrap(),
+            "half_written_before_sigkill"
+        );
+    }
+
+    #[tokio::test]
+    async fn h03_ephemeral_read_only_and_strict_isolated_write_zero_sqlite_rows() {
+        let (_tmp, ws, core) = setup_bridge_test_core();
+        core.policy
+            .add_session_grant("directory", &ws.to_string_lossy(), 30);
+        let active = dummy_active_selection();
+
+        // 1. EphemeralReadOnly session (`ephemeral_ro_*`) executes mutating tool + finalizes turn -> 0 SQLite rows!
+        let eph_session = core.sessions.get_or_create(Some("ephemeral_ro_h03"));
+        let mut eph_ledger = TurnEffectLedger::new("turn_h03_eph")
+            .with_privacy(PrivacySessionPolicy::EphemeralReadOnly);
+        let eph_file = ws.join("eph_out.txt");
+        let eph_res = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "incog_eph_task_01",
+            &eph_session,
+            "write ephemeral note",
+            false,
+            &[Taint::User],
+            DataClass::Personal,
+            "call_eph_1",
+            "file_write",
+            &json!({
+                "path": eph_file.to_string_lossy(),
+                "content": "ephemeral_only"
+            }),
+            &mut eph_ledger,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            eph_res,
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error: false,
+                ..
+            }
+        ));
+        let _ = finalize_completed_turn_outcome(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "incog_eph_task_01",
+            &eph_session,
+            "write ephemeral note",
+            false,
+            vec![Taint::User],
+            DataClass::Personal,
+            "done".into(),
+            &mut eph_ledger,
+        );
+
+        // 2. StrictIsolated (`incognito = true`) executes mutating tool + finalizes turn -> 0 SQLite rows!
+        let iso_session = core.sessions.get_or_create(Some("incog_h03_strict"));
+        let mut iso_ledger = TurnEffectLedger::new("turn_h03_iso")
+            .with_privacy(PrivacySessionPolicy::StrictIsolated);
+        let iso_file = ws.join("iso_out.txt");
+        let iso_res = execute_quick_chat_tool_call(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "incog_strict_task_01",
+            &iso_session,
+            "write strict isolated note",
+            true,
+            &[Taint::User],
+            DataClass::Sensitive,
+            "call_iso_1",
+            "file_write",
+            &json!({
+                "path": iso_file.to_string_lossy(),
+                "content": "strict_isolated_only"
+            }),
+            &mut iso_ledger,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            iso_res,
+            QuickChatToolExecOutcome::ToolMessage {
+                is_error: false,
+                ..
+            }
+        ));
+        let _ = finalize_completed_turn_outcome(
+            &core,
+            &active,
+            BackendExecutionMode::ManagedBrokerTools,
+            "incog_strict_task_01",
+            &iso_session,
+            "write strict isolated note",
+            true,
+            vec![Taint::User],
+            DataClass::Sensitive,
+            "done".into(),
+            &mut iso_ledger,
+        );
+
+        assert_eq!(
+            core.state_db.count_step_execution_logs().unwrap(),
+            0,
+            "EphemeralReadOnly and StrictIsolated must write ZERO rows to step_execution_log"
+        );
+        assert_eq!(
+            core.state_db.count_suspended_checkpoints().unwrap(),
+            0,
+            "EphemeralReadOnly and StrictIsolated must write ZERO rows to suspended_turn_checkpoints"
+        );
+        assert!(
+            core.state_db
+                .get_task("incog_eph_task_01")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            core.state_db
+                .get_task("incog_strict_task_01")
+                .unwrap()
+                .is_none()
+        );
     }
 }
