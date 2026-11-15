@@ -4,9 +4,10 @@
 //! - OpenAI-compatible (`/v1/chat/completions` & `ModelGateway` lease proxy)
 //! - Anthropic Messages API (`/v1/messages`, including ZCode `builtin:bigmodel` / Claude)
 //! - Seamless checkpoint continuation (`continue_resumed_openai_turn` & `continue_resumed_anthropic_turn`)
-//!
-//! All tool calls execute exclusively through `broker_bridge::execute_quick_chat_tool_call`
-//! with `TurnEffectLedger` idempotency and `BackendExecutionMode::ManagedBrokerTools`.
+//! - Unified `allow_broker_tools` ("Chat-Only Mode") enforcement across OpenAI & Anthropic HTTP:
+//!   when `allow_broker_tools == false`, tool schemas are omitted completely, `execution_mode` is
+//!   `BackendExecutionMode::ExternalChatOnly`, and any forced upstream `tool_calls` / `tool_use`
+//!   blocks are hard-rejected without ever invoking `CapabilityBroker`.
 
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
@@ -30,6 +31,9 @@ use intentos_protocol::{ContextBlock, DataClass, ProviderTrust};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+const HTTP_CHAT_ONLY_PROMPT_NOTE: &str = "\n\n[chat_only_policy | taint=System]\n\
+当前会话启用了仅对话模式（allow_broker_tools=false）：严禁调用任何系统工具或执行系统变更，请仅以纯文本自然语言回答。";
 
 pub enum UpstreamTransport {
     GatewayLease {
@@ -121,6 +125,33 @@ pub fn resolve_upstream_transport(
     })
 }
 
+fn format_chat_only_tool_rejection(
+    cleaned_content: &str,
+    blocked_names: &[String],
+    effect_ledger: &mut TurnEffectLedger,
+) -> String {
+    let joined = if blocked_names.is_empty() {
+        "unknown_tool".to_string()
+    } else {
+        blocked_names.join(", ")
+    };
+    let security_note = format!(
+        "安全拦截（仅对话模式 allow_broker_tools=false）：已拒绝上游模型未授权的工具调用请求 [{}]，CapabilityBroker 未执行任何系统操作。",
+        joined
+    );
+    effect_ledger.trace_dots.push(TraceDot::tool_err(
+        "chat_only_policy",
+        security_note.clone(),
+        0,
+    ));
+
+    if cleaned_content.trim().is_empty() {
+        format!("> {}\n", security_note)
+    } else {
+        format!("{}\n\n> {}", cleaned_content.trim(), security_note)
+    }
+}
+
 fn parse_remaining_openai_tool_calls(tool_calls: &[Value]) -> Vec<(String, String, Value)> {
     tool_calls
         .iter()
@@ -185,10 +216,7 @@ fn parse_anthropic_content_blocks(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let input = block
-                    .get("input")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 if !name.is_empty() {
                     tool_uses.push((id, name, input));
                 }
@@ -225,8 +253,55 @@ pub async fn run_openai_tool_calling_turn(
     incognito: bool,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<TurnExecutionOutcome> {
+    run_openai_tool_calling_turn_with_policy(
+        core,
+        opts,
+        transport,
+        active,
+        turn_handle,
+        task_id,
+        session,
+        user_text,
+        extra_blocks,
+        compressed_history,
+        memory_hits,
+        memory_dot,
+        incognito,
+        true,
+        effect_ledger,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_openai_tool_calling_turn_with_policy(
+    core: &IntentOsCore,
+    opts: &DiscoveryOptions,
+    transport: UpstreamTransport,
+    active: &ActiveBackendSelection,
+    turn_handle: &Arc<ActiveTurnHandle>,
+    task_id: &str,
+    session: &SessionState,
+    user_text: &str,
+    extra_blocks: &[ContextBlock],
+    compressed_history: &crate::memory_hub::CompressedSessionHistory,
+    memory_hits: &[Value],
+    memory_dot: Option<&TraceDot>,
+    incognito: bool,
+    allow_broker_tools: bool,
+    effect_ledger: &mut TurnEffectLedger,
+) -> anyhow::Result<TurnExecutionOutcome> {
+    let execution_mode = if allow_broker_tools {
+        BackendExecutionMode::ManagedBrokerTools
+    } else {
+        BackendExecutionMode::ExternalChatOnly
+    };
+
     let (mut sys_text, taints, data_class) =
         prepare_system_prompt_and_context(core, active, extra_blocks, incognito);
+    if !allow_broker_tools {
+        sys_text.push_str(HTTP_CHAT_ONLY_PROMPT_NOTE);
+    }
     if let Some(ref anchor) = compressed_history.ancient_summary_anchor
         && !anchor.trim().is_empty()
     {
@@ -245,8 +320,16 @@ pub async fn run_openai_tool_calling_turn(
     }
     messages.push(json!({ "role": "user", "content": user_text }));
 
-    let openai_tools = build_quick_chat_openai_tools(core, user_text);
-    let max_rounds = core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize;
+    let openai_tools = if allow_broker_tools {
+        build_quick_chat_openai_tools(core, user_text)
+    } else {
+        Vec::new()
+    };
+    let max_rounds = if allow_broker_tools {
+        core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize
+    } else {
+        1
+    };
 
     let result: anyhow::Result<TurnExecutionOutcome> = async {
         for round_idx in 0..max_rounds {
@@ -294,6 +377,37 @@ pub async fn run_openai_tool_calling_turn(
                 .and_then(|tc| tc.as_array())
                 .filter(|a| !a.is_empty())
             {
+                if !allow_broker_tools {
+                    let blocked_names: Vec<String> = tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            tc.pointer("/function/name")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                        })
+                        .collect();
+                    let rejected_md = format_chat_only_tool_rejection(
+                        &cleaned_content,
+                        &blocked_names,
+                        effect_ledger,
+                    );
+                    return Ok(finalize_completed_turn_outcome(
+                        core,
+                        active,
+                        BackendExecutionMode::ExternalChatOnly,
+                        task_id,
+                        session,
+                        user_text,
+                        incognito,
+                        taints,
+                        data_class,
+                        rejected_md,
+                        effect_ledger,
+                    ));
+                }
+
                 messages.push(msg.clone());
                 for (tc_idx, tc) in tool_calls.iter().enumerate() {
                     if turn_handle.is_cancelled() {
@@ -316,7 +430,7 @@ pub async fn run_openai_tool_calling_turn(
                     match execute_quick_chat_tool_call(
                         core,
                         active,
-                        BackendExecutionMode::ManagedBrokerTools,
+                        execution_mode,
                         task_id,
                         session,
                         user_text,
@@ -381,7 +495,7 @@ pub async fn run_openai_tool_calling_turn(
                 return Ok(finalize_completed_turn_outcome(
                     core,
                     active,
-                    BackendExecutionMode::ManagedBrokerTools,
+                    execution_mode,
                     task_id,
                     session,
                     user_text,
@@ -398,7 +512,7 @@ pub async fn run_openai_tool_calling_turn(
             return Ok(finalize_completed_turn_outcome(
                 core,
                 active,
-                BackendExecutionMode::ManagedBrokerTools,
+                execution_mode,
                 task_id,
                 session,
                 user_text,
@@ -441,8 +555,60 @@ pub async fn run_anthropic_tool_calling_turn(
     incognito: bool,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<TurnExecutionOutcome> {
+    run_anthropic_tool_calling_turn_with_policy(
+        core,
+        opts,
+        base_url,
+        api_key,
+        trust,
+        active,
+        turn_handle,
+        task_id,
+        session,
+        user_text,
+        extra_blocks,
+        compressed_history,
+        memory_hits,
+        memory_dot,
+        incognito,
+        true,
+        effect_ledger,
+    )
+    .await
+}
+
+/// Execute an Anthropic Messages API turn with explicit `allow_broker_tools` chat-only enforcement.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_anthropic_tool_calling_turn_with_policy(
+    core: &IntentOsCore,
+    opts: &DiscoveryOptions,
+    base_url: &str,
+    api_key: Option<&str>,
+    trust: ProviderTrust,
+    active: &ActiveBackendSelection,
+    turn_handle: &Arc<ActiveTurnHandle>,
+    task_id: &str,
+    session: &SessionState,
+    user_text: &str,
+    extra_blocks: &[ContextBlock],
+    compressed_history: &crate::memory_hub::CompressedSessionHistory,
+    memory_hits: &[Value],
+    memory_dot: Option<&TraceDot>,
+    incognito: bool,
+    allow_broker_tools: bool,
+    effect_ledger: &mut TurnEffectLedger,
+) -> anyhow::Result<TurnExecutionOutcome> {
+    let execution_mode = if allow_broker_tools {
+        BackendExecutionMode::ManagedBrokerTools
+    } else {
+        BackendExecutionMode::ExternalChatOnly
+    };
+
     let (mut sys_text, taints, data_class) =
         prepare_system_prompt_and_context(core, active, extra_blocks, incognito);
+    if !allow_broker_tools {
+        sys_text.push_str(HTTP_CHAT_ONLY_PROMPT_NOTE);
+    }
     if let Some(ref anchor) = compressed_history.ancient_summary_anchor
         && !anchor.trim().is_empty()
     {
@@ -462,7 +628,10 @@ pub async fn run_anthropic_tool_calling_turn(
         };
         if let Some(last) = msgs.last_mut()
             && last.get("role").and_then(|v| v.as_str()) == Some(norm_role)
-            && let Some(prev_str) = last.get("content").and_then(|v| v.as_str()).map(String::from)
+            && let Some(prev_str) = last
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(String::from)
         {
             last["content"] = json!(format!("{}\n\n{}", prev_str, text_val));
             return;
@@ -479,9 +648,17 @@ pub async fn run_anthropic_tool_calling_turn(
     }
     push_alternating(&mut anthropic_messages, "user", user_text);
 
-    let openai_tools = build_quick_chat_openai_tools(core, user_text);
-    let anthropic_tools = build_quick_chat_anthropic_tools(&openai_tools);
-    let max_rounds = core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize;
+    let anthropic_tools = if allow_broker_tools {
+        let openai_tools = build_quick_chat_openai_tools(core, user_text);
+        build_quick_chat_anthropic_tools(&openai_tools)
+    } else {
+        Vec::new()
+    };
+    let max_rounds = if allow_broker_tools {
+        core.brain_config.runtime_limits.max_tool_calls.clamp(1, 6) as usize
+    } else {
+        1
+    };
 
     for round_idx in 0..max_rounds {
         if turn_handle.is_cancelled() {
@@ -516,6 +693,29 @@ pub async fn run_anthropic_tool_calling_turn(
         }
 
         if !tool_uses.is_empty() {
+            if !allow_broker_tools {
+                let blocked_names: Vec<String> =
+                    tool_uses.iter().map(|(_, n, _)| n.clone()).collect();
+                let rejected_md = format_chat_only_tool_rejection(
+                    &cleaned_content,
+                    &blocked_names,
+                    effect_ledger,
+                );
+                return Ok(finalize_completed_turn_outcome(
+                    core,
+                    active,
+                    BackendExecutionMode::ExternalChatOnly,
+                    task_id,
+                    session,
+                    user_text,
+                    incognito,
+                    taints,
+                    data_class,
+                    rejected_md,
+                    effect_ledger,
+                ));
+            }
+
             anthropic_messages.push(json!({
                 "role": "assistant",
                 "content": content_blocks,
@@ -529,7 +729,7 @@ pub async fn run_anthropic_tool_calling_turn(
                 match execute_quick_chat_tool_call(
                     core,
                     active,
-                    BackendExecutionMode::ManagedBrokerTools,
+                    execution_mode,
                     task_id,
                     session,
                     user_text,
@@ -604,7 +804,7 @@ pub async fn run_anthropic_tool_calling_turn(
             return Ok(finalize_completed_turn_outcome(
                 core,
                 active,
-                BackendExecutionMode::ManagedBrokerTools,
+                execution_mode,
                 task_id,
                 session,
                 user_text,
@@ -621,7 +821,7 @@ pub async fn run_anthropic_tool_calling_turn(
         return Ok(finalize_completed_turn_outcome(
             core,
             active,
-            BackendExecutionMode::ManagedBrokerTools,
+            execution_mode,
             task_id,
             session,
             user_text,
@@ -645,72 +845,81 @@ pub async fn continue_resumed_openai_turn(
     approved_tool_content: String,
     remaining_llm_rounds: usize,
 ) -> anyhow::Result<TurnExecutionOutcome> {
+    let allow_broker_tools = !openai_tools.is_empty();
+    let execution_mode = if allow_broker_tools {
+        BackendExecutionMode::ManagedBrokerTools
+    } else {
+        BackendExecutionMode::ExternalChatOnly
+    };
+
     messages.push(json!({
         "role": "tool",
         "tool_call_id": cp.paused_call_id,
         "content": approved_tool_content,
     }));
 
-    for (rem_idx, (rem_id, rem_name, rem_args)) in cp.remaining_tool_calls.iter().enumerate() {
-        match execute_quick_chat_tool_call(
-            core,
-            &cp.active,
-            BackendExecutionMode::ManagedBrokerTools,
-            &cp.task_id,
-            &cp.session,
-            &cp.user_text,
-            cp.incognito,
-            &cp.taints,
-            cp.data_class,
-            rem_id,
-            rem_name,
-            rem_args,
-            &mut cp.effect_ledger,
-        )
-        .await?
-        {
-            QuickChatToolExecOutcome::PausedForApproval {
-                outcome,
-                canonical_tool,
-            } => {
-                if let Some(ref next_pa) = outcome.pending_approval {
-                    save_suspended_checkpoint(SuspendedTurnCheckpoint {
-                        created_at_instant: Instant::now(),
-                        approval_id: next_pa.approval_id.clone(),
-                        pending_approval: next_pa.clone(),
-                        task_id: cp.task_id.clone(),
-                        session: cp.session.clone(),
-                        user_text: cp.user_text.clone(),
-                        incognito: cp.incognito,
-                        active: cp.active.clone(),
-                        discovery_opts: eff_opts.clone(),
-                        extra_blocks: cp.extra_blocks.clone(),
-                        sys_text: cp.sys_text.clone(),
-                        taints: cp.taints.clone(),
-                        data_class: cp.data_class,
-                        memory_hits: cp.memory_hits.clone(),
-                        memory_dot: cp.memory_dot.clone(),
-                        context_compression: cp.context_compression.clone(),
-                        rounds_used: cp.rounds_used,
-                        paused_call_id: rem_id.clone(),
-                        paused_canonical_tool: canonical_tool,
-                        paused_parsed_args: rem_args.clone(),
-                        remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
-                        effect_ledger: cp.effect_ledger.clone(),
-                        dialect: SuspendedDialectState::OpenAi {
-                            messages,
-                            tools: openai_tools,
-                        },
-                    });
+    if allow_broker_tools {
+        for (rem_idx, (rem_id, rem_name, rem_args)) in cp.remaining_tool_calls.iter().enumerate() {
+            match execute_quick_chat_tool_call(
+                core,
+                &cp.active,
+                execution_mode,
+                &cp.task_id,
+                &cp.session,
+                &cp.user_text,
+                cp.incognito,
+                &cp.taints,
+                cp.data_class,
+                rem_id,
+                rem_name,
+                rem_args,
+                &mut cp.effect_ledger,
+            )
+            .await?
+            {
+                QuickChatToolExecOutcome::PausedForApproval {
+                    outcome,
+                    canonical_tool,
+                } => {
+                    if let Some(ref next_pa) = outcome.pending_approval {
+                        save_suspended_checkpoint(SuspendedTurnCheckpoint {
+                            created_at_instant: Instant::now(),
+                            approval_id: next_pa.approval_id.clone(),
+                            pending_approval: next_pa.clone(),
+                            task_id: cp.task_id.clone(),
+                            session: cp.session.clone(),
+                            user_text: cp.user_text.clone(),
+                            incognito: cp.incognito,
+                            active: cp.active.clone(),
+                            discovery_opts: eff_opts.clone(),
+                            extra_blocks: cp.extra_blocks.clone(),
+                            sys_text: cp.sys_text.clone(),
+                            taints: cp.taints.clone(),
+                            data_class: cp.data_class,
+                            memory_hits: cp.memory_hits.clone(),
+                            memory_dot: cp.memory_dot.clone(),
+                            context_compression: cp.context_compression.clone(),
+                            rounds_used: cp.rounds_used,
+                            paused_call_id: rem_id.clone(),
+                            paused_canonical_tool: canonical_tool,
+                            paused_parsed_args: rem_args.clone(),
+                            remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
+                            effect_ledger: cp.effect_ledger.clone(),
+                            dialect: SuspendedDialectState::OpenAi {
+                                messages,
+                                tools: openai_tools,
+                            },
+                        });
+                    }
+                    return Ok(*outcome);
                 }
-                return Ok(*outcome);
-            }
-            QuickChatToolExecOutcome::ToolMessage { content, .. } => {
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": rem_id,
-                    "content": content,
-                }));
+                QuickChatToolExecOutcome::ToolMessage { content, .. } => {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": rem_id,
+                        "content": content,
+                    }));
+                }
             }
         }
     }
@@ -776,6 +985,36 @@ pub async fn continue_resumed_openai_turn(
                 .and_then(|tc| tc.as_array())
                 .filter(|a| !a.is_empty())
             {
+                if !allow_broker_tools {
+                    let blocked_names: Vec<String> = tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            tc.pointer("/function/name")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .collect();
+                    let rejected_md = format_chat_only_tool_rejection(
+                        &cleaned_content,
+                        &blocked_names,
+                        &mut cp.effect_ledger,
+                    );
+                    loop_outcome = Some(finalize_completed_turn_outcome(
+                        core,
+                        &cp.active,
+                        BackendExecutionMode::ExternalChatOnly,
+                        &cp.task_id,
+                        &cp.session,
+                        &cp.user_text,
+                        cp.incognito,
+                        cp.taints.clone(),
+                        cp.data_class,
+                        rejected_md,
+                        &mut cp.effect_ledger,
+                    ));
+                    break;
+                }
+
                 messages.push(msg.clone());
                 let mut inner_paused = false;
                 for (tc_idx, tc) in tool_calls.iter().enumerate() {
@@ -796,7 +1035,7 @@ pub async fn continue_resumed_openai_turn(
                     match execute_quick_chat_tool_call(
                         core,
                         &cp.active,
-                        BackendExecutionMode::ManagedBrokerTools,
+                        execution_mode,
                         &cp.task_id,
                         &cp.session,
                         &cp.user_text,
@@ -874,7 +1113,7 @@ pub async fn continue_resumed_openai_turn(
                 loop_outcome = Some(finalize_completed_turn_outcome(
                     core,
                     &cp.active,
-                    BackendExecutionMode::ManagedBrokerTools,
+                    execution_mode,
                     &cp.task_id,
                     &cp.session,
                     &cp.user_text,
@@ -902,7 +1141,7 @@ pub async fn continue_resumed_openai_turn(
     Ok(finalize_completed_turn_outcome(
         core,
         &cp.active,
-        BackendExecutionMode::ManagedBrokerTools,
+        execution_mode,
         &cp.task_id,
         &cp.session,
         &cp.user_text,
@@ -929,6 +1168,13 @@ pub async fn continue_resumed_anthropic_turn(
     approved_is_err: bool,
     remaining_llm_rounds: usize,
 ) -> anyhow::Result<TurnExecutionOutcome> {
+    let allow_broker_tools = !anthropic_tools.is_empty();
+    let execution_mode = if allow_broker_tools {
+        BackendExecutionMode::ManagedBrokerTools
+    } else {
+        BackendExecutionMode::ExternalChatOnly
+    };
+
     prior_tool_results.push(json!({
         "type": "tool_result",
         "tool_use_id": cp.paused_call_id,
@@ -936,73 +1182,75 @@ pub async fn continue_resumed_anthropic_turn(
         "is_error": approved_is_err,
     }));
 
-    for (rem_idx, (rem_id, rem_name, rem_args)) in cp.remaining_tool_calls.iter().enumerate() {
-        match execute_quick_chat_tool_call(
-            core,
-            &cp.active,
-            BackendExecutionMode::ManagedBrokerTools,
-            &cp.task_id,
-            &cp.session,
-            &cp.user_text,
-            cp.incognito,
-            &cp.taints,
-            cp.data_class,
-            rem_id,
-            rem_name,
-            rem_args,
-            &mut cp.effect_ledger,
-        )
-        .await?
-        {
-            QuickChatToolExecOutcome::PausedForApproval {
-                outcome,
-                canonical_tool,
-            } => {
-                if let Some(ref next_pa) = outcome.pending_approval {
-                    save_suspended_checkpoint(SuspendedTurnCheckpoint {
-                        created_at_instant: Instant::now(),
-                        approval_id: next_pa.approval_id.clone(),
-                        pending_approval: next_pa.clone(),
-                        task_id: cp.task_id.clone(),
-                        session: cp.session.clone(),
-                        user_text: cp.user_text.clone(),
-                        incognito: cp.incognito,
-                        active: cp.active.clone(),
-                        discovery_opts: eff_opts.clone(),
-                        extra_blocks: cp.extra_blocks.clone(),
-                        sys_text: cp.sys_text.clone(),
-                        taints: cp.taints.clone(),
-                        data_class: cp.data_class,
-                        memory_hits: cp.memory_hits.clone(),
-                        memory_dot: cp.memory_dot.clone(),
-                        context_compression: cp.context_compression.clone(),
-                        rounds_used: cp.rounds_used,
-                        paused_call_id: rem_id.clone(),
-                        paused_canonical_tool: canonical_tool,
-                        paused_parsed_args: rem_args.clone(),
-                        remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
-                        effect_ledger: cp.effect_ledger.clone(),
-                        dialect: SuspendedDialectState::Anthropic {
-                            base_url,
-                            api_key,
-                            trust,
-                            messages,
-                            prior_tool_results,
-                            tools: anthropic_tools,
-                        },
-                    });
+    if allow_broker_tools {
+        for (rem_idx, (rem_id, rem_name, rem_args)) in cp.remaining_tool_calls.iter().enumerate() {
+            match execute_quick_chat_tool_call(
+                core,
+                &cp.active,
+                execution_mode,
+                &cp.task_id,
+                &cp.session,
+                &cp.user_text,
+                cp.incognito,
+                &cp.taints,
+                cp.data_class,
+                rem_id,
+                rem_name,
+                rem_args,
+                &mut cp.effect_ledger,
+            )
+            .await?
+            {
+                QuickChatToolExecOutcome::PausedForApproval {
+                    outcome,
+                    canonical_tool,
+                } => {
+                    if let Some(ref next_pa) = outcome.pending_approval {
+                        save_suspended_checkpoint(SuspendedTurnCheckpoint {
+                            created_at_instant: Instant::now(),
+                            approval_id: next_pa.approval_id.clone(),
+                            pending_approval: next_pa.clone(),
+                            task_id: cp.task_id.clone(),
+                            session: cp.session.clone(),
+                            user_text: cp.user_text.clone(),
+                            incognito: cp.incognito,
+                            active: cp.active.clone(),
+                            discovery_opts: eff_opts.clone(),
+                            extra_blocks: cp.extra_blocks.clone(),
+                            sys_text: cp.sys_text.clone(),
+                            taints: cp.taints.clone(),
+                            data_class: cp.data_class,
+                            memory_hits: cp.memory_hits.clone(),
+                            memory_dot: cp.memory_dot.clone(),
+                            context_compression: cp.context_compression.clone(),
+                            rounds_used: cp.rounds_used,
+                            paused_call_id: rem_id.clone(),
+                            paused_canonical_tool: canonical_tool,
+                            paused_parsed_args: rem_args.clone(),
+                            remaining_tool_calls: cp.remaining_tool_calls[rem_idx + 1..].to_vec(),
+                            effect_ledger: cp.effect_ledger.clone(),
+                            dialect: SuspendedDialectState::Anthropic {
+                                base_url,
+                                api_key,
+                                trust,
+                                messages,
+                                prior_tool_results,
+                                tools: anthropic_tools,
+                            },
+                        });
+                    }
+                    return Ok(*outcome);
                 }
-                return Ok(*outcome);
-            }
-            QuickChatToolExecOutcome::ToolMessage {
-                content, is_error, ..
-            } => {
-                prior_tool_results.push(json!({
-                    "type": "tool_result",
-                    "tool_use_id": rem_id,
-                    "content": content,
-                    "is_error": is_error,
-                }));
+                QuickChatToolExecOutcome::ToolMessage {
+                    content, is_error, ..
+                } => {
+                    prior_tool_results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": rem_id,
+                        "content": content,
+                        "is_error": is_error,
+                    }));
+                }
             }
         }
     }
@@ -1047,6 +1295,29 @@ pub async fn continue_resumed_anthropic_turn(
         }
 
         if !tool_uses.is_empty() {
+            if !allow_broker_tools {
+                let blocked_names: Vec<String> =
+                    tool_uses.iter().map(|(_, n, _)| n.clone()).collect();
+                let rejected_md = format_chat_only_tool_rejection(
+                    &cleaned_content,
+                    &blocked_names,
+                    &mut cp.effect_ledger,
+                );
+                return Ok(finalize_completed_turn_outcome(
+                    core,
+                    &cp.active,
+                    BackendExecutionMode::ExternalChatOnly,
+                    &cp.task_id,
+                    &cp.session,
+                    &cp.user_text,
+                    cp.incognito,
+                    cp.taints.clone(),
+                    cp.data_class,
+                    rejected_md,
+                    &mut cp.effect_ledger,
+                ));
+            }
+
             messages.push(json!({
                 "role": "assistant",
                 "content": content_blocks,
@@ -1056,7 +1327,7 @@ pub async fn continue_resumed_anthropic_turn(
                 match execute_quick_chat_tool_call(
                     core,
                     &cp.active,
-                    BackendExecutionMode::ManagedBrokerTools,
+                    execution_mode,
                     &cp.task_id,
                     &cp.session,
                     &cp.user_text,
@@ -1128,17 +1399,14 @@ pub async fn continue_resumed_anthropic_turn(
             }));
         } else {
             let final_md = if cleaned_content.trim().is_empty() {
-                synthesize_rich_approved_step_markdown(
-                    &cp.user_text,
-                    &cp.effect_ledger.task_steps,
-                )
+                synthesize_rich_approved_step_markdown(&cp.user_text, &cp.effect_ledger.task_steps)
             } else {
                 cleaned_content
             };
             return Ok(finalize_completed_turn_outcome(
                 core,
                 &cp.active,
-                BackendExecutionMode::ManagedBrokerTools,
+                execution_mode,
                 &cp.task_id,
                 &cp.session,
                 &cp.user_text,
@@ -1156,7 +1424,7 @@ pub async fn continue_resumed_anthropic_turn(
     Ok(finalize_completed_turn_outcome(
         core,
         &cp.active,
-        BackendExecutionMode::ManagedBrokerTools,
+        execution_mode,
         &cp.task_id,
         &cp.session,
         &cp.user_text,
@@ -1379,4 +1647,313 @@ pub async fn call_openai_upstream(
 
 fn retry_or_body(text_body: &str) -> &str {
     text_body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend_bridge::turn_checkpoint::{TurnStartOutcome, begin_turn, complete_turn};
+    use crate::config::{AppConfig, BrainConfig, XdgPaths};
+    use axum::{Json, Router, extract::State, routing::post};
+    use chrono::Utc;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    fn setup_http_test_core() -> (tempfile::TempDir, Arc<IntentOsCore>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("xdg_http_h04");
+        let ws = base.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let xdg = XdgPaths::resolve(Some(&base), repo_root.clone());
+        xdg.ensure_dirs().unwrap();
+        let cfg = AppConfig {
+            authorized_directories: vec![ws.to_string_lossy().to_string()],
+            allow_simulated_hardware_fallback: true,
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            xdg.config_dir.join("config.toml"),
+            toml::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.config_dir.join("brain.toml"),
+            toml::to_string_pretty(&BrainConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        let core = IntentOsCore::initialize(Some(&base), repo_root).unwrap();
+        (tmp, core)
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedHttpRequests {
+        bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[tokio::test]
+    async fn openai_http_chat_only_omits_tools_and_rejects_forced_upstream_tool_calls() {
+        let (tmp, core) = setup_http_test_core();
+        let (prior_vol, _) = core.settings.read_setting_value("sound.volume").unwrap();
+        let initial_vol = prior_vol.as_f64().unwrap().round() as i64;
+        let target_vol = if initial_vol == 91 { 19 } else { 91 };
+
+        let captured = CapturedHttpRequests::default();
+        let cap_srv = captured.clone();
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(st): State<CapturedHttpRequests>, Json(body): Json<Value>| async move {
+                        st.bodies.lock().unwrap().push(body);
+                        Json(json!({
+                            "id": "chatcmpl_h04_forced_tc",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "这是普通回答文本。",
+                                    "tool_calls": [{
+                                        "id": "forced_call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "sound_volume_set",
+                                            "arguments": format!("{{\"value\":{}}}", target_vol)
+                                        }
+                                    }]
+                                }
+                            }]
+                        }))
+                    },
+                ),
+            )
+            .with_state(cap_srv);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let opts = DiscoveryOptions::isolated_for_test(tmp.path().join("mock_home"));
+        let active = ActiveBackendSelection {
+            backend: "openai".to_string(),
+            provider: "mock-openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: "default".to_string(),
+            base_url: Some(format!("http://{}/v1", addr)),
+            pinned: true,
+            auto_selected: false,
+            direct_http_capable: true,
+            pill_label: "OpenAI · gpt-5.4".to_string(),
+        };
+        let session = SessionState {
+            session_id: "ses_h04_openai_chat_only".to_string(),
+            messages: Vec::new(),
+            last_resource_path: None,
+            updated_at: Utc::now(),
+        };
+        let compressed =
+            crate::memory_hub::build_compressed_session_history(&core, &session, false);
+
+        let turn_id = "turn_h04_openai_chat_only_1";
+        let TurnStartOutcome::Started(handle) = begin_turn(turn_id, Some(&session.session_id))
+        else {
+            panic!("expected fresh turn start");
+        };
+        let mut ledger = TurnEffectLedger::new(turn_id);
+
+        let outcome = run_openai_tool_calling_turn_with_policy(
+            &core,
+            &opts,
+            UpstreamTransport::DirectHttp {
+                base_url: format!("http://{}/v1", addr),
+                api_key: Some("sk-test-local-dummy".to_string()),
+                trust: ProviderTrust::Trusted,
+            },
+            &active,
+            &handle,
+            "task_h04_openai_chat_only",
+            &session,
+            "帮我把音量调大",
+            &[],
+            &compressed,
+            &[],
+            None,
+            false,
+            false, // allow_broker_tools = false!
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        complete_turn(turn_id, json!({}), false);
+
+        let reqs = captured.bodies.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "must not re-enter tool loop on rejected tool_calls"
+        );
+        assert!(
+            reqs[0].get("tools").is_none(),
+            "chat-only OpenAI HTTP request MUST omit `tools` schema completely"
+        );
+
+        assert_eq!(
+            outcome.execution_mode,
+            BackendExecutionMode::ExternalChatOnly
+        );
+        assert!(outcome.changeset_ids.is_empty());
+        assert!(outcome.tool_steps_json.is_empty());
+        assert!(!ledger.has_committed_side_effects());
+        assert!(
+            outcome
+                .trace_dots
+                .iter()
+                .any(|d| d.kind == "tool_err" && d.detail.contains("allow_broker_tools=false"))
+        );
+        assert!(outcome.reply_markdown.contains("allow_broker_tools=false"));
+
+        let (after_vol, _) = core.settings.read_setting_value("sound.volume").unwrap();
+        assert_eq!(
+            after_vol.as_f64().unwrap().round() as i64,
+            initial_vol,
+            "CapabilityBroker MUST NOT execute forced tool_calls when allow_broker_tools == false!"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_http_chat_only_omits_tools_and_rejects_forced_upstream_tool_use() {
+        let (tmp, core) = setup_http_test_core();
+        let (prior_bright, _) = core
+            .settings
+            .read_setting_value("display.brightness")
+            .unwrap();
+        let initial_bright = prior_bright.as_f64().unwrap().round() as i64;
+        let target_bright = if initial_bright == 83 { 23 } else { 83 };
+
+        let captured = CapturedHttpRequests::default();
+        let cap_srv = captured.clone();
+        let app = Router::new()
+            .route(
+                "/v1/messages",
+                post(
+                    move |State(st): State<CapturedHttpRequests>, Json(body): Json<Value>| async move {
+                        st.bodies.lock().unwrap().push(body);
+                        Json(json!({
+                            "id": "msg_h04_forced_tu",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                { "type": "text", "text": "仅对话回复内容。" },
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_forced_1",
+                                    "name": "display_brightness_set",
+                                    "input": { "value": target_bright }
+                                }
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .with_state(cap_srv);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let opts = DiscoveryOptions::isolated_for_test(tmp.path().join("mock_home_anth"));
+        let active = ActiveBackendSelection {
+            backend: "zcode".to_string(),
+            provider: "builtin:bigmodel".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            reasoning_effort: "default".to_string(),
+            base_url: Some(format!("http://{}/v1", addr)),
+            pinned: true,
+            auto_selected: false,
+            direct_http_capable: true,
+            pill_label: "ZCode · claude-sonnet-4".to_string(),
+        };
+        let session = SessionState {
+            session_id: "ses_h04_anth_chat_only".to_string(),
+            messages: Vec::new(),
+            last_resource_path: None,
+            updated_at: Utc::now(),
+        };
+        let compressed =
+            crate::memory_hub::build_compressed_session_history(&core, &session, false);
+
+        let turn_id = "turn_h04_anth_chat_only_1";
+        let TurnStartOutcome::Started(handle) = begin_turn(turn_id, Some(&session.session_id))
+        else {
+            panic!("expected fresh turn start");
+        };
+        let mut ledger = TurnEffectLedger::new(turn_id);
+
+        let outcome = run_anthropic_tool_calling_turn_with_policy(
+            &core,
+            &opts,
+            &format!("http://{}/v1", addr),
+            Some("sk-test-anth-dummy"),
+            ProviderTrust::Trusted,
+            &active,
+            &handle,
+            "task_h04_anth_chat_only",
+            &session,
+            "帮我把屏幕亮度调高",
+            &[],
+            &compressed,
+            &[],
+            None,
+            false,
+            false, // allow_broker_tools = false!
+            &mut ledger,
+        )
+        .await
+        .unwrap();
+        complete_turn(turn_id, json!({}), false);
+
+        let reqs = captured.bodies.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].get("tools").is_none(),
+            "chat-only Anthropic HTTP request MUST omit `tools` schema completely"
+        );
+
+        assert_eq!(
+            outcome.execution_mode,
+            BackendExecutionMode::ExternalChatOnly
+        );
+        assert!(outcome.changeset_ids.is_empty());
+        assert!(outcome.tool_steps_json.is_empty());
+        assert!(!ledger.has_committed_side_effects());
+        assert!(
+            outcome
+                .trace_dots
+                .iter()
+                .any(|d| d.kind == "tool_err" && d.detail.contains("display_brightness_set"))
+        );
+
+        let (after_bright, _) = core
+            .settings
+            .read_setting_value("display.brightness")
+            .unwrap();
+        assert_eq!(
+            after_bright.as_f64().unwrap().round() as i64,
+            initial_bright,
+            "CapabilityBroker MUST NOT execute forced tool_use when allow_broker_tools == false!"
+        );
+    }
 }
