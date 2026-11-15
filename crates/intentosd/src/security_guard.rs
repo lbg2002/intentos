@@ -574,6 +574,7 @@ impl UnifiedTaskStateMachine {
                     | TaskStatus::PartiallyCompleted
                     | TaskStatus::Failed
                     | TaskStatus::Cancelled
+                    | TaskStatus::RecoveryRequired
             ),
             TaskStatus::Planning => matches!(
                 to,
@@ -603,6 +604,7 @@ impl UnifiedTaskStateMachine {
                     | TaskStatus::PartiallyCompleted
                     | TaskStatus::Failed
                     | TaskStatus::Cancelled
+                    | TaskStatus::RecoveryRequired
             ),
             TaskStatus::Paused => matches!(
                 to,
@@ -651,7 +653,10 @@ impl UnifiedTaskStateMachine {
         if let Some(raw_reason) = reason.map(str::trim).filter(|s| !s.is_empty()) {
             let (clean_reason, _) = SensitiveDataGuard::redact_text(raw_reason);
             if task.result_summary.is_none()
-                || matches!(to, TaskStatus::Failed | TaskStatus::Cancelled)
+                || matches!(
+                    to,
+                    TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::RecoveryRequired
+                )
             {
                 task.result_summary = Some(clean_reason.clone());
             }

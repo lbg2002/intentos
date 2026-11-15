@@ -461,10 +461,24 @@ pub fn resolve_capability_effect(core: &IntentOsCore, canonical_tool: &str) -> E
 
 /// Build the OpenAI `tools` spec array combining top ranked `broker` capabilities + `memory_hub` + `app_adapter`.
 pub fn build_quick_chat_openai_tools(core: &IntentOsCore, user_text: &str) -> Vec<Value> {
+    build_quick_chat_openai_tools_with_policy(core, user_text, PrivacySessionPolicy::Standard)
+}
+
+/// Build the OpenAI `tools` spec array respecting `PrivacySessionPolicy` (`H05`):
+/// - `StrictIsolated` (`!allows_memory_read()`) omits `memory_*` tools completely.
+/// - `!allows_memory_write()` omits any memory-mutating tools.
+pub fn build_quick_chat_openai_tools_with_policy(
+    core: &IntentOsCore,
+    user_text: &str,
+    privacy: PrivacySessionPolicy,
+) -> Vec<Value> {
     let descriptors = core.broker.descriptors();
     let all_cap_specs: Vec<ToolSpec> = descriptors
         .iter()
         .cloned()
+        .filter(|d| {
+            privacy.allows_memory_write() || !crate::security_guard::is_memory_write_tool(&d.id)
+        })
         .map(descriptor_to_tool_spec)
         .collect();
 
@@ -527,10 +541,19 @@ pub fn build_quick_chat_openai_tools(core: &IntentOsCore, user_text: &str) -> Ve
         })
         .collect();
 
-    for spec in crate::memory_hub::memory_tool_specs()
+    let mem_specs = if privacy.allows_memory_read() {
+        crate::memory_hub::memory_tool_specs()
+    } else {
+        Vec::new()
+    };
+    for spec in mem_specs
         .into_iter()
         .chain(crate::app_adapter::adapter_tool_specs())
     {
+        if !privacy.allows_memory_write() && crate::security_guard::is_memory_write_tool(&spec.name)
+        {
+            continue;
+        }
         tools.push(json!({
             "type": "function",
             "function": {
@@ -612,7 +635,25 @@ fn classify_executed_step_state(
     if res.status == ExecutionStatus::VerificationFailed
         || res.verification.state == VerificationState::VerificationFailed
     {
-        if effect > Effect::Observe {
+        let is_preflight_validation_or_lookup_miss = res.changeset_id.is_none()
+            && matches!(
+                res.verification.method.as_str(),
+                "stat"
+                    | "stat_input"
+                    | "index_lookup"
+                    | "desktop_entry_lookup"
+                    | "desktop_file_stat"
+                    | "fc_list_whitelist"
+                    | "scene_registry"
+                    | "panel_whitelist"
+                    | "sni_dbusmenu_lookup"
+                    | "mpris2_or_sni_discovery"
+                    | "procfs_and_sni_liveness_check"
+                    | "window_surface_lookup"
+                    | "unsupported_gui_action"
+                    | "rich_local_adapter_validation"
+            );
+        if effect > Effect::Observe && !is_preflight_validation_or_lookup_miss {
             return (
                 StepExecState::Unknown,
                 false,

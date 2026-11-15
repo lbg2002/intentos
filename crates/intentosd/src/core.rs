@@ -1495,9 +1495,26 @@ impl IntentOsCore {
                 UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Running, None)?;
                 self.persist_or_ephemeral_with_privacy(&task, privacy)?;
 
+                let mut l2_ledger = crate::backend_bridge::turn_checkpoint::TurnEffectLedger::new(
+                    format!("l2_turn_{}", task_id),
+                )
+                .with_privacy(privacy);
+                l2_ledger.bind_persistence(
+                    self.state_db.clone(),
+                    task_id.clone(),
+                    session.session_id.clone(),
+                    privacy,
+                );
+
                 match self
                     .agent
-                    .run_l2_with_privacy(&exec_ctx, &session, &resolved_text, injected_context)
+                    .run_l2_with_context(
+                        &exec_ctx,
+                        &session,
+                        &resolved_text,
+                        injected_context,
+                        &mut l2_ledger,
+                    )
                     .await
                 {
                     Ok(run_out) => {
@@ -1512,6 +1529,16 @@ impl IntentOsCore {
                             )?;
                             task.assistant_message = Some(pa.summary.clone());
                             task.pending_approval = Some(pa);
+                        } else if run_out.status_override == Some(TaskStatus::RecoveryRequired)
+                            || l2_ledger.has_uncertain_side_effects()
+                        {
+                            UnifiedTaskStateMachine::transition_task(
+                                &mut task,
+                                TaskStatus::RecoveryRequired,
+                                Some(&run_out.final_message),
+                            )?;
+                            task.assistant_message = Some(run_out.final_message.clone());
+                            task.result_summary = Some(run_out.final_message);
                         } else {
                             let enriched_msg =
                                 enrich_l2_chapter_open_message(&run_out.final_message, &task.steps);
@@ -1535,6 +1562,24 @@ impl IntentOsCore {
                         Ok(task)
                     }
                     Err(err) => {
+                        if l2_ledger.has_uncertain_or_committed_side_effects() {
+                            let rec_msg = format!(
+                                "智能体执行在已产生系统变更或未确认副作用后中断（{}），已阻止回退重放并进入恢复保护状态（recovery_required）。",
+                                err
+                            );
+                            task.steps = l2_ledger.task_steps.clone();
+                            task.changeset_ids = l2_ledger.committed_changeset_ids();
+                            UnifiedTaskStateMachine::transition_task(
+                                &mut task,
+                                TaskStatus::RecoveryRequired,
+                                Some(&rec_msg),
+                            )?;
+                            task.assistant_message = Some(rec_msg.clone());
+                            task.result_summary = Some(rec_msg);
+                            self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+                            return Ok(task);
+                        }
+
                         // Even if a configured cloud API key is unreachable, personal-memory & adapter queries
                         // still return rich, real local answers!
                         if let Some(fallback_task) = self
@@ -1590,6 +1635,11 @@ impl IntentOsCore {
             taints: taints.clone(),
         };
 
+        let task_privacy = if incognito {
+            PrivacySessionPolicy::StrictIsolated
+        } else {
+            self.task_privacy_policy(&task_id)
+        };
         let mut task = Task {
             id: task_id.clone(),
             goal: goal.to_string(),
@@ -1612,8 +1662,52 @@ impl IntentOsCore {
             updated_at: now,
         };
         UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Running, None)?;
+        self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
 
-        match self.broker.dispatch(&call).await? {
+        let mut step_ledger = crate::backend_bridge::turn_checkpoint::TurnEffectLedger::new(
+            format!("turn_{}", task_id),
+        )
+        .with_privacy(task_privacy);
+        step_ledger.bind_persistence(
+            self.state_db.clone(),
+            task_id.clone(),
+            session_id.to_string(),
+            task_privacy,
+        );
+
+        let dispatch_outcome =
+            match crate::backend_bridge::broker_bridge::dispatch_broker_call_transactional(
+                self,
+                session_id,
+                task_privacy,
+                crate::backend_bridge::turn_checkpoint::StepInvocationContext::new_call(&call_id),
+                &call,
+                &mut step_ledger,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(err) => {
+                    if step_ledger.has_uncertain_side_effects() {
+                        let rec_msg = format!(
+                            "能力 `{}` 执行期间中断（{}），实际副作用未确认；任务已标记为 recovery_required。",
+                            capability_id, err
+                        );
+                        UnifiedTaskStateMachine::transition_task(
+                            &mut task,
+                            TaskStatus::RecoveryRequired,
+                            Some(&rec_msg),
+                        )?;
+                        task.assistant_message = Some(rec_msg.clone());
+                        task.result_summary = Some(rec_msg);
+                        self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
+                        return Ok(task);
+                    }
+                    return Err(err);
+                }
+            };
+
+        match dispatch_outcome {
             BrokerDispatchOutcome::Executed(res) => {
                 let last_res = arguments
                     .get("target")
@@ -1644,12 +1738,18 @@ impl IntentOsCore {
                     res.status,
                     ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
                 );
-                let final_status = if ok_status {
+                let final_status = if step_ledger.has_uncertain_side_effects() {
+                    TaskStatus::RecoveryRequired
+                } else if ok_status {
                     TaskStatus::Completed
                 } else {
                     TaskStatus::Failed
                 };
-                UnifiedTaskStateMachine::transition_task(&mut task, final_status, None)?;
+                UnifiedTaskStateMachine::transition_task(
+                    &mut task,
+                    final_status,
+                    Some(&res.message),
+                )?;
                 task.assistant_message = Some(res.message.clone());
                 task.result_summary = Some(res.message.clone());
                 task.steps.push(TaskStep {
@@ -1664,24 +1764,14 @@ impl IntentOsCore {
                     duration_ms: res.duration_ms,
                 });
                 task.updated_at = Utc::now();
-                let task_privacy = if incognito {
-                    PrivacySessionPolicy::StrictIsolated
-                } else {
-                    self.task_privacy_policy(&task.id)
-                };
                 self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
-                if task_privacy.allows_memory_write() {
+                if task_privacy.allows_memory_write() && final_status == TaskStatus::Completed {
                     self.sessions
                         .append_turn(session_id, goal, &res.message, last_res);
                 }
                 Ok(task)
             }
             BrokerDispatchOutcome::RequiresApproval(pa) => {
-                let task_privacy = if incognito {
-                    PrivacySessionPolicy::StrictIsolated
-                } else {
-                    self.task_privacy_policy(&task.id)
-                };
                 UnifiedTaskStateMachine::transition_task(
                     &mut task,
                     TaskStatus::AwaitingApproval,
@@ -1694,12 +1784,11 @@ impl IntentOsCore {
                 Ok(task)
             }
             BrokerDispatchOutcome::Denied { reason } => {
-                let task_privacy = if incognito {
-                    PrivacySessionPolicy::StrictIsolated
-                } else {
-                    self.task_privacy_policy(&task.id)
-                };
-                UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Failed, None)?;
+                UnifiedTaskStateMachine::transition_task(
+                    &mut task,
+                    TaskStatus::Failed,
+                    Some(&reason),
+                )?;
                 task.assistant_message = Some(format!("策略拒绝：{}", reason));
                 task.result_summary = Some(reason);
                 task.updated_at = Utc::now();
@@ -1784,7 +1873,30 @@ impl IntentOsCore {
         // BEFORE calling `broker.execute_approved(...)` so `openat2` immediately permits the approved path!
         self.approve_non_forbidden_paths_in_args(&pa.arguments);
 
-        let res = if crate::app_adapter::is_adapter_tool(&pa.capability_id) {
+        let prepared_step_row = if record_standalone_turn && task_privacy.allows_task_persistence()
+        {
+            self.state_db
+                .list_step_execution_logs_for_task(&task.id)
+                .ok()
+                .and_then(|rows| {
+                    rows.into_iter().rev().find(|r| {
+                        r.exec_state == crate::db::StepExecState::Prepared
+                            && r.capability_id == pa.capability_id
+                    })
+                })
+        } else {
+            None
+        };
+        if let Some(mut exec_row) = prepared_step_row.clone() {
+            exec_row.exec_state = crate::db::StepExecState::Executing;
+            exec_row.verification_status = "ExecutingApproved".to_string();
+            exec_row.updated_at = Utc::now();
+            let _ = self
+                .state_db
+                .upsert_step_execution_log(&exec_row, task_privacy);
+        }
+
+        let exec_res = if crate::app_adapter::is_adapter_tool(&pa.capability_id) {
             let call = CapabilityCall {
                 request_id: pa.approval_id.clone(),
                 task_id: task.id.clone(),
@@ -1793,14 +1905,15 @@ impl IntentOsCore {
                 origin: InvocationOrigin::UserExplicit,
                 taints: vec![Taint::User],
             };
-            match self.broker.dispatch(&call).await? {
-                BrokerDispatchOutcome::Executed(r) => r,
-                BrokerDispatchOutcome::Denied { reason } => {
-                    anyhow::bail!("转译层执行被拒绝: {}", reason);
+            match self.broker.dispatch(&call).await {
+                Ok(BrokerDispatchOutcome::Executed(r)) => Ok(r),
+                Ok(BrokerDispatchOutcome::Denied { reason }) => {
+                    Err(anyhow::anyhow!("转译层执行被拒绝: {}", reason))
                 }
-                BrokerDispatchOutcome::RequiresApproval(_) => {
-                    anyhow::bail!("转译层在已确认状态下仍请求重复确认");
+                Ok(BrokerDispatchOutcome::RequiresApproval(_)) => {
+                    Err(anyhow::anyhow!("转译层在已确认状态下仍请求重复确认"))
                 }
+                Err(e) => Err(e),
             }
         } else {
             let desc = self
@@ -1810,7 +1923,39 @@ impl IntentOsCore {
 
             self.broker
                 .execute_approved(&pa.approval_id, &task.id, desc, &pa.arguments)
-                .await?
+                .await
+        };
+
+        let res = match exec_res {
+            Ok(r) => {
+                if let Some(mut done_row) = prepared_step_row {
+                    done_row.exec_state = match r.status {
+                        ExecutionStatus::Exited => crate::db::StepExecState::Verified,
+                        ExecutionStatus::RequestedUnverified => crate::db::StepExecState::Applied,
+                        ExecutionStatus::Denied => crate::db::StepExecState::Denied,
+                        _ => crate::db::StepExecState::Unknown,
+                    };
+                    done_row.changeset_id = r.changeset_id.clone();
+                    done_row.verification_status = format!("{:?}", r.verification.state);
+                    done_row.updated_at = Utc::now();
+                    let _ = self
+                        .state_db
+                        .upsert_step_execution_log(&done_row, task_privacy);
+                }
+                r
+            }
+            Err(err) => {
+                if let Some(mut rec_row) = prepared_step_row {
+                    rec_row.exec_state = crate::db::StepExecState::RecoveryRequired;
+                    rec_row.verification_status = "ErrorDuringApprovedExecution".to_string();
+                    rec_row.recovery_hint = Some(err.to_string());
+                    rec_row.updated_at = Utc::now();
+                    let _ = self
+                        .state_db
+                        .upsert_step_execution_log(&rec_row, task_privacy);
+                }
+                return Err(err);
+            }
         };
 
         let discovered_first_file = res
@@ -2023,6 +2168,19 @@ impl IntentOsCore {
         }
         task.assistant_message = Some("用户拒绝了该操作，未产生修改".into());
         if persist_denied {
+            let policy = self.task_privacy_policy(&task.id);
+            if let Ok(rows) = self.state_db.list_step_execution_logs_for_task(&task.id) {
+                for mut row in rows {
+                    if row.exec_state == crate::db::StepExecState::Prepared
+                        && row.capability_id == pa.capability_id
+                    {
+                        row.exec_state = crate::db::StepExecState::Denied;
+                        row.verification_status = "UserDeniedApproval".to_string();
+                        row.updated_at = Utc::now();
+                        let _ = self.state_db.upsert_step_execution_log(&row, policy);
+                    }
+                }
+            }
             self.state_db.upsert_task(&task)?;
         }
         Ok(task)
@@ -3010,6 +3168,8 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
             changeset_ids: Vec::new(),
             pending_approval: None,
             handoff_command: None,
+            status_override: None,
+            side_effect_replay_prevented: false,
         });
     }
 
@@ -3123,6 +3283,8 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
             changeset_ids: Vec::new(),
             pending_approval: None,
             handoff_command: None,
+            status_override: None,
+            side_effect_replay_prevented: false,
         });
     }
 
@@ -3182,5 +3344,7 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
         changeset_ids: Vec::new(),
         pending_approval: None,
         handoff_command: None,
+        status_override: None,
+        side_effect_replay_prevented: false,
     })
 }

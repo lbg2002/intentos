@@ -11,9 +11,10 @@
 
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
-    build_quick_chat_anthropic_tools, build_quick_chat_openai_tools, execute_quick_chat_tool_call,
-    finalize_completed_turn_outcome, prepare_system_prompt_and_context_with_policy,
-    prepare_turn_context_blocks, synthesize_rich_approved_step_markdown,
+    build_quick_chat_anthropic_tools, build_quick_chat_openai_tools_with_policy,
+    execute_quick_chat_tool_call, finalize_completed_turn_outcome,
+    prepare_system_prompt_and_context_with_policy, prepare_turn_context_blocks,
+    synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, BackendsCatalog, DiscoveryOptions, discover_backends_catalog,
@@ -330,7 +331,7 @@ pub async fn run_openai_tool_calling_turn_with_policy(
     messages.push(json!({ "role": "user", "content": user_text }));
 
     let openai_tools = if allow_broker_tools {
-        build_quick_chat_openai_tools(core, user_text)
+        build_quick_chat_openai_tools_with_policy(core, user_text, effective_privacy)
     } else {
         Vec::new()
     };
@@ -667,7 +668,8 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
     push_alternating(&mut anthropic_messages, "user", user_text);
 
     let anthropic_tools = if allow_broker_tools {
-        let openai_tools = build_quick_chat_openai_tools(core, user_text);
+        let openai_tools =
+            build_quick_chat_openai_tools_with_policy(core, user_text, effective_privacy);
         build_quick_chat_anthropic_tools(&openai_tools)
     } else {
         Vec::new()

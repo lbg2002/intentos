@@ -3,6 +3,7 @@
 //! Session Buffer (in-memory only, §6.4), Context Builder (Taint + DataClass, §11.6),
 //! and Pluggable Agent Runtime (`PiWorkerRuntime` in sandbox + `NativeRuntime` fallback + Command Handoff, §6.3, §8.8).
 
+use crate::backend_bridge::turn_checkpoint::{StepInvocationContext, TurnEffectLedger};
 use crate::broker::{BrokerDispatchOutcome, CapabilityBroker};
 use crate::config::XdgPaths;
 use crate::db::StateDb;
@@ -12,8 +13,8 @@ use chrono::{DateTime, Duration, Utc};
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
     CapabilityCall, CapabilityDescriptor, ChatMessage, ContextBlock, DataClass, ExecutionStatus,
-    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, Taint, TaskBudget, TaskStep,
-    ToolSpec,
+    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, Taint, TaskBudget, TaskStatus,
+    TaskStep, ToolSpec,
 };
 use intentos_sandbox::{SandboxSpec, build_sandboxed_command};
 use serde_json::{Value, json};
@@ -210,6 +211,8 @@ pub struct AgentRunResult {
     pub changeset_ids: Vec<String>,
     pub pending_approval: Option<PendingApproval>,
     pub handoff_command: Option<String>,
+    pub status_override: Option<TaskStatus>,
+    pub side_effect_replay_prevented: bool,
 }
 
 /// Orchestrates L2 Agent execution via either sandboxed Node `pi-adapter` Worker or built-in Rust `NativeRuntime`.
@@ -289,11 +292,34 @@ impl AgentCoordinator {
         exec_ctx: &ExecutionContext,
         session: &SessionState,
         user_text: &str,
+        extra_blocks: Vec<ContextBlock>,
+    ) -> anyhow::Result<AgentRunResult> {
+        let turn_id = exec_ctx
+            .turn_id
+            .clone()
+            .unwrap_or_else(|| format!("l2_turn_{}", exec_ctx.task_id));
+        let mut ledger = TurnEffectLedger::new(turn_id).with_privacy(exec_ctx.privacy);
+        self.run_l2_with_context(exec_ctx, session, user_text, extra_blocks, &mut ledger)
+            .await
+    }
+
+    pub async fn run_l2_with_context(
+        &self,
+        exec_ctx: &ExecutionContext,
+        session: &SessionState,
+        user_text: &str,
         mut extra_blocks: Vec<ContextBlock>,
+        effect_ledger: &mut TurnEffectLedger,
     ) -> anyhow::Result<AgentRunResult> {
         let task_id = exec_ctx.task_id.as_str();
         let privacy = exec_ctx.privacy;
         let budget = exec_ctx.budget.clone();
+        effect_ledger.bind_persistence(
+            self.state_db.clone(),
+            exec_ctx.task_id.clone(),
+            exec_ctx.session_id.clone(),
+            privacy,
+        );
 
         // 1. Offline / No-Cloud-Key Deterministic AIOS Fallbacks:
         //    a) Personal Memory Hub (`memory_hub` — mentioned files, XBEL frequent files, Ubuntu software profile)
@@ -332,6 +358,8 @@ impl AgentCoordinator {
                         changeset_ids: Vec::new(),
                         pending_approval: None,
                         handoff_command: None,
+                        status_override: None,
+                        side_effect_replay_prevented: false,
                     });
                 }
                 if let Some(adapter_res) =
@@ -351,6 +379,8 @@ impl AgentCoordinator {
                     changeset_ids: Vec::new(),
                     pending_approval: None,
                     handoff_command: Some(format!("$ {}", cmd_suggestion)),
+                    status_override: None,
+                    side_effect_replay_prevented: false,
                 });
             }
             return Ok(AgentRunResult {
@@ -359,6 +389,8 @@ impl AgentCoordinator {
                 changeset_ids: Vec::new(),
                 pending_approval: None,
                 handoff_command: None,
+                status_override: None,
+                side_effect_replay_prevented: false,
             });
         }
 
@@ -445,22 +477,72 @@ impl AgentCoordinator {
 
         let script = self.paths.pi_adapter_script();
         let res = if self.preferred_runtime == "pi" && script.exists() {
-            match self.run_via_pi_worker(req.clone(), &taints, privacy).await {
+            match self
+                .run_via_pi_worker(req.clone(), &taints, privacy, effect_ledger)
+                .await
+            {
                 Ok(r) => Ok(r),
                 Err(err) => {
-                    tracing::warn!(
-                        "pi-adapter worker failed ({}), falling back to native Rust LLM loop",
-                        err
-                    );
-                    self.run_via_native_loop(req, &taints, privacy).await
+                    if effect_ledger.has_uncertain_or_committed_side_effects() {
+                        tracing::error!(
+                            "pi-adapter worker failed after side effects ({}); halting native fallback to prevent duplicate replay",
+                            err
+                        );
+                        let summary = format!(
+                            "智能体执行引擎在已完成 {} 项步骤后异常中断（{}）；为防止已提交或未确认的系统变更被重复重放，已安全阻断回退并进入恢复保护状态（recovery_required）。",
+                            effect_ledger.task_steps.len().max(1),
+                            err
+                        );
+                        Ok(AgentRunResult {
+                            final_message: summary,
+                            steps: effect_ledger.task_steps.clone(),
+                            changeset_ids: effect_ledger.committed_changeset_ids(),
+                            pending_approval: None,
+                            handoff_command: None,
+                            status_override: Some(TaskStatus::RecoveryRequired),
+                            side_effect_replay_prevented: true,
+                        })
+                    } else {
+                        tracing::warn!(
+                            "pi-adapter worker failed cleanly before any side effects ({}), falling back to native Rust LLM loop",
+                            err
+                        );
+                        self.run_via_native_loop(req, &taints, privacy, effect_ledger)
+                            .await
+                    }
                 }
             }
         } else {
-            self.run_via_native_loop(req, &taints, privacy).await
+            self.run_via_native_loop(req, &taints, privacy, effect_ledger)
+                .await
         };
 
         self.gateway.revoke_lease(&run_token);
-        res
+        match res {
+            Ok(mut out) => {
+                if out.status_override.is_none() && effect_ledger.has_uncertain_side_effects() {
+                    out.status_override = Some(TaskStatus::RecoveryRequired);
+                    out.side_effect_replay_prevented = true;
+                }
+                Ok(out)
+            }
+            Err(err) if effect_ledger.has_uncertain_or_committed_side_effects() => {
+                let summary = format!(
+                    "智能体循环在已产生系统变更或未确认副作用后中断（{}）；已保留已完成步骤并进入恢复保护状态（recovery_required）。",
+                    err
+                );
+                Ok(AgentRunResult {
+                    final_message: summary,
+                    steps: effect_ledger.task_steps.clone(),
+                    changeset_ids: effect_ledger.committed_changeset_ids(),
+                    pending_approval: None,
+                    handoff_command: None,
+                    status_override: Some(TaskStatus::RecoveryRequired),
+                    side_effect_replay_prevented: true,
+                })
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Spawn `agent/pi-adapter/dist/worker.js` inside our no-TCP Landlock/Bubblewrap sandbox!
@@ -469,6 +551,7 @@ impl AgentCoordinator {
         req: RunRequest,
         taints: &[Taint],
         privacy: PrivacySessionPolicy,
+        effect_ledger: &mut TurnEffectLedger,
     ) -> anyhow::Result<AgentRunResult> {
         let script = self.paths.pi_adapter_script();
         let worker_dir = script
@@ -525,6 +608,7 @@ impl AgentCoordinator {
         let mut changeset_ids = Vec::new();
         let mut final_message = String::new();
         let mut pending_approval = None;
+        let mut saw_run_finished = false;
 
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
@@ -550,60 +634,56 @@ impl AgentCoordinator {
                         .map(|d| d.id.clone())
                         .unwrap_or_else(|| resolve_tool_name_to_cap(&tool_name, &self.broker));
 
-                    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
-                        &resolved_cap,
-                        &arguments,
-                        &req.session_id,
-                        privacy,
-                    ) {
-                        Ok(args) => args,
-                        Err(reason) => {
-                            steps.push(TaskStep {
-                                step_id: call_id.clone(),
-                                capability_id: resolved_cap,
-                                arguments_summary: arguments.to_string(),
-                                status: ExecutionStatus::Denied,
-                                verification: intentos_protocol::VerificationReport {
-                                    state: intentos_protocol::VerificationState::VerificationFailed,
-                                    method: "privacy_session_policy".into(),
-                                    checks: vec![],
-                                    details: Some(reason.clone()),
-                                },
-                                changeset_id: None,
-                                message: reason.clone(),
-                                data: json!({ "error": reason }),
-                                duration_ms: 0,
-                            });
-                            let reply = serde_json::to_string(&json!({
-                                "method": "tool_result",
-                                "params": {
-                                    "call_id": call_id,
-                                    "is_error": true,
-                                    "output": { "error": reason }
-                                }
-                            }))?;
-                            stdin.write_all(reply.as_bytes()).await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await?;
-                            continue;
-                        }
-                    };
-
                     let call = CapabilityCall {
                         request_id: call_id.clone(),
                         task_id: req.task_id.clone(),
                         capability_id: resolved_cap.clone(),
-                        arguments: trusted_args,
+                        arguments: arguments.clone(),
                         origin: InvocationOrigin::L2AgentPlan,
                         taints: taints.to_vec(),
                     };
 
-                    match self.broker.dispatch(&call).await? {
+                    let dispatch_res = if let Some(core) = self.core() {
+                        crate::backend_bridge::broker_bridge::dispatch_broker_call_transactional(
+                            &core,
+                            &req.session_id,
+                            privacy,
+                            StepInvocationContext::new_call(&call_id),
+                            &call,
+                            effect_ledger,
+                        )
+                        .await
+                    } else {
+                        match crate::security_guard::enforce_trusted_tool_context(
+                            &resolved_cap,
+                            &arguments,
+                            &req.session_id,
+                            privacy,
+                        ) {
+                            Ok(trusted_args) => {
+                                let mut trusted_call = call;
+                                trusted_call.arguments = trusted_args;
+                                self.broker.dispatch(&trusted_call).await
+                            }
+                            Err(reason) => Ok(BrokerDispatchOutcome::Denied { reason }),
+                        }
+                    };
+
+                    let outcome = match dispatch_res {
+                        Ok(o) => o,
+                        Err(err) => {
+                            let _ = child.kill().await;
+                            let _ = std::fs::remove_dir_all(&scratch_dir);
+                            return Err(err);
+                        }
+                    };
+
+                    match outcome {
                         BrokerDispatchOutcome::Executed(res) => {
                             if let Some(ref csid) = res.changeset_id {
                                 changeset_ids.push(csid.clone());
                             }
-                            steps.push(TaskStep {
+                            let step = TaskStep {
                                 step_id: call_id.clone(),
                                 capability_id: resolved_cap,
                                 arguments_summary: arguments.to_string(),
@@ -613,12 +693,36 @@ impl AgentCoordinator {
                                 message: res.message.clone(),
                                 data: res.data.clone(),
                                 duration_ms: res.duration_ms,
-                            });
+                            };
+                            steps.push(step.clone());
+                            effect_ledger.task_steps.push(step);
+
+                            if effect_ledger.has_uncertain_side_effects() {
+                                let _ = child.kill().await;
+                                let _ = std::fs::remove_dir_all(&scratch_dir);
+                                return Ok(AgentRunResult {
+                                    final_message: format!(
+                                        "步骤 `{}` 执行后状态未确认（{}），已安全中止后续步骤并进入恢复保护状态（recovery_required）。",
+                                        res.capability_id, res.message
+                                    ),
+                                    steps,
+                                    changeset_ids: effect_ledger.committed_changeset_ids(),
+                                    pending_approval: None,
+                                    handoff_command: None,
+                                    status_override: Some(TaskStatus::RecoveryRequired),
+                                    side_effect_replay_prevented: true,
+                                });
+                            }
+
+                            let is_err = !matches!(
+                                res.status,
+                                ExecutionStatus::Exited | ExecutionStatus::RequestedUnverified
+                            );
                             let reply = serde_json::to_string(&json!({
                                 "method": "tool_result",
                                 "params": {
                                     "call_id": call_id,
-                                    "is_error": false,
+                                    "is_error": is_err,
                                     "output": { "message": res.message, "data": res.data }
                                 }
                             }))?;
@@ -632,6 +736,24 @@ impl AgentCoordinator {
                             break;
                         }
                         BrokerDispatchOutcome::Denied { reason } => {
+                            let denied_step = TaskStep {
+                                step_id: call_id.clone(),
+                                capability_id: resolved_cap,
+                                arguments_summary: arguments.to_string(),
+                                status: ExecutionStatus::Denied,
+                                verification: intentos_protocol::VerificationReport {
+                                    state: intentos_protocol::VerificationState::VerificationFailed,
+                                    method: "policy".into(),
+                                    checks: vec![],
+                                    details: Some(reason.clone()),
+                                },
+                                changeset_id: None,
+                                message: reason.clone(),
+                                data: json!({ "error": reason }),
+                                duration_ms: 0,
+                            };
+                            steps.push(denied_step.clone());
+                            effect_ledger.task_steps.push(denied_step);
                             let reply = serde_json::to_string(&json!({
                                 "method": "tool_result",
                                 "params": {
@@ -649,6 +771,7 @@ impl AgentCoordinator {
                 RuntimeEvent::RunFinished {
                     final_message: msg, ..
                 } => {
+                    saw_run_finished = true;
                     if !msg.is_empty() {
                         final_message = msg;
                     }
@@ -663,6 +786,22 @@ impl AgentCoordinator {
             }
         }
 
+        if pending_approval.is_none() && !saw_run_finished {
+            let exit_status =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+                    Ok(Ok(st)) => Some(st),
+                    _ => {
+                        let _ = child.kill().await;
+                        None
+                    }
+                };
+            let _ = std::fs::remove_dir_all(&scratch_dir);
+            anyhow::bail!(
+                "Agent Worker 未发送 RunFinished 即异常退出 (status={:?})",
+                exit_status
+            );
+        }
+
         let _ = child.kill().await;
         let _ = std::fs::remove_dir_all(&scratch_dir);
         Ok(AgentRunResult {
@@ -671,6 +810,8 @@ impl AgentCoordinator {
             changeset_ids,
             pending_approval,
             handoff_command: None,
+            status_override: None,
+            side_effect_replay_prevented: false,
         })
     }
 
@@ -680,6 +821,7 @@ impl AgentCoordinator {
         req: RunRequest,
         taints: &[Taint],
         privacy: PrivacySessionPolicy,
+        effect_ledger: &mut TurnEffectLedger,
     ) -> anyhow::Result<AgentRunResult> {
         let sys_text = req
             .context_blocks
@@ -813,53 +955,54 @@ impl AgentCoordinator {
                         serde_json::from_str(raw_args).unwrap_or_else(|_| json!({}));
 
                     let resolved_cap = resolve_tool_name_to_cap(fn_name, &self.broker);
-                    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
-                        &resolved_cap,
-                        &parsed_args,
-                        &req.session_id,
-                        privacy,
-                    ) {
-                        Ok(args) => args,
-                        Err(reason) => {
-                            steps.push(TaskStep {
-                                step_id: call_id.clone(),
-                                capability_id: resolved_cap,
-                                arguments_summary: parsed_args.to_string(),
-                                status: ExecutionStatus::Denied,
-                                verification: intentos_protocol::VerificationReport {
-                                    state: intentos_protocol::VerificationState::VerificationFailed,
-                                    method: "privacy_session_policy".into(),
-                                    checks: vec![],
-                                    details: Some(reason.clone()),
-                                },
-                                changeset_id: None,
-                                message: reason.clone(),
-                                data: json!({ "error": reason }),
-                                duration_ms: 0,
-                            });
-                            messages.push(json!({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": serde_json::to_string(&json!({"error": reason}))?
-                            }));
-                            continue;
-                        }
-                    };
                     let call = CapabilityCall {
                         request_id: call_id.clone(),
                         task_id: req.task_id.clone(),
                         capability_id: resolved_cap.clone(),
-                        arguments: trusted_args,
+                        arguments: parsed_args.clone(),
                         origin: InvocationOrigin::L2AgentPlan,
                         taints: taints.to_vec(),
                     };
 
-                    match self.broker.dispatch(&call).await? {
+                    let dispatch_res = if let Some(core) = self.core() {
+                        crate::backend_bridge::broker_bridge::dispatch_broker_call_transactional(
+                            &core,
+                            &req.session_id,
+                            privacy,
+                            StepInvocationContext::new_call(&call_id),
+                            &call,
+                            effect_ledger,
+                        )
+                        .await
+                    } else {
+                        match crate::security_guard::enforce_trusted_tool_context(
+                            &resolved_cap,
+                            &parsed_args,
+                            &req.session_id,
+                            privacy,
+                        ) {
+                            Ok(trusted_args) => {
+                                let mut trusted_call = call;
+                                trusted_call.arguments = trusted_args;
+                                self.broker.dispatch(&trusted_call).await
+                            }
+                            Err(reason) => Ok(BrokerDispatchOutcome::Denied { reason }),
+                        }
+                    };
+
+                    let outcome = match dispatch_res {
+                        Ok(o) => o,
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    };
+
+                    match outcome {
                         BrokerDispatchOutcome::Executed(res) => {
                             if let Some(ref csid) = res.changeset_id {
                                 changeset_ids.push(csid.clone());
                             }
-                            steps.push(TaskStep {
+                            let step = TaskStep {
                                 step_id: call_id.clone(),
                                 capability_id: resolved_cap,
                                 arguments_summary: parsed_args.to_string(),
@@ -869,7 +1012,25 @@ impl AgentCoordinator {
                                 message: res.message.clone(),
                                 data: res.data.clone(),
                                 duration_ms: res.duration_ms,
-                            });
+                            };
+                            steps.push(step.clone());
+                            effect_ledger.task_steps.push(step);
+
+                            if effect_ledger.has_uncertain_side_effects() {
+                                return Ok(AgentRunResult {
+                                    final_message: format!(
+                                        "步骤 `{}` 执行后状态未确认（{}），已安全中止后续步骤并进入恢复保护状态（recovery_required）。",
+                                        res.capability_id, res.message
+                                    ),
+                                    steps,
+                                    changeset_ids: effect_ledger.committed_changeset_ids(),
+                                    pending_approval: None,
+                                    handoff_command: None,
+                                    status_override: Some(TaskStatus::RecoveryRequired),
+                                    side_effect_replay_prevented: true,
+                                });
+                            }
+
                             messages.push(json!({
                                 "role": "tool",
                                 "tool_call_id": call_id,
@@ -883,10 +1044,12 @@ impl AgentCoordinator {
                                 changeset_ids,
                                 pending_approval: Some(pa),
                                 handoff_command: None,
+                                status_override: None,
+                                side_effect_replay_prevented: false,
                             });
                         }
                         BrokerDispatchOutcome::Denied { reason } => {
-                            steps.push(TaskStep {
+                            let step = TaskStep {
                                 step_id: call_id.clone(),
                                 capability_id: resolved_cap,
                                 arguments_summary: parsed_args.to_string(),
@@ -901,7 +1064,9 @@ impl AgentCoordinator {
                                 message: reason.clone(),
                                 data: json!({ "error": reason }),
                                 duration_ms: 0,
-                            });
+                            };
+                            steps.push(step.clone());
+                            effect_ledger.task_steps.push(step);
                             messages.push(json!({
                                 "role": "tool",
                                 "tool_call_id": call_id,
@@ -928,6 +1093,8 @@ impl AgentCoordinator {
                     changeset_ids,
                     pending_approval: None,
                     handoff_command: handoff,
+                    status_override: None,
+                    side_effect_replay_prevented: false,
                 });
             }
         }
@@ -938,6 +1105,8 @@ impl AgentCoordinator {
             changeset_ids,
             pending_approval: None,
             handoff_command: None,
+            status_override: None,
+            side_effect_replay_prevented: false,
         })
     }
 }

@@ -14,8 +14,9 @@
 
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
-    build_quick_chat_openai_tools, execute_quick_chat_tool_call, finalize_completed_turn_outcome,
-    prepare_system_prompt_and_context_with_policy, synthesize_rich_approved_step_markdown,
+    build_quick_chat_openai_tools_with_policy, execute_quick_chat_tool_call,
+    finalize_completed_turn_outcome, prepare_system_prompt_and_context_with_policy,
+    synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, build_search_dirs,
@@ -869,7 +870,20 @@ pub fn scrub_text_secrets(raw: &str) -> String {
 
 /// Build a compact IntentOS Controlled Broker Tool Protocol prompt section for CLI backends.
 pub fn build_cli_broker_protocol_prompt(core: &IntentOsCore, user_text: &str) -> String {
-    let openai_tools = build_quick_chat_openai_tools(core, user_text);
+    build_cli_broker_protocol_prompt_with_policy(
+        core,
+        user_text,
+        crate::security_guard::PrivacySessionPolicy::Standard,
+    )
+}
+
+/// Build a compact IntentOS Controlled Broker Tool Protocol prompt respecting `PrivacySessionPolicy`.
+pub fn build_cli_broker_protocol_prompt_with_policy(
+    core: &IntentOsCore,
+    user_text: &str,
+    privacy: crate::security_guard::PrivacySessionPolicy,
+) -> String {
+    let openai_tools = build_quick_chat_openai_tools_with_policy(core, user_text, privacy);
     let mut tool_lines: Vec<String> = Vec::with_capacity(openai_tools.len());
 
     for t in &openai_tools {
@@ -1511,7 +1525,11 @@ pub async fn run_cli_backend_turn_with_policy(
 
     let mut base_sections: Vec<String> = vec![sys_text.clone()];
     if effective_allow_broker_tools {
-        base_sections.push(build_cli_broker_protocol_prompt(core, user_text));
+        base_sections.push(build_cli_broker_protocol_prompt_with_policy(
+            core,
+            user_text,
+            effective_privacy,
+        ));
     } else {
         base_sections.push(CLI_CHAT_ONLY_PROMPT_NOTE.to_string());
     }
@@ -1852,7 +1870,11 @@ pub async fn continue_resumed_cli_turn(
     let remaining_rounds = MAX_CLI_TOOL_ROUNDS.saturating_sub(cp.rounds_used).max(1);
     let mut base_sections: Vec<String> = vec![cp.sys_text.clone()];
     if effective_allow_broker_tools {
-        base_sections.push(build_cli_broker_protocol_prompt(core, &cp.user_text));
+        base_sections.push(build_cli_broker_protocol_prompt_with_policy(
+            core,
+            &cp.user_text,
+            cp.effect_ledger.privacy(),
+        ));
     } else {
         base_sections.push(CLI_CHAT_ONLY_PROMPT_NOTE.to_string());
     }
