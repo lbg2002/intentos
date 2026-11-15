@@ -21,7 +21,7 @@ use crate::backend_bridge::detector::{
     ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, lookup_ephemeral_backend_key,
     scrub_json_secrets,
 };
-use crate::backend_bridge::providers_cli::continue_resumed_cli_turn;
+use crate::backend_bridge::providers_cli::{continue_resumed_cli_turn, scrub_text_secrets};
 use crate::backend_bridge::providers_http::{
     continue_resumed_anthropic_turn, continue_resumed_openai_turn,
 };
@@ -33,9 +33,9 @@ use crate::runtime::SessionState;
 use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard, UnifiedTaskStateMachine};
 use chrono::{DateTime, Utc};
 use intentos_protocol::{
-    CapabilityCall, ChatMessage, ContextBlock, DataClass, Effect, ExecutionStatus,
-    InvocationOrigin, PendingApproval, PolicyDecision, ProviderTrust, RouteLayer, Taint, Task,
-    TaskBudget, TaskStatus, TaskStep, TaskTrigger,
+    AgentEvent, AgentEventKind, CapabilityCall, ChatMessage, ContextBlock, DataClass, Effect,
+    ExecutionStatus, InvocationOrigin, PendingApproval, PolicyDecision, ProviderTrust, RouteLayer,
+    Taint, Task, TaskBudget, TaskStatus, TaskStep, TaskTrigger,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 
 fn is_untrusted_step_meta_key(key: &str) -> bool {
     matches!(
@@ -1383,6 +1383,225 @@ impl TurnIdentity {
     }
 }
 
+/// Maximum buffered `AgentEvent` items per turn before oldest events roll off (`H10`).
+pub const MAX_TURN_EVENT_RING: usize = 256;
+const RECENT_EVENT_BUS_TTL: Duration = Duration::from_secs(120);
+const STRICT_ISOLATED_EVENT_BUS_TTL: Duration = Duration::from_secs(15);
+const MAX_RECENT_EVENT_BUSES: usize = 128;
+
+fn scrub_event_str(raw: &str) -> String {
+    let scrubbed = scrub_text_secrets(raw);
+    SensitiveDataGuard::redact_text(&scrubbed).0
+}
+
+/// Scrub every string field inside an `AgentEventKind` via `SensitiveDataGuard` + `scrub_text_secrets`
+/// BEFORE sequence assignment, ring-buffer insertion, or broadcast (`H10`).
+pub fn scrub_agent_event_kind(kind: AgentEventKind) -> AgentEventKind {
+    match kind {
+        AgentEventKind::Started => AgentEventKind::Started,
+        AgentEventKind::GoalResolved => AgentEventKind::GoalResolved,
+        AgentEventKind::MessageDelta { delta } => AgentEventKind::MessageDelta {
+            delta: scrub_event_str(&delta),
+        },
+        AgentEventKind::ToolStarted {
+            step_id,
+            capability_id,
+        } => AgentEventKind::ToolStarted {
+            step_id: scrub_event_str(&step_id),
+            capability_id: scrub_event_str(&capability_id),
+        },
+        AgentEventKind::ToolCompleted {
+            step_id,
+            capability_id,
+            status,
+            duration_ms,
+        } => AgentEventKind::ToolCompleted {
+            step_id: scrub_event_str(&step_id),
+            capability_id: scrub_event_str(&capability_id),
+            status: scrub_event_str(&status),
+            duration_ms,
+        },
+        AgentEventKind::AwaitingApproval {
+            approval_id,
+            capability_id,
+        } => AgentEventKind::AwaitingApproval {
+            approval_id: scrub_event_str(&approval_id),
+            capability_id: scrub_event_str(&capability_id),
+        },
+        AgentEventKind::Progress { stage, detail } => AgentEventKind::Progress {
+            stage: scrub_event_str(&stage),
+            detail: scrub_event_str(&detail),
+        },
+        AgentEventKind::Completed { task_status } => AgentEventKind::Completed {
+            task_status: scrub_event_str(&task_status),
+        },
+        AgentEventKind::Failed { error } => AgentEventKind::Failed {
+            error: scrub_event_str(&error),
+        },
+        AgentEventKind::Cancelled => AgentEventKind::Cancelled,
+    }
+}
+
+struct TurnEventRingState {
+    next_seq: u64,
+    dropped_before_seq: u64,
+    done: bool,
+    task_status: Option<String>,
+    ring: VecDeque<AgentEvent>,
+}
+
+/// Snapshot returned by `poll_turn_events` (`since_seq` replay + backpressure metadata).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnEventPollSnapshot {
+    pub turn_id: String,
+    pub since_seq: u64,
+    pub next_seq: u64,
+    pub dropped_before_seq: u64,
+    pub done: bool,
+    pub task_status: Option<String>,
+    pub events: Vec<AgentEvent>,
+}
+
+/// Atomic replay + live broadcast subscription for SSE `/api/turn-events`.
+pub struct TurnEventSubscription {
+    pub snapshot: TurnEventPollSnapshot,
+    pub rx: broadcast::Receiver<AgentEvent>,
+}
+
+/// Per-turn `AgentEvent` ring buffer (`max 256 events/turn`) + `tokio::sync::broadcast` bus (`H10`).
+pub struct AgentTurnEventBus {
+    pub turn_id: String,
+    state: Mutex<TurnEventRingState>,
+    tx: broadcast::Sender<AgentEvent>,
+}
+
+impl AgentTurnEventBus {
+    pub fn new(turn_id: impl Into<String>) -> Self {
+        let (tx, _rx) = broadcast::channel(MAX_TURN_EVENT_RING);
+        Self {
+            turn_id: turn_id.into(),
+            state: Mutex::new(TurnEventRingState {
+                next_seq: 0,
+                dropped_before_seq: 0,
+                done: false,
+                task_status: None,
+                ring: VecDeque::with_capacity(64),
+            }),
+            tx,
+        }
+    }
+
+    /// Scrub, assign strictly monotonic `seq` (`1, 2, ...`), store in bounded ring (`<= 256`),
+    /// and broadcast to live subscribers.
+    pub fn emit(&self, task_id: Option<String>, kind: AgentEventKind) -> AgentEvent {
+        let scrubbed_kind = scrub_agent_event_kind(kind);
+        let scrubbed_task_id = task_id.map(|t| scrub_event_str(&t));
+        let timestamp_ms = Utc::now().timestamp_millis();
+
+        let event = {
+            let mut guard = self.state.lock().unwrap();
+            guard.next_seq += 1;
+            let seq = guard.next_seq;
+            match &scrubbed_kind {
+                AgentEventKind::Completed { task_status } => {
+                    guard.done = true;
+                    guard.task_status = Some(task_status.clone());
+                }
+                AgentEventKind::Failed { .. } => {
+                    guard.done = true;
+                    guard.task_status = Some("failed".to_string());
+                }
+                AgentEventKind::Cancelled => {
+                    guard.done = true;
+                    guard.task_status = Some("cancelled".to_string());
+                }
+                AgentEventKind::AwaitingApproval { .. } => {
+                    guard.done = true;
+                    guard.task_status = Some("waiting_approval".to_string());
+                }
+                _ => {}
+            }
+            let ev = AgentEvent {
+                seq,
+                turn_id: self.turn_id.clone(),
+                task_id: scrubbed_task_id,
+                timestamp_ms,
+                kind: scrubbed_kind,
+            };
+            while guard.ring.len() >= MAX_TURN_EVENT_RING {
+                if let Some(evicted) = guard.ring.pop_front() {
+                    guard.dropped_before_seq = evicted.seq;
+                }
+            }
+            guard.ring.push_back(ev.clone());
+            ev
+        };
+        let _ = self.tx.send(event.clone());
+        event
+    }
+
+    /// Emit a terminal event (`Completed`, `Failed`, `Cancelled`, or `AwaitingApproval`) only if
+    /// the bus has not already recorded a stream-ending boundary event.
+    pub fn emit_terminal_once(
+        &self,
+        task_id: Option<String>,
+        kind: AgentEventKind,
+    ) -> Option<AgentEvent> {
+        {
+            let guard = self.state.lock().unwrap();
+            if guard.done
+                && guard
+                    .ring
+                    .back()
+                    .is_some_and(|last| last.kind.ends_turn_stream())
+            {
+                return None;
+            }
+        }
+        Some(self.emit(task_id, kind))
+    }
+
+    pub fn poll_since(&self, since_seq: u64) -> TurnEventPollSnapshot {
+        let guard = self.state.lock().unwrap();
+        let events = guard
+            .ring
+            .iter()
+            .filter(|ev| ev.seq > since_seq)
+            .cloned()
+            .collect();
+        TurnEventPollSnapshot {
+            turn_id: self.turn_id.clone(),
+            since_seq,
+            next_seq: guard.next_seq,
+            dropped_before_seq: guard.dropped_before_seq,
+            done: guard.done,
+            task_status: guard.task_status.clone(),
+            events,
+        }
+    }
+
+    pub fn subscribe_since(&self, since_seq: u64) -> TurnEventSubscription {
+        let guard = self.state.lock().unwrap();
+        let rx = self.tx.subscribe();
+        let events = guard
+            .ring
+            .iter()
+            .filter(|ev| ev.seq > since_seq)
+            .cloned()
+            .collect();
+        let snapshot = TurnEventPollSnapshot {
+            turn_id: self.turn_id.clone(),
+            since_seq,
+            next_seq: guard.next_seq,
+            dropped_before_seq: guard.dropped_before_seq,
+            done: guard.done,
+            task_status: guard.task_status.clone(),
+            events,
+        };
+        TurnEventSubscription { snapshot, rx }
+    }
+}
+
 /// Active turn ownership, cancellation & completion-coalescing handle.
 pub struct ActiveTurnHandle {
     pub instance_seq: u64,
@@ -1390,6 +1609,7 @@ pub struct ActiveTurnHandle {
     pub turn_id: String,
     pub session_id: Option<String>,
     pub task_id: Mutex<Option<String>>,
+    pub event_bus: Arc<AgentTurnEventBus>,
     cancelled: AtomicBool,
     aborted: AtomicBool,
     lifecycle: Mutex<TurnLifecycleState>,
@@ -1421,6 +1641,7 @@ impl ActiveTurnHandle {
         started_at: Instant,
     ) -> Self {
         let turn_id = identity.turn_id.clone();
+        let event_bus = Arc::new(AgentTurnEventBus::new(turn_id.clone()));
         let session_id = session_override.or_else(|| {
             if identity.session_id == LEGACY_WILDCARD_SESSION
                 || identity.session_id == ANONYMOUS_SESSION_SENTINEL
@@ -1437,6 +1658,7 @@ impl ActiveTurnHandle {
             turn_id,
             session_id,
             task_id: Mutex::new(None),
+            event_bus,
             cancelled: AtomicBool::new(false),
             aborted: AtomicBool::new(false),
             lifecycle: Mutex::new(TurnLifecycleState::Running),
@@ -1444,6 +1666,12 @@ impl ActiveTurnHandle {
             notify: Notify::new(),
             started_at,
         }
+    }
+
+    /// Emit a scrubbed, monotonically sequenced `AgentEvent` on this turn's `AgentTurnEventBus`.
+    pub fn emit_event(&self, kind: AgentEventKind) -> AgentEvent {
+        let tid = self.task_id.lock().unwrap().clone();
+        self.event_bus.emit(tid, kind)
     }
 
     pub fn lifecycle_state(&self) -> TurnLifecycleState {
@@ -1468,11 +1696,64 @@ impl ActiveTurnHandle {
             let mut st = self.lifecycle.lock().unwrap();
             *st = TurnLifecycleState::Cancelled;
         }
+        let tid = self.task_id.lock().unwrap().clone();
+        let _ = self
+            .event_bus
+            .emit_terminal_once(tid, AgentEventKind::Cancelled);
         self.notify.notify_waiters();
         !was_already
     }
 
     fn set_finished_and_notify(&self, next_state: TurnLifecycleState, result: Value) {
+        let tid = self.task_id.lock().unwrap().clone().or_else(|| {
+            result
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+        if next_state == TurnLifecycleState::PausedApproval {
+            if let Some(pa) = result.get("pending_approval") {
+                let approval_id = pa
+                    .get("approval_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("approval_pending")
+                    .to_string();
+                let capability_id = pa
+                    .get("capability_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let _ = self.event_bus.emit_terminal_once(
+                    tid,
+                    AgentEventKind::AwaitingApproval {
+                        approval_id,
+                        capability_id,
+                    },
+                );
+            }
+        } else {
+            let task_status = result
+                .get("task_status")
+                .or_else(|| result.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed")
+                .to_string();
+            if task_status == "failed" {
+                let err_detail = result
+                    .get("error")
+                    .or_else(|| result.get("reply_markdown"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("turn_failed")
+                    .to_string();
+                let _ = self
+                    .event_bus
+                    .emit_terminal_once(tid, AgentEventKind::Failed { error: err_detail });
+            } else {
+                let _ = self
+                    .event_bus
+                    .emit_terminal_once(tid, AgentEventKind::Completed { task_status });
+            }
+        }
         {
             let mut res_guard = self.terminal_result.lock().unwrap();
             *res_guard = Some(result);
@@ -1486,6 +1767,13 @@ impl ActiveTurnHandle {
 
     fn mark_aborted_and_notify(&self) {
         self.aborted.store(true, Ordering::SeqCst);
+        let tid = self.task_id.lock().unwrap().clone();
+        let _ = self.event_bus.emit_terminal_once(
+            tid,
+            AgentEventKind::Failed {
+                error: "turn_aborted".to_string(),
+            },
+        );
         self.notify.notify_waiters();
     }
 
@@ -1566,6 +1854,15 @@ struct CancelledTurnEntry {
     cancelled_at: Instant,
 }
 
+#[derive(Clone)]
+struct RecentEventBusEntry {
+    turn_id: String,
+    session_id: Option<String>,
+    privacy: PrivacySessionPolicy,
+    stored_at: Instant,
+    bus: Arc<AgentTurnEventBus>,
+}
+
 /// Single atomic state machine managing active, paused-approval, finished, and cancelled turns.
 pub struct TurnRegistry {
     next_instance_seq: u64,
@@ -1573,6 +1870,7 @@ pub struct TurnRegistry {
     completed: VecDeque<CompletedTurnEntry>,
     cancelled: VecDeque<CancelledTurnEntry>,
     completed_tombstones: VecDeque<(String, Instant)>,
+    recent_event_buses: VecDeque<RecentEventBusEntry>,
 }
 
 impl Default for TurnRegistry {
@@ -1589,6 +1887,7 @@ impl TurnRegistry {
             completed: VecDeque::new(),
             cancelled: VecDeque::new(),
             completed_tombstones: VecDeque::new(),
+            recent_event_buses: VecDeque::new(),
         }
     }
 
@@ -1599,6 +1898,74 @@ impl TurnRegistry {
             .retain(|e| now.saturating_duration_since(e.cancelled_at) <= CANCELLED_TURN_CACHE_TTL);
         self.completed_tombstones
             .retain(|(_, ts)| now.saturating_duration_since(*ts) <= COMPLETED_TURN_CACHE_TTL);
+        self.recent_event_buses.retain(|e| {
+            let ttl = if e.privacy == PrivacySessionPolicy::StrictIsolated {
+                STRICT_ISOLATED_EVENT_BUS_TTL
+            } else {
+                RECENT_EVENT_BUS_TTL
+            };
+            now.saturating_duration_since(e.stored_at) <= ttl
+        });
+    }
+
+    fn retain_event_bus(&mut self, handle: &Arc<ActiveTurnHandle>, now: Instant) {
+        self.recent_event_buses
+            .retain(|e| e.turn_id != handle.turn_id);
+        while self.recent_event_buses.len() >= MAX_RECENT_EVENT_BUSES {
+            self.recent_event_buses.pop_front();
+        }
+        self.recent_event_buses.push_back(RecentEventBusEntry {
+            turn_id: handle.turn_id.clone(),
+            session_id: handle.session_id.clone(),
+            privacy: handle.identity.privacy,
+            stored_at: now,
+            bus: handle.event_bus.clone(),
+        });
+    }
+
+    fn find_event_bus(
+        &mut self,
+        turn_id: Option<&str>,
+        session_id: Option<&str>,
+        now: Instant,
+    ) -> Option<Arc<AgentTurnEventBus>> {
+        self.evict_expired(now);
+        if let Some(tid) = turn_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(active) = self.active.get(tid) {
+                return Some(active.handle.event_bus.clone());
+            }
+            if let Some(rec) = self
+                .recent_event_buses
+                .iter()
+                .rev()
+                .find(|e| e.turn_id == tid)
+            {
+                return Some(rec.bus.clone());
+            }
+            return None;
+        }
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((_, active)) = self
+                .active
+                .iter()
+                .filter(|(_, e)| {
+                    e.handle.session_id.as_deref() == Some(sid)
+                        || e.handle.identity.session_id == sid
+                })
+                .max_by_key(|(_, e)| e.handle.started_at)
+            {
+                return Some(active.handle.event_bus.clone());
+            }
+            if let Some(rec) = self
+                .recent_event_buses
+                .iter()
+                .rev()
+                .find(|e| e.session_id.as_deref() == Some(sid))
+            {
+                return Some(rec.bus.clone());
+            }
+        }
+        None
     }
 
     fn push_cancelled_entry(&mut self, entry: CancelledTurnEntry) {
@@ -1728,6 +2095,7 @@ impl TurnRegistry {
                 self.active.remove(&handle.turn_id);
             }
             handle.cancel();
+            self.retain_event_bus(handle, now);
             return false;
         }
 
@@ -1752,6 +2120,7 @@ impl TurnRegistry {
         };
 
         handle.set_finished_and_notify(next_state, result.clone());
+        self.retain_event_bus(handle, now);
 
         if handle.identity.privacy.allows_replay_cache() {
             self.push_completed_tombstone(&handle.turn_id, now);
@@ -1782,6 +2151,7 @@ impl TurnRegistry {
             .is_some_and(|e| e.instance_seq == handle.instance_seq)
         {
             self.active.remove(&handle.turn_id);
+            self.retain_event_bus(handle, Instant::now());
             true
         } else {
             false
@@ -1861,6 +2231,104 @@ pub fn turn_lifecycle_state(turn_id: &str) -> Option<TurnLifecycleState> {
         .lifecycle_state(turn_id, Instant::now())
 }
 
+/// Emit an `AgentEvent` onto the active (or recently retained/resumed) turn event bus for `turn_id`.
+pub fn emit_turn_event(
+    turn_id: &str,
+    task_id: Option<&str>,
+    kind: AgentEventKind,
+) -> Option<AgentEvent> {
+    let tid = turn_id.trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let bus = {
+        let mut reg = turn_registry().lock().unwrap();
+        reg.find_event_bus(Some(tid), None, Instant::now())
+    }?;
+    Some(bus.emit(task_id.map(String::from), kind))
+}
+
+/// Poll incremental `AgentEvent` items (`poll_turn_events` RPC action, `H10`).
+///
+/// Payload accepts `{"turn_id": "...", "since_seq": 0}` (or `"session_id"` fallback).
+pub fn poll_turn_events(payload: &Value) -> Value {
+    let turn_id = payload
+        .get("turn_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let since_seq = payload
+        .get("since_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let now = Instant::now();
+    let (bus_opt, lifecycle_opt) = {
+        let mut reg = turn_registry().lock().unwrap();
+        let bus = reg.find_event_bus(turn_id, session_id, now);
+        let lc = bus
+            .as_ref()
+            .and_then(|b| reg.lifecycle_state(&b.turn_id, now))
+            .or_else(|| turn_id.and_then(|t| reg.lifecycle_state(t, now)));
+        (bus, lc)
+    };
+
+    if let Some(bus) = bus_opt {
+        let snap = bus.poll_since(since_seq);
+        return json!({
+            "ok": true,
+            "found": true,
+            "turn_id": snap.turn_id,
+            "since_seq": snap.since_seq,
+            "next_seq": snap.next_seq,
+            "dropped_before_seq": snap.dropped_before_seq,
+            "done": snap.done,
+            "lifecycle_state": lifecycle_opt,
+            "task_status": snap.task_status,
+            "events": snap.events,
+        });
+    }
+
+    let is_known_terminal = matches!(
+        lifecycle_opt,
+        Some(
+            TurnLifecycleState::Finished
+                | TurnLifecycleState::Cancelled
+                | TurnLifecycleState::PausedApproval
+        )
+    );
+    json!({
+        "ok": true,
+        "found": false,
+        "turn_id": turn_id.unwrap_or(""),
+        "since_seq": since_seq,
+        "next_seq": since_seq,
+        "dropped_before_seq": 0,
+        "done": is_known_terminal,
+        "lifecycle_state": lifecycle_opt,
+        "task_status": Value::Null,
+        "events": [],
+    })
+}
+
+/// Subscribe to incremental replay + live `AgentEvent` stream for `GET /api/turn-events`.
+pub fn subscribe_turn_event_stream(turn_id: &str, since_seq: u64) -> Option<TurnEventSubscription> {
+    let tid = turn_id.trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let bus = {
+        let mut reg = turn_registry().lock().unwrap();
+        reg.find_event_bus(Some(tid), None, Instant::now())
+    }?;
+    Some(bus.subscribe_since(since_seq))
+}
+
 #[cfg(test)]
 pub(crate) fn begin_turn(turn_id: &str, session_id: Option<&str>) -> TurnStartOutcome {
     let privacy = PrivacySessionPolicy::from_session(false, session_id);
@@ -1911,6 +2379,7 @@ pub fn cancel_turn(core: &IntentOsCore, payload: &Value) -> Value {
 
             if let Some(active_entry) = reg.active.remove(tid) {
                 let first_cancel = active_entry.handle.cancel();
+                reg.retain_event_bus(&active_entry.handle, now);
                 task_to_cancel = active_entry.handle.task_id.lock().unwrap().clone();
                 reg.push_cancelled_entry(CancelledTurnEntry {
                     turn_id: tid.to_string(),
@@ -1991,6 +2460,7 @@ pub fn cancel_turn(core: &IntentOsCore, payload: &Value) -> Value {
             && let Some(active_entry) = reg.active.remove(&tid)
         {
             let first_cancel = active_entry.handle.cancel();
+            reg.retain_event_bus(&active_entry.handle, now);
             task_to_cancel = active_entry.handle.task_id.lock().unwrap().clone();
             reg.push_cancelled_entry(CancelledTurnEntry {
                 turn_id: tid.clone(),

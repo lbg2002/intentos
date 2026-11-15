@@ -12,7 +12,7 @@ pub use crate::backend_bridge::turn_checkpoint::{
     ToolIdempotencyPolicy,
 };
 use crate::backend_bridge::turn_checkpoint::{
-    StepExecutionRecord, TurnEffectLedger, canonicalize_tool_args_value,
+    StepExecutionRecord, TurnEffectLedger, canonicalize_tool_args_value, emit_turn_event,
 };
 use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
@@ -24,9 +24,9 @@ use crate::runtime::{SessionState, build_context_blocks};
 use crate::security_guard::PrivacySessionPolicy;
 use chrono::Utc;
 use intentos_protocol::{
-    CapabilityCall, CapabilityResult, ContextBlock, DataClass, Effect, ExecutionStatus,
-    InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskStatus, TaskStep, TaskTrigger,
-    VerificationReport, VerificationState,
+    AgentEventKind, CapabilityCall, CapabilityResult, ContextBlock, DataClass, Effect,
+    ExecutionStatus, InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskStatus,
+    TaskStep, TaskTrigger, VerificationReport, VerificationState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -857,10 +857,29 @@ pub async fn dispatch_broker_call_transactional(
             .upsert_step_execution_log(&log_row, effective_privacy)?;
     }
 
+    let _ = emit_turn_event(
+        &effect_ledger.turn_id,
+        Some(&call.task_id),
+        AgentEventKind::ToolStarted {
+            step_id: step_id.clone(),
+            capability_id: canonical_tool.clone(),
+        },
+    );
+
     match core.broker.dispatch(call).await {
         Ok(BrokerDispatchOutcome::Executed(res)) => {
             let (exec_state, is_ok, was_denied, recovery_hint) =
                 classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: format!("{:?}", exec_state).to_ascii_lowercase(),
+                    duration_ms: res.duration_ms,
+                },
+            );
             let post_epoch = if effect > Effect::Observe && !was_denied {
                 effect_ledger.bump_state_epoch()
             } else {
@@ -930,6 +949,14 @@ pub async fn dispatch_broker_call_transactional(
             Ok(BrokerDispatchOutcome::Executed(res))
         }
         Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::AwaitingApproval {
+                    approval_id: pa.approval_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                },
+            );
             effect_ledger.budget_tracker.refund_paused_tool_call();
             effect_ledger.budget_tracker.pause_for_approval();
             effect_ledger.pending_approval_step_id = Some(step_id.clone());
@@ -957,6 +984,16 @@ pub async fn dispatch_broker_call_transactional(
             Ok(BrokerDispatchOutcome::RequiresApproval(pa))
         }
         Ok(BrokerDispatchOutcome::Denied { reason }) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: "denied".to_string(),
+                    duration_ms: 0,
+                },
+            );
             if effect > Effect::Observe {
                 let denied_row = StepExecutionLogRow {
                     task_id: call.task_id.clone(),
@@ -1008,6 +1045,16 @@ pub async fn dispatch_broker_call_transactional(
             Ok(BrokerDispatchOutcome::Denied { reason })
         }
         Err(err) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: "error".to_string(),
+                    duration_ms: 0,
+                },
+            );
             if effect > Effect::Observe {
                 let post_epoch = effect_ledger.bump_state_epoch();
                 let idempotency_key = effect_ledger.compute_step_idempotency_key(
@@ -1424,10 +1471,29 @@ where
             .upsert_step_execution_log(&log_row, effective_privacy)?;
     }
 
+    let _ = emit_turn_event(
+        &effect_ledger.turn_id,
+        Some(task_id),
+        AgentEventKind::ToolStarted {
+            step_id: step_id.clone(),
+            capability_id: canonical_tool.clone(),
+        },
+    );
+
     match dispatcher(call.clone()).await {
         Ok(BrokerDispatchOutcome::Executed(mut res)) => {
             let (exec_state, is_ok, was_denied, recovery_hint) =
                 classify_executed_step_state(effect, &step_id, &canonical_tool, &res);
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: format!("{:?}", exec_state).to_ascii_lowercase(),
+                    duration_ms: res.duration_ms,
+                },
+            );
             let post_epoch = if effect > Effect::Observe && !was_denied {
                 effect_ledger.bump_state_epoch()
             } else {
@@ -1736,6 +1802,14 @@ where
         }
 
         Ok(BrokerDispatchOutcome::RequiresApproval(pa)) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::AwaitingApproval {
+                    approval_id: pa.approval_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                },
+            );
             effect_ledger.budget_tracker.refund_paused_tool_call();
             effect_ledger.budget_tracker.pause_for_approval();
             effect_ledger.pending_approval_step_id = Some(step_id.clone());
@@ -1828,6 +1902,16 @@ where
         }
 
         Ok(BrokerDispatchOutcome::Denied { reason }) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(&call.task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: "denied".to_string(),
+                    duration_ms: 0,
+                },
+            );
             if effect > Effect::Observe {
                 let denied_row = StepExecutionLogRow {
                     task_id: task_id.to_string(),
@@ -1893,6 +1977,16 @@ where
         }
 
         Err(err) => {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(task_id),
+                AgentEventKind::ToolCompleted {
+                    step_id: step_id.clone(),
+                    capability_id: canonical_tool.clone(),
+                    status: "error".to_string(),
+                    duration_ms: 0,
+                },
+            );
             if effect > Effect::Observe {
                 let post_epoch = effect_ledger.bump_state_epoch();
                 let idempotency_key = effect_ledger.compute_step_idempotency_key(

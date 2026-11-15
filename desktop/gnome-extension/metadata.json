@@ -2,7 +2,7 @@
   "uuid": "intent-shell@intentos.org",
   "name": "IntentOS · 随问 (Quick Chat)",
   "description": "Desktop-floating Quick-Chat AIOS dialog floating above desktop windows: Super+Shift+Q toggle, Super+Shift+Y selection/clipboard quick-ask, inline ZCode/Codex/Pi/OpenAI switcher, 20px colored Trace Dots, Personal Memory Hub, and Software Translation Layer",
-  "shell-version": ["46", "47", "48", "49", "50"],
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
   "version": 4,
   "url": "https://intentos.local",
   "settings-schema": "org.gnome.shell.extensions.intentos"

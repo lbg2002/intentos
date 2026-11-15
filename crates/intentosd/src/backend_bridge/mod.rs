@@ -25,8 +25,9 @@ pub use detector::{
 pub use turn_engine::{
     ActiveTurnHandle, BackendExecutionMode, PersistedQuickChatBackend, ScopedZcodeRuntimeOverride,
     StepExecutionRecord, TraceDot, TurnEffectLedger, cancel_turn, extract_thinking_and_clean_reply,
-    load_persisted_backend, resolve_active_selection, resume_approved_turn_with_options,
-    send_quick_chat_turn_with_options, set_active_backend_with_options,
+    load_persisted_backend, poll_turn_events, resolve_active_selection,
+    resume_approved_turn_with_options, send_quick_chat_turn_with_options,
+    set_active_backend_with_options,
 };
 
 use crate::core::IntentOsCore;
@@ -106,6 +107,8 @@ pub async fn handle_module_rpc(
         }
 
         "cancel_turn" => Ok(cancel_turn(core, &payload)),
+
+        "poll_turn_events" => Ok(poll_turn_events(&payload)),
 
         other => anyhow::bail!("backend_bridge: unknown action '{}'", other),
     }

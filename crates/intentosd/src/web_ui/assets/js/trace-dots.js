@@ -36,6 +36,11 @@ export const TRACE_DOT_META = {
     badgeLabel: '安全审批',
     defaultTitle: '敏感路径与受控动作审批',
   },
+  task_partial: {
+    colorClass: 'dot-amber',
+    badgeLabel: '部分完成',
+    defaultTitle: '部分完成 · 已达预算保护上限',
+  },
   tool_unverified: {
     colorClass: 'dot-blue',
     badgeLabel: '已发送请求（待桌面响应）',
@@ -126,6 +131,7 @@ function mapRawKind(rawKind, rawColor, rawDot = null) {
   const c = String(rawColor || '').toLowerCase();
   if (k.includes('think') || c === 'gray') return 'thinking';
   if (k.includes('mem') || c === 'purple') return 'memory';
+  if (k === 'task_partial' || k === 'partially_completed') return 'task_partial';
   if (
     k.includes('approv') ||
     k.includes('confirm') ||
@@ -411,6 +417,44 @@ export function normalizeTraceDots(turn = {}) {
         '该操作涉及敏感路径或受保护范围，请确认授权级别。',
       pending_approval: effectivePending,
       task_id: effectivePending.task_id || effectiveTaskId,
+    });
+  }
+
+  // 6. Honest `task_status` badges (`partially_completed` / `recovery_required`) (`H07` / `H10`)
+  const taskStatus = String(
+    turn.task_status || (turn.task && turn.task.status) || ''
+  ).toLowerCase();
+  const completedSteps = Array.isArray(turn.completed_steps) ? turn.completed_steps : [];
+  const unresolvedGoals = Array.isArray(turn.unresolved_goals) ? turn.unresolved_goals : [];
+  const statusDetailParts = [];
+  if (completedSteps.length > 0) {
+    statusDetailParts.push(`已完成步骤:\n- ${completedSteps.join('\n- ')}`);
+  }
+  if (unresolvedGoals.length > 0) {
+    statusDetailParts.push(`未完成目标:\n- ${unresolvedGoals.join('\n- ')}`);
+  }
+
+  if (
+    (taskStatus === 'recovery_required' || turn.recovery_required === true) &&
+    !dots.some((d) => String(d.title || '').includes('recovery_required'))
+  ) {
+    dots.push({
+      kind: 'tool_err',
+      title: '需人工恢复核验 (recovery_required)',
+      detail:
+        statusDetailParts.join('\n\n') ||
+        '智能体执行期间检测到未确认副作用，已阻止自动回退重放以确保安全。',
+    });
+  } else if (
+    taskStatus === 'partially_completed' &&
+    !dots.some((d) => d.kind === 'task_partial')
+  ) {
+    dots.push({
+      kind: 'task_partial',
+      title: '部分完成 · 已达预算保护上限',
+      detail:
+        statusDetailParts.join('\n\n') ||
+        '当前回合触发预算上限保护，已完成部分步骤并安全收束。',
     });
   }
 
@@ -945,6 +989,21 @@ export function renderTraceDotsHeader(opts) {
         body.appendChild(btnBar);
         body.appendChild(pendingStatusEl);
       }
+    }
+    // 5a-0. Amber `task_partial` (`partially_completed`) honest budget-bounded partial completion inspector
+    else if (dot.kind === 'task_partial') {
+      const metaBar = document.createElement('div');
+      metaBar.className = 'qc-tool-meta-bar';
+      const leftInfo = document.createElement('div');
+      leftInfo.className = 'qc-tool-meta-tags';
+      leftInfo.innerHTML = '<span class="qc-channel-pill unverified">⚠️ 部分完成（预算上限保护）</span>';
+      metaBar.appendChild(leftInfo);
+      body.appendChild(metaBar);
+
+      const detailEl = document.createElement('div');
+      detailEl.className = 'qc-trace-detail-text';
+      detailEl.textContent = dot.detail || '当前任务在预算边界处安全停止，仅完成部分步骤。';
+      body.appendChild(detailEl);
     }
     // 5a. Sky-Blue `tool_unverified` (`RequestedUnverified` / `simulated: true`) honest pending response inspector
     else if (dot.kind === 'tool_unverified') {

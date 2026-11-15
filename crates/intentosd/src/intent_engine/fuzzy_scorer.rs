@@ -9,7 +9,7 @@
 
 use crate::db::IndexDb;
 use crate::intent_engine::pattern_compiler::{
-    DescriptorLexiconEntry, PatternCompiler, analyze_colloquial_input,
+    DescriptorLexiconEntry, PatternCompiler, PrecomputedLexiconTerm, analyze_colloquial_input,
 };
 use crate::resource::to_pinyin_pair;
 use serde::{Deserialize, Serialize};
@@ -53,10 +53,7 @@ pub struct ScoredCapabilityMatch {
     pub captured_slots: HashMap<String, String>,
 }
 
-/// Compute character-level Levenshtein edit distance between two strings.
-pub fn levenshtein_distance(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
+fn levenshtein_chars(a_chars: &[char], b_chars: &[char]) -> usize {
     let m = a_chars.len();
     let n = b_chars.len();
     if m == 0 {
@@ -80,10 +77,14 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev[n]
 }
 
-/// Compute Jaro-Winkler similarity in `[0.0, 1.0]`.
-pub fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
-    let s1: Vec<char> = a.chars().collect();
-    let s2: Vec<char> = b.chars().collect();
+/// Compute character-level Levenshtein edit distance between two strings.
+pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    levenshtein_chars(&a_chars, &b_chars)
+}
+
+fn jaro_winkler_chars(s1: &[char], s2: &[char]) -> f64 {
     let len1 = s1.len();
     let len2 = s2.len();
 
@@ -147,15 +148,26 @@ pub fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
     (jaro + prefix_len * 0.1 * (1.0 - jaro)).clamp(0.0, 1.0)
 }
 
-/// Compute character bigram Dice similarity in `[0.0, 1.0]`.
-pub fn char_bigram_similarity(a: &str, b: &str) -> f64 {
-    let bg_a = char_bigrams(a);
-    let bg_b = char_bigrams(b);
+/// Compute Jaro-Winkler similarity in `[0.0, 1.0]`.
+pub fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
+    let s1: Vec<char> = a.chars().collect();
+    let s2: Vec<char> = b.chars().collect();
+    jaro_winkler_chars(&s1, &s2)
+}
+
+fn bigram_slice_similarity(bg_a: &[(char, char)], bg_b: &[(char, char)]) -> f64 {
     if bg_a.is_empty() || bg_b.is_empty() {
         return 0.0;
     }
     let inter = bg_a.iter().filter(|x| bg_b.contains(x)).count();
     ((2.0 * inter as f64) / (bg_a.len() + bg_b.len()) as f64).clamp(0.0, 1.0)
+}
+
+/// Compute character bigram Dice similarity in `[0.0, 1.0]`.
+pub fn char_bigram_similarity(a: &str, b: &str) -> f64 {
+    let bg_a = char_bigrams(a);
+    let bg_b = char_bigrams(b);
+    bigram_slice_similarity(&bg_a, &bg_b)
 }
 
 fn char_bigrams(s: &str) -> Vec<(char, char)> {
@@ -333,23 +345,181 @@ fn match_syllables_recursive(rem: &[u8], syllables: &[String], idx: usize) -> bo
     false
 }
 
-/// Score a single `DescriptorLexiconEntry` against a user query.
-pub fn score_descriptor_entry(
-    raw_query: &str,
+struct PreparedQuery {
+    lc: String,
+    chars: Vec<char>,
+    clean: String,
+    clean_chars: Vec<char>,
+    py_full: String,
+    py_init: String,
+    bigrams: Vec<(char, char)>,
+}
+
+impl PreparedQuery {
+    fn new(raw: &str) -> Self {
+        let lc = raw.trim().to_ascii_lowercase();
+        let chars: Vec<char> = lc.chars().collect();
+        let clean: String = chars
+            .iter()
+            .copied()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let clean_chars: Vec<char> = clean.chars().collect();
+        let (py_full, py_init) = to_pinyin_pair(&lc);
+        let bigrams = char_bigrams(&lc);
+        Self {
+            lc,
+            chars,
+            clean,
+            clean_chars,
+            py_full,
+            py_init,
+            bigrams,
+        }
+    }
+}
+
+fn score_prepared_query_against_precomputed_term(
+    q: &PreparedQuery,
+    term: &PrecomputedLexiconTerm,
+    frecency_boost: f64,
+) -> Option<FuzzyScoreBreakdown> {
+    if q.lc.is_empty() || term.lc.is_empty() {
+        return None;
+    }
+
+    let mut tier = MatchTier::None;
+    let mut lexical_score: f64 = 0.0;
+    let mut pinyin_score: f64 = 0.0;
+    let is_alias_or_synonym = term.is_alias_or_synonym;
+
+    // 1. Exact or Prefix or Substring match
+    if q.lc == term.lc {
+        tier = if is_alias_or_synonym {
+            MatchTier::AliasSynonym
+        } else {
+            MatchTier::Exact
+        };
+        lexical_score = if is_alias_or_synonym { 0.96 } else { 1.0 };
+    } else if term.lc.starts_with(&q.lc) {
+        tier = if is_alias_or_synonym {
+            MatchTier::AliasSynonym
+        } else {
+            MatchTier::Prefix
+        };
+        lexical_score = if is_alias_or_synonym { 0.91 } else { 0.93 };
+    } else if term.chars.len() >= 2 && q.lc.contains(&term.lc) {
+        tier = MatchTier::AliasSynonym;
+        lexical_score = 0.90;
+    } else if q.chars.len() >= 2 && term.lc.contains(&q.lc) {
+        tier = MatchTier::AliasSynonym;
+        lexical_score = 0.84;
+    }
+
+    // 2. Pinyin matching using precomputed target pinyin + syllables
+    if !q.clean.is_empty() && !term.py_full.is_empty() {
+        if q.clean == term.py_init || q.clean == term.py_full {
+            pinyin_score = 0.95;
+        } else if term.py_init.starts_with(&q.clean) || term.py_full.starts_with(&q.clean) {
+            pinyin_score = 0.86;
+        } else if term.syllables.len() >= 2
+            && match_syllables_recursive(q.clean.as_bytes(), &term.syllables, 0)
+        {
+            pinyin_score = 0.90;
+        } else if q.clean.len() >= 3 && term.py_full.contains(&q.clean) {
+            pinyin_score = 0.78;
+        } else if !q.py_full.is_empty() && q.py_full == term.py_full && q.lc != term.lc {
+            pinyin_score = 0.88;
+        } else if q.py_init.len() >= 3 && q.py_init == term.py_init && q.lc != term.lc {
+            pinyin_score = 0.80;
+        }
+
+        if pinyin_score > 0.0 && tier < MatchTier::Pinyin {
+            tier = MatchTier::Pinyin;
+        }
+    }
+
+    // 3. Edit distance & Bigram overlap with exact length-difference & Dice upper-bound short-circuit
+    let max_len = q.chars.len().max(term.chars.len());
+    let char_edit_sim = if max_len >= 3 && q.chars.len().abs_diff(term.chars.len()) <= 2 {
+        let edit_dist = levenshtein_chars(&q.chars, &term.chars);
+        if edit_dist <= 2 {
+            let ratio = 1.0 - (edit_dist as f64 / max_len as f64);
+            let jw = jaro_winkler_chars(&q.chars, &term.chars);
+            Some(ratio.max(jw * 0.92))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let edit_similarity = if let Some(sim) = char_edit_sim {
+        sim
+    } else if q.clean_chars.len() >= 4
+        && !term.py_full.is_empty()
+        && q.clean_chars.len().abs_diff(term.py_full.len()) <= 2
+    {
+        let py_chars: Vec<char> = term.py_full.chars().collect();
+        let py_dist = levenshtein_chars(&q.clean_chars, &py_chars);
+        if py_dist <= 2 {
+            (1.0 - py_dist as f64 / term.py_full.len().max(1) as f64).clamp(0.0, 0.86)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    if tier == MatchTier::None && edit_similarity < 0.62 {
+        let len_sum = q.bigrams.len() + term.bigrams.len();
+        if len_sum == 0 {
+            return None;
+        }
+        let max_possible_dice =
+            (2 * q.bigrams.len().min(term.bigrams.len())) as f64 / (len_sum as f64);
+        if max_possible_dice < 0.45 {
+            return None;
+        }
+    }
+
+    let bigram_score = bigram_slice_similarity(&q.bigrams, &term.bigrams);
+    if tier == MatchTier::None && (edit_similarity >= 0.62 || bigram_score >= 0.45) {
+        tier = MatchTier::FuzzyEditBigram;
+    }
+
+    let base_0_to_100 = match tier {
+        MatchTier::Exact => 100.0 * lexical_score,
+        MatchTier::Prefix => 92.0 * lexical_score,
+        MatchTier::AliasSynonym => 90.0 * lexical_score.max(pinyin_score),
+        MatchTier::Pinyin => 86.0 * pinyin_score,
+        MatchTier::FuzzyEditBigram => 72.0 * edit_similarity.max(bigram_score),
+        MatchTier::None => return None,
+    };
+
+    let total_score = if base_0_to_100 > 0.0 {
+        base_0_to_100 + frecency_boost
+    } else {
+        return None;
+    };
+
+    Some(FuzzyScoreBreakdown {
+        tier,
+        lexical_score,
+        pinyin_score,
+        edit_similarity,
+        bigram_score,
+        frecency_boost,
+        total_score,
+        matched_term: term.raw.clone(),
+    })
+}
+
+fn score_descriptor_entry_with_prepared_queries(
+    prepared_queries: &[PreparedQuery],
     entry: &DescriptorLexiconEntry,
     frecency_boost: f64,
 ) -> Option<FuzzyScoreBreakdown> {
-    let trimmed = raw_query.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let analysis = analyze_colloquial_input(trimmed);
-    let queries_to_check = if analysis.normalized != trimmed && !analysis.normalized.is_empty() {
-        vec![trimmed, analysis.normalized.as_str()]
-    } else {
-        vec![trimmed]
-    };
-
     let mut best: Option<FuzzyScoreBreakdown> = None;
     let mut update_best = |cand: FuzzyScoreBreakdown| {
         if cand.total_score <= 0.0 {
@@ -362,9 +532,8 @@ pub fn score_descriptor_entry(
         }
     };
 
-    for &q_var in &queries_to_check {
-        // 1. Check capability ID directly
-        if q_var.eq_ignore_ascii_case(&entry.capability_id) {
+    for q_prep in prepared_queries {
+        if q_prep.lc.eq_ignore_ascii_case(&entry.capability_id) {
             update_best(FuzzyScoreBreakdown {
                 tier: MatchTier::Exact,
                 lexical_score: 1.0,
@@ -377,26 +546,15 @@ pub fn score_descriptor_entry(
             });
         }
 
-        // 2. Check aliases & colloquial triggers
-        for alias in &entry.aliases {
-            update_best(score_query_against_term(
-                q_var,
-                alias,
-                false,
-                frecency_boost,
-            ));
-        }
-        for trig in &entry.colloquial_triggers {
-            update_best(score_query_against_term(q_var, trig, true, frecency_boost));
+        for term in &entry.precomputed_terms {
+            if let Some(cand) =
+                score_prepared_query_against_precomputed_term(q_prep, term, frecency_boost)
+            {
+                update_best(cand);
+            }
         }
 
-        // 3. Check summary bigram overlap for broader semantic recall
-        let summary_head = entry
-            .summary
-            .split(['（', '('])
-            .next()
-            .unwrap_or(&entry.summary);
-        let bg = char_bigram_similarity(q_var, summary_head);
+        let bg = bigram_slice_similarity(&q_prep.bigrams, &entry.summary_head_bigrams);
         if bg >= 0.35 {
             update_best(FuzzyScoreBreakdown {
                 tier: MatchTier::FuzzyEditBigram,
@@ -406,12 +564,34 @@ pub fn score_descriptor_entry(
                 bigram_score: bg,
                 frecency_boost,
                 total_score: bg * 70.0 + frecency_boost,
-                matched_term: summary_head.to_string(),
+                matched_term: entry.summary_head.clone(),
             });
         }
     }
 
     best
+}
+
+/// Score a single `DescriptorLexiconEntry` against a user query.
+pub fn score_descriptor_entry(
+    raw_query: &str,
+    entry: &DescriptorLexiconEntry,
+    frecency_boost: f64,
+) -> Option<FuzzyScoreBreakdown> {
+    let trimmed = raw_query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let analysis = analyze_colloquial_input(trimmed);
+    let prepared = if analysis.normalized != trimmed && !analysis.normalized.is_empty() {
+        vec![
+            PreparedQuery::new(trimmed),
+            PreparedQuery::new(analysis.normalized.as_str()),
+        ]
+    } else {
+        vec![PreparedQuery::new(trimmed)]
+    };
+    score_descriptor_entry_with_prepared_queries(&prepared, entry, frecency_boost)
 }
 
 /// Rank all registered capabilities against `query`, combining compiled `l0_patterns`,
@@ -426,6 +606,16 @@ pub fn rank_capabilities(
     if trimmed.is_empty() {
         return Vec::new();
     }
+
+    let analysis = analyze_colloquial_input(trimmed);
+    let prepared_queries = if analysis.normalized != trimmed && !analysis.normalized.is_empty() {
+        vec![
+            PreparedQuery::new(trimmed),
+            PreparedQuery::new(analysis.normalized.as_str()),
+        ]
+    } else {
+        vec![PreparedQuery::new(trimmed)]
+    };
 
     let pattern_hits = compiler.match_patterns(trimmed);
     let mut pattern_map: HashMap<String, (f64, HashMap<String, String>, String)> = HashMap::new();
@@ -448,7 +638,8 @@ pub fn rank_capabilities(
             .unwrap_or(0.0);
 
         let mut captured_slots = HashMap::new();
-        let mut breakdown_opt = score_descriptor_entry(trimmed, entry, frecency_boost);
+        let mut breakdown_opt =
+            score_descriptor_entry_with_prepared_queries(&prepared_queries, entry, frecency_boost);
 
         if let Some((pat_conf, slots, pat_str)) = pattern_map.get(&entry.capability_id) {
             captured_slots = slots.clone();

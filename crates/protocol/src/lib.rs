@@ -986,6 +986,87 @@ pub struct CoreEvent {
     pub payload: serde_json::Value,
 }
 
+/// Unified per-turn streaming event contract (`H10`).
+///
+/// Every emitted `AgentEvent` carries a strictly monotonic per-turn `seq` (`1, 2, ...`),
+/// is scrubbed via `SensitiveDataGuard` before buffering/broadcast, and supports reconnect
+/// replay via `since_seq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub seq: u64,
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub timestamp_ms: i64,
+    #[serde(flatten)]
+    pub kind: AgentEventKind,
+}
+
+/// Typed event payload variants for `AgentEvent` (`H10`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AgentEventKind {
+    Started,
+    GoalResolved,
+    MessageDelta {
+        delta: String,
+    },
+    ToolStarted {
+        step_id: String,
+        capability_id: String,
+    },
+    ToolCompleted {
+        step_id: String,
+        capability_id: String,
+        status: String,
+        duration_ms: u64,
+    },
+    AwaitingApproval {
+        approval_id: String,
+        capability_id: String,
+    },
+    Progress {
+        stage: String,
+        detail: String,
+    },
+    Completed {
+        task_status: String,
+    },
+    Failed {
+        error: String,
+    },
+    Cancelled,
+}
+
+impl AgentEventKind {
+    /// Returns the snake_case event type label (`"started"`, `"message_delta"`, etc.).
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::GoalResolved => "goal_resolved",
+            Self::MessageDelta { .. } => "message_delta",
+            Self::ToolStarted { .. } => "tool_started",
+            Self::ToolCompleted { .. } => "tool_completed",
+            Self::AwaitingApproval { .. } => "awaiting_approval",
+            Self::Progress { .. } => "progress",
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// True when the current turn request stream has reached a terminal or paused-approval boundary.
+    pub fn ends_turn_stream(&self) -> bool {
+        matches!(
+            self,
+            Self::AwaitingApproval { .. }
+                | Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled
+        )
+    }
+}
+
 /// Persistent explicit memory record (§11.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -1160,5 +1241,54 @@ mod tests {
         assert_eq!(partial.max_model_rounds, 6);
         assert_eq!(partial.max_tool_calls, 3);
         assert_eq!(partial.effective_wall_time_ms(), 1_500);
+    }
+
+    #[test]
+    fn agent_event_h10_roundtrip_and_stream_boundary_semantics() {
+        let ev = AgentEvent {
+            seq: 3,
+            turn_id: "turn_h10_1".into(),
+            task_id: Some("task_h10_1".into()),
+            timestamp_ms: 1_763_200_000_000,
+            kind: AgentEventKind::ToolCompleted {
+                step_id: "step_1".into(),
+                capability_id: "sound.volume.set".into(),
+                status: "verified".into(),
+                duration_ms: 12,
+            },
+        };
+        let raw = serde_json::to_string(&ev).unwrap();
+        assert!(raw.contains(r#""event":"tool_completed""#));
+        assert!(raw.contains(r#""capability_id":"sound.volume.set""#));
+        let decoded: AgentEvent = serde_json::from_str(&raw).unwrap();
+        assert_eq!(decoded, ev);
+
+        let unit_ev = AgentEvent {
+            seq: 4,
+            turn_id: "turn_h10_1".into(),
+            task_id: None,
+            timestamp_ms: 1_763_200_000_010,
+            kind: AgentEventKind::Cancelled,
+        };
+        let unit_raw = serde_json::to_string(&unit_ev).unwrap();
+        assert!(unit_raw.contains(r#""event":"cancelled""#));
+        let unit_decoded: AgentEvent = serde_json::from_str(&unit_raw).unwrap();
+        assert_eq!(unit_decoded, unit_ev);
+
+        assert!(!decoded.kind.ends_turn_stream());
+        assert!(
+            AgentEventKind::Completed {
+                task_status: "completed".into()
+            }
+            .ends_turn_stream()
+        );
+        assert!(
+            AgentEventKind::AwaitingApproval {
+                approval_id: "apr_1".into(),
+                capability_id: "file.trash".into()
+            }
+            .ends_turn_stream()
+        );
+        assert!(AgentEventKind::Cancelled.ends_turn_stream());
     }
 }

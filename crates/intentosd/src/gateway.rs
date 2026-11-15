@@ -199,8 +199,27 @@ impl ModelGateway {
     pub async fn proxy_chat_completion(
         &self,
         run_token: &str,
-        mut body: Value,
+        body: Value,
     ) -> Result<Value, GatewayError> {
+        let (val, _) = self
+            .proxy_chat_completion_streaming(run_token, body, false, None, |_| {})
+            .await?;
+        Ok(val)
+    }
+
+    /// Execute an OpenAI-compatible `/chat/completions` call through the Gateway checks with
+    /// optional SSE (`text/event-stream`) incremental parsing and honest `application/json` fallback (`H10`).
+    pub async fn proxy_chat_completion_streaming<F>(
+        &self,
+        run_token: &str,
+        mut body: Value,
+        prefer_sse: bool,
+        turn_handle: Option<&crate::backend_bridge::turn_checkpoint::ActiveTurnHandle>,
+        mut on_delta: F,
+    ) -> Result<(Value, bool), GatewayError>
+    where
+        F: FnMut(&str),
+    {
         self.reload_from_disk_if_available();
         let lease = {
             let map = self.leases.lock().unwrap();
@@ -247,11 +266,14 @@ impl ModelGateway {
             ));
         }
 
-        // 3. Inject profile model if missing, force non-streaming JSON for clean metering over socket bridge
-        if body.get("model").is_none()
-            && let Some(obj) = body.as_object_mut()
-        {
-            obj.insert("model".into(), json!(profile.model));
+        // 3. Inject profile model if missing, and request SSE when `prefer_sse` is enabled
+        if let Some(obj) = body.as_object_mut() {
+            if !obj.contains_key("model") {
+                obj.insert("model".into(), json!(profile.model));
+            }
+            if prefer_sse && !obj.contains_key("stream") {
+                obj.insert("stream".into(), json!(true));
+            }
         }
 
         let mock_url = self.mock_upstream_url.lock().unwrap().clone();
@@ -292,7 +314,13 @@ impl ModelGateway {
             &self.http_client
         };
         let mut req = client.post(&target_url).json(&body);
-        if let Some(key) = api_key {
+        if prefer_sse {
+            req = req.header(
+                reqwest::header::ACCEPT,
+                "text/event-stream, application/json",
+            );
+        }
+        if let Some(ref key) = api_key {
             req = req.bearer_auth(key);
         }
 
@@ -301,17 +329,22 @@ impl ModelGateway {
             .await
             .map_err(|e| GatewayError::Upstream(e.to_string()))?;
         let status = resp.status();
-        let resp_json: Value = resp
-            .json()
-            .await
-            .map_err(|e| GatewayError::Upstream(format!("HTTP {} parse error: {}", status, e)))?;
-
         if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Upstream(format!(
                 "HTTP {}: {}",
-                status, resp_json
+                status, err_text
             )));
         }
+
+        let (resp_json, streamed_sse) =
+            crate::backend_bridge::providers_http::decode_openai_http_or_sse_response(
+                resp,
+                turn_handle,
+                &mut on_delta,
+            )
+            .await
+            .map_err(|e| GatewayError::Upstream(format!("HTTP {} parse error: {}", status, e)))?;
 
         // 4. Meter token usage from response (§5.3)
         if let Some(usage) = resp_json.get("usage") {
@@ -334,11 +367,11 @@ impl ModelGateway {
             "egress",
             "allow",
             "ok",
-            &json!({ "provider": provider.id, "model": body.get("model") }),
+            &json!({ "provider": provider.id, "model": body.get("model"), "streamed": streamed_sse }),
             None,
         );
 
-        Ok(resp_json)
+        Ok((resp_json, streamed_sse))
     }
 
     /// Spawn Unix domain socket HTTP listener (`gateway.sock`) for zero-network Workers (§5.3, Spike S2).

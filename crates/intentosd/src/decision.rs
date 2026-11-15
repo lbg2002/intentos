@@ -11,7 +11,9 @@
 
 use crate::db::{StateDb, StepExecState};
 use crate::gateway::ModelGateway;
-pub use crate::intent_engine::cognitive_parser::resolve_progressive_intent;
+pub use crate::intent_engine::cognitive_parser::{
+    resolve_progressive_intent, resolve_progressive_intent_with_privacy,
+};
 pub use crate::intent_engine::goal_schema::ConfidenceProvenance;
 use crate::intent_engine::{
     CognitiveIntentKind, StructuredIntent, parse_structured_intent,
@@ -19,7 +21,7 @@ use crate::intent_engine::{
 };
 use intentos_protocol::{
     CandidateItem, CandidateKind, CapabilityDescriptor, ChangeSetStatus, DecisionAnswer,
-    DecisionQuestion, DecisionRequest, RouteLayer, Taint, TaskStatus,
+    DecisionQuestion, DecisionRequest, PrivacySessionPolicy, RouteLayer, Taint, TaskStatus,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
@@ -469,14 +471,37 @@ impl DecisionAdapter {
         descriptors: &[&CapabilityDescriptor],
         context_hint: Option<&str>,
     ) -> (L1DecisionOutcome, StructuredIntent) {
+        self.classify_colloquial_intent_progressive_with_privacy(
+            text,
+            descriptors,
+            context_hint,
+            PrivacySessionPolicy::Standard,
+        )
+        .await
+    }
+
+    /// Privacy-aware variant of [`Self::classify_colloquial_intent_progressive`] (`H05` + `H08`).
+    pub async fn classify_colloquial_intent_progressive_with_privacy(
+        &self,
+        text: &str,
+        descriptors: &[&CapabilityDescriptor],
+        context_hint: Option<&str>,
+        privacy: PrivacySessionPolicy,
+    ) -> (L1DecisionOutcome, StructuredIntent) {
         let trimmed = text.trim();
         let snap = crate::capability_snapshot::capability_snapshot_from_refs(descriptors);
-        let prog_intent = resolve_progressive_intent(
+        let cal_db = if privacy.allows_memory_read() {
+            Some(self.state_db.as_ref())
+        } else {
+            None
+        };
+        let prog_intent = resolve_progressive_intent_with_privacy(
             &self.gateway,
-            Some(&self.state_db),
+            cal_db,
             trimmed,
             context_hint,
             snap.descriptors_slice(),
+            privacy,
         )
         .await;
 

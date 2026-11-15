@@ -240,6 +240,8 @@ async function handleRun(req: RunRequest): Promise<void> {
       run_id: req.run_id,
       error: err?.message ?? String(err),
     });
+  } finally {
+    cancelledRuns.delete(req.run_id);
   }
 }
 

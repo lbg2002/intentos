@@ -3,7 +3,9 @@
 //! Session Buffer (in-memory only, §6.4), Context Builder (Taint + DataClass, §11.6),
 //! and Pluggable Agent Runtime (`PiWorkerRuntime` in sandbox + `NativeRuntime` fallback + Command Handoff, §6.3, §8.8).
 
-use crate::backend_bridge::turn_checkpoint::{StepInvocationContext, TurnEffectLedger};
+use crate::backend_bridge::turn_checkpoint::{
+    StepInvocationContext, TurnEffectLedger, emit_turn_event,
+};
 use crate::broker::{BrokerDispatchOutcome, CapabilityBroker};
 use crate::config::XdgPaths;
 use crate::db::StateDb;
@@ -12,15 +14,18 @@ use crate::security_guard::{ExecutionContext, PrivacySessionPolicy};
 use chrono::{DateTime, Duration, Utc};
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
-    CapabilityCall, CapabilityDescriptor, ChatMessage, ContextBlock, DataClass, ExecutionStatus,
-    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, Taint, TaskBudget, TaskStatus,
-    TaskStep, ToolSpec,
+    AgentEventKind, CapabilityCall, CapabilityDescriptor, ChatMessage, ContextBlock, DataClass,
+    ExecutionStatus, InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, Taint,
+    TaskBudget, TaskStatus, TaskStep, ToolSpec,
 };
-use intentos_sandbox::{SandboxSpec, build_sandboxed_command};
+use intentos_sandbox::{SandboxDriver, SandboxSpec, build_sandboxed_command};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration as StdDuration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone)]
@@ -215,6 +220,220 @@ pub struct AgentRunResult {
     pub side_effect_replay_prevented: bool,
 }
 
+pub const WARM_PI_WORKER_IDLE_TTL: StdDuration = StdDuration::from_secs(120);
+pub const MAX_IDLE_WARM_PI_WORKERS: usize = 2;
+
+static WARM_WORKER_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WarmWorkerPoolStats {
+    pub cold_spawns: u64,
+    pub warm_reuses: u64,
+    pub active_leases: usize,
+    pub idle_workers: usize,
+    pub idle_evictions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WarmWorkerKey {
+    script_path: PathBuf,
+    gateway_sock: PathBuf,
+}
+
+struct PooledPiWorker {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    reader: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    scratch_dir: PathBuf,
+    _driver: SandboxDriver,
+}
+
+impl PooledPiWorker {
+    async fn destroy(mut self) {
+        let _ = self.child.kill().await;
+        let _ = std::fs::remove_dir_all(&self.scratch_dir);
+    }
+}
+
+impl Drop for PooledPiWorker {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        let _ = std::fs::remove_dir_all(&self.scratch_dir);
+    }
+}
+
+struct IdleWarmPiWorker {
+    key: WarmWorkerKey,
+    worker: PooledPiWorker,
+    idle_since: Instant,
+}
+
+struct WarmPiWorkerPool {
+    idle: Mutex<Vec<IdleWarmPiWorker>>,
+    cold_spawns: AtomicU64,
+    warm_reuses: AtomicU64,
+    idle_evictions: AtomicU64,
+    active_leases: AtomicUsize,
+}
+
+impl WarmPiWorkerPool {
+    fn new() -> Self {
+        Self {
+            idle: Mutex::new(Vec::new()),
+            cold_spawns: AtomicU64::new(0),
+            warm_reuses: AtomicU64::new(0),
+            idle_evictions: AtomicU64::new(0),
+            active_leases: AtomicUsize::new(0),
+        }
+    }
+
+    fn drain_expired_locked(
+        &self,
+        entries: &mut Vec<IdleWarmPiWorker>,
+        max_idle: StdDuration,
+    ) -> Vec<PooledPiWorker> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        let mut idx = 0;
+        while idx < entries.len() {
+            let dead = !matches!(entries[idx].worker.child.try_wait(), Ok(None));
+            let timed_out = now.saturating_duration_since(entries[idx].idle_since) >= max_idle;
+            if dead || timed_out {
+                let removed = entries.swap_remove(idx);
+                if timed_out {
+                    self.idle_evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                expired.push(removed.worker);
+            } else {
+                idx += 1;
+            }
+        }
+        expired
+    }
+
+    async fn evict_expired(&self, max_idle: StdDuration) -> usize {
+        let expired = {
+            let mut guard = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            self.drain_expired_locked(&mut guard, max_idle)
+        };
+        let count = expired.len();
+        for w in expired {
+            w.destroy().await;
+        }
+        count
+    }
+
+    async fn acquire_idle(&self, key: &WarmWorkerKey) -> Option<PooledPiWorker> {
+        let (candidate, expired) = {
+            let mut guard = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            let expired = self.drain_expired_locked(&mut guard, WARM_PI_WORKER_IDLE_TTL);
+            let pos = guard.iter().rposition(|entry| &entry.key == key);
+            let picked = pos.map(|i| guard.remove(i).worker);
+            (picked, expired)
+        };
+        for w in expired {
+            w.destroy().await;
+        }
+        if candidate.is_some() {
+            self.warm_reuses.fetch_add(1, Ordering::Relaxed);
+        }
+        candidate
+    }
+
+    async fn release_idle(self: &Arc<Self>, key: WarmWorkerKey, mut worker: PooledPiWorker) {
+        if !matches!(worker.child.try_wait(), Ok(None))
+            || clear_scratch_dir_contents(&worker.scratch_dir).is_err()
+        {
+            worker.destroy().await;
+            return;
+        }
+        let evicted = {
+            let mut guard = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut evicted = self.drain_expired_locked(&mut guard, WARM_PI_WORKER_IDLE_TTL);
+            while guard.len() >= MAX_IDLE_WARM_PI_WORKERS {
+                let oldest = guard.remove(0);
+                self.idle_evictions.fetch_add(1, Ordering::Relaxed);
+                evicted.push(oldest.worker);
+            }
+            guard.push(IdleWarmPiWorker {
+                key,
+                worker,
+                idle_since: Instant::now(),
+            });
+            evicted
+        };
+        for w in evicted {
+            w.destroy().await;
+        }
+        // Schedule bounded idle eviction at `WARM_PI_WORKER_IDLE_TTL` (`120s`) so unused workers never linger indefinitely.
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let weak_pool = Arc::downgrade(self);
+            rt.spawn(async move {
+                tokio::time::sleep(WARM_PI_WORKER_IDLE_TTL + StdDuration::from_millis(50)).await;
+                if let Some(pool) = weak_pool.upgrade() {
+                    let _ = pool.evict_expired(WARM_PI_WORKER_IDLE_TTL).await;
+                }
+            });
+        }
+    }
+
+    fn record_cold_spawn(&self) {
+        self.cold_spawns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn stats(&self) -> WarmWorkerPoolStats {
+        let expired = {
+            let mut guard = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            let exp = self.drain_expired_locked(&mut guard, WARM_PI_WORKER_IDLE_TTL);
+            let idle_len = guard.len();
+            drop(guard);
+            (exp, idle_len)
+        };
+        drop(expired.0);
+        WarmWorkerPoolStats {
+            cold_spawns: self.cold_spawns.load(Ordering::Relaxed),
+            warm_reuses: self.warm_reuses.load(Ordering::Relaxed),
+            active_leases: self.active_leases.load(Ordering::Relaxed),
+            idle_workers: expired.1,
+            idle_evictions: self.idle_evictions.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct ActiveWorkerLeaseGuard {
+    pool: Arc<WarmPiWorkerPool>,
+}
+
+impl ActiveWorkerLeaseGuard {
+    fn enter(pool: Arc<WarmPiWorkerPool>) -> Self {
+        pool.active_leases.fetch_add(1, Ordering::Relaxed);
+        Self { pool }
+    }
+}
+
+impl Drop for ActiveWorkerLeaseGuard {
+    fn drop(&mut self) {
+        self.pool.active_leases.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn clear_scratch_dir_contents(dir: &Path) -> std::io::Result<()> {
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Orchestrates L2 Agent execution via either sandboxed Node `pi-adapter` Worker or built-in Rust `NativeRuntime`.
 pub struct AgentCoordinator {
     paths: XdgPaths,
@@ -223,6 +442,7 @@ pub struct AgentCoordinator {
     broker: Arc<CapabilityBroker>,
     state_db: Arc<StateDb>,
     core_ref: OnceLock<Weak<crate::core::IntentOsCore>>,
+    warm_pi_pool: Arc<WarmPiWorkerPool>,
 }
 
 impl AgentCoordinator {
@@ -240,7 +460,16 @@ impl AgentCoordinator {
             broker,
             state_db,
             core_ref: OnceLock::new(),
+            warm_pi_pool: Arc::new(WarmPiWorkerPool::new()),
         }
+    }
+
+    pub fn warm_worker_stats(&self) -> WarmWorkerPoolStats {
+        self.warm_pi_pool.stats()
+    }
+
+    pub async fn evict_idle_warm_workers(&self, max_idle: StdDuration) -> usize {
+        self.warm_pi_pool.evict_expired(max_idle).await
     }
 
     pub fn bind_core(&self, core: Weak<crate::core::IntentOsCore>) {
@@ -545,31 +774,21 @@ impl AgentCoordinator {
         }
     }
 
-    /// Spawn `agent/pi-adapter/dist/worker.js` inside our no-TCP Landlock/Bubblewrap sandbox!
-    async fn run_via_pi_worker(
-        &self,
-        req: RunRequest,
-        taints: &[Taint],
-        privacy: PrivacySessionPolicy,
-        effect_ledger: &mut TurnEffectLedger,
-    ) -> anyhow::Result<AgentRunResult> {
-        let script = self.paths.pi_adapter_script();
-        let worker_dir = script
+    fn spawn_pi_worker_process(&self, key: &WarmWorkerKey) -> anyhow::Result<PooledPiWorker> {
+        let worker_dir = key
+            .script_path
             .parent()
             .and_then(|p| p.parent())
-            .unwrap_or_else(|| std::path::Path::new("."))
+            .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let scratch_dir = self
-            .paths
-            .runtime_dir
-            .join(format!("worker_{}", req.run_id));
+        let seq = WARM_WORKER_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch_dir = self.paths.runtime_dir.join(format!("worker_pool_{}", seq));
         std::fs::create_dir_all(&scratch_dir)?;
 
-        let gw_sock = self.paths.gateway_socket_path();
         let mut env_vars = BTreeMap::new();
         env_vars.insert(
             "INTENTOS_GATEWAY_SOCK".into(),
-            gw_sock.to_string_lossy().to_string(),
+            key.gateway_sock.to_string_lossy().to_string(),
         );
         env_vars.insert("NODE_NO_WARNINGS".into(), "1".into());
 
@@ -579,7 +798,7 @@ impl AgentCoordinator {
 
         let spec = SandboxSpec {
             program: node_bin,
-            args: vec![script.to_string_lossy().to_string()],
+            args: vec![key.script_path.to_string_lossy().to_string()],
             readonly_paths: vec![worker_dir, PathBuf::from("/usr/local")],
             readwrite_paths: vec![scratch_dir.clone(), self.paths.gateway_socket_dir()],
             env_vars,
@@ -587,38 +806,133 @@ impl AgentCoordinator {
             allow_tcp_network: false, // Strictly NO outbound TCP network! Only Unix gateway.sock!
         };
 
-        let (mut cmd, _driver) = build_sandboxed_command(&spec)?;
-        let mut child = cmd.spawn()?;
-        let mut stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout).lines();
+        let (mut cmd, driver) = build_sandboxed_command(&spec)?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&scratch_dir);
+                return Err(err.into());
+            }
+        };
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing pi-adapter worker stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing pi-adapter worker stdout"))?;
+        self.warm_pi_pool.record_cold_spawn();
+        Ok(PooledPiWorker {
+            child,
+            stdin,
+            reader: BufReader::new(stdout).lines(),
+            scratch_dir,
+            _driver: driver,
+        })
+    }
 
-        // Send JSON-RPC `run` line to sandboxed Worker
+    /// Run `agent/pi-adapter/dist/worker.js` inside our no-TCP Landlock/Bubblewrap sandbox,
+    /// using an on-demand reusable warm worker with strict per-task lease isolation and `120s` idle TTL (`H10`).
+    async fn run_via_pi_worker(
+        &self,
+        req: RunRequest,
+        taints: &[Taint],
+        privacy: PrivacySessionPolicy,
+        effect_ledger: &mut TurnEffectLedger,
+    ) -> anyhow::Result<AgentRunResult> {
+        let key = WarmWorkerKey {
+            script_path: self.paths.pi_adapter_script(),
+            gateway_sock: self.paths.gateway_socket_path(),
+        };
+        let allow_pooling = privacy != PrivacySessionPolicy::StrictIsolated;
+        let _lease_guard = ActiveWorkerLeaseGuard::enter(self.warm_pi_pool.clone());
+
         let init_line = serde_json::to_string(&json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "run",
             "params": req,
         }))?;
-        stdin.write_all(init_line.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
+
+        let (mut worker, mut was_warm_reused) = if allow_pooling {
+            match self.warm_pi_pool.acquire_idle(&key).await {
+                Some(w) => (w, true),
+                None => (self.spawn_pi_worker_process(&key)?, false),
+            }
+        } else {
+            (self.spawn_pi_worker_process(&key)?, false)
+        };
+
+        // Send JSON-RPC `run` line to sandboxed Worker; if a warm worker died right before write, retry cold once.
+        let send_init = async |w: &mut PooledPiWorker| -> std::io::Result<()> {
+            w.stdin.write_all(init_line.as_bytes()).await?;
+            w.stdin.write_all(b"\n").await?;
+            w.stdin.flush().await
+        };
+        if let Err(err) = send_init(&mut worker).await {
+            worker.destroy().await;
+            if was_warm_reused {
+                worker = self.spawn_pi_worker_process(&key)?;
+                was_warm_reused = false;
+                if let Err(err2) = send_init(&mut worker).await {
+                    worker.destroy().await;
+                    return Err(err2.into());
+                }
+            } else {
+                return Err(err.into());
+            }
+        }
 
         let mut steps = Vec::new();
         let mut changeset_ids = Vec::new();
         let mut final_message = String::new();
         let mut pending_approval = None;
         let mut saw_run_finished = false;
+        let mut saw_any_event = false;
 
-        while let Some(line) = reader.next_line().await? {
+        loop {
+            let next_line = match worker.reader.next_line().await {
+                Ok(l) => l,
+                Err(err) => {
+                    worker.destroy().await;
+                    return Err(err.into());
+                }
+            };
+            let Some(line) = next_line else {
+                if was_warm_reused
+                    && !saw_any_event
+                    && !effect_ledger.has_uncertain_or_committed_side_effects()
+                {
+                    worker.destroy().await;
+                    worker = self.spawn_pi_worker_process(&key)?;
+                    was_warm_reused = false;
+                    if let Err(err2) = send_init(&mut worker).await {
+                        worker.destroy().await;
+                        return Err(err2.into());
+                    }
+                    continue;
+                }
+                break;
+            };
             if line.trim().is_empty() {
                 continue;
             }
             let Ok(evt) = serde_json::from_str::<RuntimeEvent>(&line) else {
                 continue;
             };
+            saw_any_event = true;
             match evt {
                 RuntimeEvent::MessageDelta { delta, .. } => {
+                    if !delta.is_empty() {
+                        let _ = emit_turn_event(
+                            &effect_ledger.turn_id,
+                            Some(&req.task_id),
+                            AgentEventKind::MessageDelta {
+                                delta: delta.clone(),
+                            },
+                        );
+                    }
                     final_message.push_str(&delta);
                 }
                 RuntimeEvent::ToolRequested {
@@ -672,8 +986,7 @@ impl AgentCoordinator {
                     let outcome = match dispatch_res {
                         Ok(o) => o,
                         Err(err) => {
-                            let _ = child.kill().await;
-                            let _ = std::fs::remove_dir_all(&scratch_dir);
+                            worker.destroy().await;
                             return Err(err);
                         }
                     };
@@ -698,8 +1011,7 @@ impl AgentCoordinator {
                             effect_ledger.task_steps.push(step);
 
                             if effect_ledger.has_uncertain_side_effects() {
-                                let _ = child.kill().await;
-                                let _ = std::fs::remove_dir_all(&scratch_dir);
+                                worker.destroy().await;
                                 return Ok(AgentRunResult {
                                     final_message: format!(
                                         "步骤 `{}` 执行后状态未确认（{}），已安全中止后续步骤并进入恢复保护状态（recovery_required）。",
@@ -726,13 +1038,19 @@ impl AgentCoordinator {
                                     "output": { "message": res.message, "data": res.data }
                                 }
                             }))?;
-                            stdin.write_all(reply.as_bytes()).await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await?;
+                            if let Err(err) = async {
+                                worker.stdin.write_all(reply.as_bytes()).await?;
+                                worker.stdin.write_all(b"\n").await?;
+                                worker.stdin.flush().await
+                            }
+                            .await
+                            {
+                                worker.destroy().await;
+                                return Err(err.into());
+                            }
                         }
                         BrokerDispatchOutcome::RequiresApproval(pa) => {
                             pending_approval = Some(pa);
-                            let _ = child.kill().await;
                             break;
                         }
                         BrokerDispatchOutcome::Denied { reason } => {
@@ -762,9 +1080,16 @@ impl AgentCoordinator {
                                     "output": { "error": reason }
                                 }
                             }))?;
-                            stdin.write_all(reply.as_bytes()).await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await?;
+                            if let Err(err) = async {
+                                worker.stdin.write_all(reply.as_bytes()).await?;
+                                worker.stdin.write_all(b"\n").await?;
+                                worker.stdin.flush().await
+                            }
+                            .await
+                            {
+                                worker.destroy().await;
+                                return Err(err.into());
+                            }
                         }
                     }
                 }
@@ -773,13 +1098,19 @@ impl AgentCoordinator {
                 } => {
                     saw_run_finished = true;
                     if !msg.is_empty() {
+                        if final_message.is_empty() {
+                            let _ = emit_turn_event(
+                                &effect_ledger.turn_id,
+                                Some(&req.task_id),
+                                AgentEventKind::MessageDelta { delta: msg.clone() },
+                            );
+                        }
                         final_message = msg;
                     }
                     break;
                 }
                 RuntimeEvent::RunFailed { error, .. } => {
-                    let _ = child.kill().await;
-                    let _ = std::fs::remove_dir_all(&scratch_dir);
+                    worker.destroy().await;
                     anyhow::bail!("Agent Worker 运行失败: {}", error);
                 }
                 _ => {}
@@ -788,22 +1119,27 @@ impl AgentCoordinator {
 
         if pending_approval.is_none() && !saw_run_finished {
             let exit_status =
-                match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+                match tokio::time::timeout(StdDuration::from_secs(2), worker.child.wait()).await {
                     Ok(Ok(st)) => Some(st),
-                    _ => {
-                        let _ = child.kill().await;
-                        None
-                    }
+                    _ => None,
                 };
-            let _ = std::fs::remove_dir_all(&scratch_dir);
+            worker.destroy().await;
             anyhow::bail!(
                 "Agent Worker 未发送 RunFinished 即异常退出 (status={:?})",
                 exit_status
             );
         }
 
-        let _ = child.kill().await;
-        let _ = std::fs::remove_dir_all(&scratch_dir);
+        if allow_pooling
+            && saw_run_finished
+            && pending_approval.is_none()
+            && !effect_ledger.has_uncertain_side_effects()
+        {
+            self.warm_pi_pool.release_idle(key, worker).await;
+        } else {
+            worker.destroy().await;
+        }
+
         Ok(AgentRunResult {
             final_message,
             steps,
@@ -922,9 +1258,21 @@ impl AgentCoordinator {
                 "messages": messages,
                 "tools": openai_tools,
             });
-            let resp = self
+            let mut streamed_any_delta = false;
+            let (resp, _) = self
                 .gateway
-                .proxy_chat_completion(&req.run_token, payload)
+                .proxy_chat_completion_streaming(&req.run_token, payload, true, None, |delta| {
+                    if !delta.is_empty() {
+                        streamed_any_delta = true;
+                        let _ = emit_turn_event(
+                            &effect_ledger.turn_id,
+                            Some(&req.task_id),
+                            AgentEventKind::MessageDelta {
+                                delta: delta.to_string(),
+                            },
+                        );
+                    }
+                })
                 .await?;
             let choice = resp
                 .get("choices")
@@ -1083,6 +1431,15 @@ impl AgentCoordinator {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                if !streamed_any_delta && !content.is_empty() {
+                    let _ = emit_turn_event(
+                        &effect_ledger.turn_id,
+                        Some(&req.task_id),
+                        AgentEventKind::MessageDelta {
+                            delta: content.clone(),
+                        },
+                    );
+                }
                 let handoff = steps.iter().find_map(|st| {
                     st.data
                         .get("handoff_command")

@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any
@@ -591,6 +592,40 @@ def normalize_trace_dots(turn_res: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    task_status = str(turn_res.get("task_status") or turn_res.get("status") or "").lower()
+    completed_steps = turn_res.get("completed_steps") if isinstance(turn_res.get("completed_steps"), list) else []
+    unresolved_goals = turn_res.get("unresolved_goals") if isinstance(turn_res.get("unresolved_goals"), list) else []
+    status_lines: list[str] = []
+    if completed_steps:
+        status_lines.append("已完成步骤:\n" + "\n".join(f"- {s}" for s in completed_steps))
+    if unresolved_goals:
+        status_lines.append("未完成目标:\n" + "\n".join(f"- {g}" for g in unresolved_goals))
+
+    if (task_status == "recovery_required" or bool(turn_res.get("recovery_required"))) and not any(
+        "recovery_required" in str(d.get("title") or "") for d in dots
+    ):
+        dots.append(
+            {
+                "kind": "tool_err",
+                "color": "red",
+                "title": "需人工恢复核验 (recovery_required)",
+                "detail": "\n\n".join(status_lines) or "智能体执行期间检测到未确认副作用，已阻止自动重放。",
+                "changeset_id": None,
+                "duration_ms": None,
+            }
+        )
+    elif task_status == "partially_completed" and not any("部分完成" in str(d.get("title") or "") for d in dots):
+        dots.append(
+            {
+                "kind": "task_partial",
+                "color": "amber",
+                "title": "部分完成 · 已达预算保护上限",
+                "detail": "\n\n".join(status_lines) or "当前任务触发预算保护上限，仅完成部分步骤。",
+                "changeset_id": None,
+                "duration_ms": None,
+            }
+        )
+
     return dots
 
 
@@ -681,15 +716,30 @@ def format_context_compression_tag(cc: Any) -> str:
     return f"📉 上下文 {comp_tok} tok ({inc_turns} 轮)"
 
 
+def poll_turn_events_sync(turn_id: str, since_seq: int = 0) -> dict[str, Any]:
+    """Poll incremental `AgentEvent` stream items (`H10` `poll_turn_events`) for `turn_id`."""
+    res = call_module_rpc(
+        "backend_bridge",
+        "poll_turn_events",
+        {"turn_id": turn_id, "since_seq": max(0, int(since_seq))},
+        timeout=3.0,
+    )
+    if res.get("ok") and isinstance(res.get("result"), dict):
+        return res["result"]
+    return {"found": False, "events": [], "next_seq": since_seq}
+
+
 def execute_chat_turn_sync(
     text: str,
     session_id: str | None,
     clipboard_context: str | None,
     incognito: bool,
     reasoning_effort: str,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     """Call `backend_bridge.send_quick_chat_turn` with seamless fallback to `submit_intent`."""
     req_payload: dict[str, Any] = {
+        "turn_id": turn_id,
         "session_id": None if incognito else session_id,
         "text": text,
         "clipboard_context": clipboard_context or None,
@@ -711,9 +761,14 @@ def execute_chat_turn_sync(
                 )
                 return {
                     "ok": True,
+                    "turn_id": r.get("turn_id") or turn_id,
                     "session_id": r.get("session_id") or session_id,
                     "backend_used": r.get("backend_used") or r.get("backend") or "auto",
                     "model_used": r.get("model_used") or r.get("model") or "",
+                    "task_status": r.get("task_status") or r.get("status") or "completed",
+                    "completed_steps": r.get("completed_steps") if isinstance(r.get("completed_steps"), list) else [],
+                    "unresolved_goals": r.get("unresolved_goals") if isinstance(r.get("unresolved_goals"), list) else [],
+                    "recovery_required": bool(r.get("recovery_required")),
                     "reply_markdown": reply_md,
                     "trace_dots": normalize_trace_dots(r),
                     "pending_approval": pa_obj,
@@ -2401,9 +2456,13 @@ def run_gtk_app(clipboard_ask: bool = False, initial_prompt: str = "", smoke_ui:
             bub.append(dot)
 
             lbl = Gtk.Label(label="正在思考与调度系统能力… (Esc 中止)", xalign=0.0)
+            lbl.set_wrap(True)
+            lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            lbl.set_hexpand(True)
             lbl.add_css_class("intentos-trace-summary")
             bub.append(lbl)
             row.append(bub)
+            row._thinking_lbl = lbl  # type: ignore[attr-defined]
             self.chat_stream.append(row)
             GLib.idle_add(self._scroll_to_bottom)
             return row
@@ -3223,10 +3282,15 @@ def run_gtk_app(clipboard_ask: bool = False, initial_prompt: str = "", smoke_ui:
             self.active_turn_token += 1
             self._set_busy_state(False)
             sid = self.session_id
+            tid = getattr(self, "active_turn_id", None)
+            self.active_turn_id = None
 
             def _cancel_worker() -> None:
                 try:
-                    call_module_rpc("backend_bridge", "cancel_turn", {"session_id": sid}, timeout=4.0)
+                    payload: dict[str, Any] = {"session_id": sid}
+                    if tid:
+                        payload["turn_id"] = tid
+                    call_module_rpc("backend_bridge", "cancel_turn", payload, timeout=4.0)
                 except Exception:
                     try:
                         call_ui_rpc("stop_all", None, timeout=4.0)
@@ -3265,11 +3329,52 @@ def run_gtk_app(clipboard_ask: bool = False, initial_prompt: str = "", smoke_ui:
 
             self.active_turn_token += 1
             token = self.active_turn_token
+            client_turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+            self.active_turn_id = client_turn_id
             self._set_busy_state(True)
 
             sid = self.session_id
             incog = self.incognito
             effort = self.selected_effort
+            stop_poll = threading.Event()
+
+            def _poll_events_worker() -> None:
+                since_seq = 0
+                streamed_preview = ""
+                while not stop_poll.wait(0.15):
+                    if token != self.active_turn_token:
+                        break
+                    snap = poll_turn_events_sync(client_turn_id, since_seq)
+                    events = snap.get("events") if isinstance(snap.get("events"), list) else []
+                    new_text: str | None = None
+                    for ev in events:
+                        if not isinstance(ev, dict):
+                            continue
+                        seq = int(ev.get("seq") or 0)
+                        if seq > since_seq:
+                            since_seq = seq
+                        ev_name = str(ev.get("event") or "")
+                        if ev_name == "message_delta" and ev.get("delta"):
+                            streamed_preview += str(ev["delta"])
+                            new_text = (
+                                f"…{streamed_preview[-260:]}"
+                                if len(streamed_preview) > 260
+                                else streamed_preview
+                            )
+                        elif ev_name == "tool_started" and ev.get("capability_id") and not streamed_preview:
+                            new_text = f"⚡ 正在执行能力 {ev['capability_id']}… (Esc 中止)"
+                        elif ev_name == "progress" and ev.get("detail") and not streamed_preview:
+                            new_text = f"✦ {ev['detail']} (Esc 中止)"
+                    if new_text is not None:
+                        def _apply_lbl(txt_val: str = new_text) -> bool:
+                            lbl_w = getattr(placeholder_row, "_thinking_lbl", None)
+                            if lbl_w is not None and placeholder_row.get_parent() is not None and token == self.active_turn_token:
+                                lbl_w.set_text(txt_val)
+                                self._scroll_to_bottom()
+                            return False
+                        GLib.idle_add(_apply_lbl)
+
+            threading.Thread(target=_poll_events_worker, daemon=True).start()
 
             def _worker() -> None:
                 try:
@@ -3279,6 +3384,7 @@ def run_gtk_app(clipboard_ask: bool = False, initial_prompt: str = "", smoke_ui:
                         clipboard_context=clip_ctx or None,
                         incognito=incog,
                         reasoning_effort=effort,
+                        turn_id=client_turn_id,
                     )
                 except Exception as exc:
                     turn_res = {
@@ -3299,6 +3405,10 @@ def run_gtk_app(clipboard_ask: bool = False, initial_prompt: str = "", smoke_ui:
                         ],
                         "pending_approval": None,
                     }
+                finally:
+                    stop_poll.set()
+                    if getattr(self, "active_turn_id", None) == client_turn_id:
+                        self.active_turn_id = None
 
                 def _finish() -> bool:
                     if placeholder_row.get_parent() is not None:

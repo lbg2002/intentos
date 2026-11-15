@@ -12,7 +12,7 @@ pub use crate::backend_bridge::broker_bridge::{BackendExecutionMode, TraceDot};
 pub use crate::backend_bridge::providers_cli::ScopedZcodeRuntimeOverride;
 pub use crate::backend_bridge::turn_checkpoint::{
     ActiveTurnHandle, StepExecutionRecord, SuspendedDialectState, SuspendedTurnCheckpoint,
-    TurnBudgetTracker, TurnEffectLedger, cancel_turn,
+    TurnBudgetTracker, TurnEffectLedger, cancel_turn, poll_turn_events,
 };
 
 use crate::backend_bridge::broker_bridge::{
@@ -34,21 +34,22 @@ use crate::backend_bridge::providers_http::{
 };
 use crate::backend_bridge::turn_checkpoint::{
     TurnIdentity, TurnRegistrationOutcome, abort_turn_atomic, build_cancelled_turn_response,
-    build_denied_resume_response, complete_turn_atomic, finalize_non_checkpoint_approved_turn,
-    register_or_join_turn, resolve_turn_budget_from_payload,
+    build_denied_resume_response, complete_turn_atomic, emit_turn_event,
+    finalize_non_checkpoint_approved_turn, register_or_join_turn, resolve_turn_budget_from_payload,
     resume_persisted_checkpoint_across_restart, resume_suspended_checkpoint_and_finalize,
     take_suspended_checkpoint,
 };
 use crate::config_center::brain_manager::{store_provider_credential, upsert_provider};
 use crate::config_center::store::{load_domains_config, save_domains_config};
 use crate::core::IntentOsCore;
-use crate::intent_engine::{CognitiveIntentKind, resolve_progressive_intent};
+use crate::decision::apply_empirical_calibration_to_intent;
+use crate::intent_engine::{CognitiveIntentKind, parse_structured_intent};
 use crate::runtime::SessionState;
 use crate::security_guard::{ExecutionContext, PrivacySessionPolicy, SensitiveDataGuard};
 use chrono::Utc;
 use intentos_protocol::{
-    ContextBlock, DataClass, ExecutionStatus, IntentRequest, PROTOCOL_VERSION, PendingApproval,
-    Taint, TaskStep,
+    AgentEventKind, ContextBlock, DataClass, ExecutionStatus, IntentRequest, PROTOCOL_VERSION,
+    PendingApproval, Taint, TaskStep,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -594,6 +595,7 @@ pub async fn send_quick_chat_turn_with_options(
         TurnRegistrationOutcome::Started(h) => h,
     };
     let mut turn_guard = ActiveTurnDropGuard::new(turn_handle.clone());
+    turn_handle.emit_event(AgentEventKind::Started);
 
     let catalog = discover_backends_catalog_fast(core, opts).await;
     let mut active = catalog.active.clone();
@@ -731,19 +733,10 @@ pub async fn send_quick_chat_turn_with_options(
     }
 
     let cap_snapshot = crate::capability_snapshot::capability_snapshot_for_core(core);
-    let cal_db = if privacy.allows_memory_read() {
-        Some(core.state_db.as_ref())
-    } else {
-        None
-    };
-    let structured_intent = resolve_progressive_intent(
-        &core.gateway,
-        cal_db,
-        &text,
-        clipboard_context.as_deref(),
-        cap_snapshot.descriptors_slice(),
-    )
-    .await;
+    let mut structured_intent = parse_structured_intent(&text, cap_snapshot.descriptors_slice());
+    if privacy.allows_memory_read() {
+        apply_empirical_calibration_to_intent(&core.state_db, &mut structured_intent);
+    }
     if matches!(
         structured_intent.intent_type,
         CognitiveIntentKind::GoalWorkspace
@@ -775,6 +768,11 @@ pub async fn send_quick_chat_turn_with_options(
     let task_id = ExecutionContext::new_task_id(privacy);
     core.register_task_privacy_policy(&task_id, privacy);
     *turn_handle.task_id.lock().unwrap() = Some(task_id.clone());
+    turn_handle.emit_event(AgentEventKind::GoalResolved);
+    turn_handle.emit_event(AgentEventKind::Progress {
+        stage: "routing".to_string(),
+        detail: format!("{}:{}", active.backend, active.model),
+    });
 
     let turn_budget = resolve_turn_budget_from_payload(core, payload);
     let (_, ctx_taints, ctx_data_class) =
@@ -1235,6 +1233,35 @@ async fn run_submit_intent_fallback(
     let (thinking, mut reply_markdown) = extract_thinking_and_clean_reply(&raw_msg, None);
     if reply_markdown.is_empty() {
         reply_markdown = raw_msg;
+    }
+    for st in &task.steps {
+        let _ = emit_turn_event(
+            &effect_ledger.turn_id,
+            Some(&task.id),
+            AgentEventKind::ToolStarted {
+                step_id: st.step_id.clone(),
+                capability_id: st.capability_id.clone(),
+            },
+        );
+        let _ = emit_turn_event(
+            &effect_ledger.turn_id,
+            Some(&task.id),
+            AgentEventKind::ToolCompleted {
+                step_id: st.step_id.clone(),
+                capability_id: st.capability_id.clone(),
+                status: format!("{:?}", st.status).to_ascii_lowercase(),
+                duration_ms: st.duration_ms,
+            },
+        );
+    }
+    if !reply_markdown.is_empty() {
+        let _ = emit_turn_event(
+            &effect_ledger.turn_id,
+            Some(&task.id),
+            AgentEventKind::MessageDelta {
+                delta: reply_markdown.clone(),
+            },
+        );
     }
 
     Ok(convert_core_task_to_turn_outcome(

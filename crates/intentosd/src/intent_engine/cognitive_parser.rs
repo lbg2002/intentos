@@ -29,7 +29,9 @@ use crate::intent_engine::goal_schema::{
 };
 use crate::intent_engine::pattern_compiler::PatternCompiler;
 use crate::intent_engine::slot_extractor::parse_numeric_slot;
-use intentos_protocol::{CapabilityDescriptor, DataClass, Effect, RouteLayer};
+use intentos_protocol::{
+    CapabilityDescriptor, DataClass, Effect, PrivacySessionPolicy, RouteLayer,
+};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -167,6 +169,27 @@ pub async fn resolve_progressive_intent(
     context_hint: Option<&str>,
     capabilities: &[CapabilityDescriptor],
 ) -> StructuredIntent {
+    resolve_progressive_intent_with_privacy(
+        gateway,
+        state_db,
+        raw_text,
+        context_hint,
+        capabilities,
+        PrivacySessionPolicy::Standard,
+    )
+    .await
+}
+
+/// Privacy-aware variant of [`resolve_progressive_intent`] ensuring Fast-LLM leases honor
+/// `EphemeralReadOnly` / `StrictIsolated` zero-persistence invariants (`H05` + `H08`).
+pub async fn resolve_progressive_intent_with_privacy(
+    gateway: &ModelGateway,
+    state_db: Option<&StateDb>,
+    raw_text: &str,
+    context_hint: Option<&str>,
+    capabilities: &[CapabilityDescriptor],
+    privacy: PrivacySessionPolicy,
+) -> StructuredIntent {
     let mut resolved = parse_structured_intent(raw_text, capabilities);
     let trimmed = raw_text.trim();
 
@@ -175,11 +198,19 @@ pub async fn resolve_progressive_intent(
         && score_prompt_injection_risk(trimmed) < 0.65
         && gateway.has_usable_credentials()
     {
-        resolved =
-            parse_structured_intent_with_llm(gateway, trimmed, context_hint, capabilities).await;
+        resolved = parse_structured_intent_with_llm_and_privacy(
+            gateway,
+            trimmed,
+            context_hint,
+            capabilities,
+            privacy,
+        )
+        .await;
     }
 
-    if let Some(db) = state_db {
+    if privacy.allows_memory_read()
+        && let Some(db) = state_db
+    {
         apply_empirical_calibration_to_intent(db, &mut resolved);
     }
 
@@ -385,6 +416,23 @@ pub async fn parse_structured_intent_with_llm(
     desktop_state_hint: Option<&str>,
     capabilities: &[CapabilityDescriptor],
 ) -> StructuredIntent {
+    parse_structured_intent_with_llm_and_privacy(
+        gateway,
+        raw_text,
+        desktop_state_hint,
+        capabilities,
+        PrivacySessionPolicy::Standard,
+    )
+    .await
+}
+
+pub async fn parse_structured_intent_with_llm_and_privacy(
+    gateway: &ModelGateway,
+    raw_text: &str,
+    desktop_state_hint: Option<&str>,
+    capabilities: &[CapabilityDescriptor],
+    privacy: PrivacySessionPolicy,
+) -> StructuredIntent {
     let local = parse_structured_intent(raw_text, capabilities);
     let trimmed = raw_text.trim();
     if trimmed.is_empty() {
@@ -423,7 +471,12 @@ pub async fn parse_structured_intent_with_llm(
     } else {
         DataClass::Public
     };
-    let lease = gateway.issue_run_lease("l1_cognitive_parser", profile_name, data_class);
+    let lease_task_id = match privacy {
+        PrivacySessionPolicy::Standard => "l1_cognitive_parser",
+        PrivacySessionPolicy::EphemeralReadOnly => "ephemeral_ro_l1_cognitive_parser",
+        PrivacySessionPolicy::StrictIsolated => "incog_l1_cognitive_parser",
+    };
+    let lease = gateway.issue_run_lease(lease_task_id, profile_name, data_class);
 
     let (body, _cap_catalog) = build_compact_fast_llm_request_body(
         &profile.model,

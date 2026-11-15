@@ -8,7 +8,7 @@
 
 use crate::resource::to_pinyin_pair;
 use intentos_protocol::CapabilityDescriptor;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -22,14 +22,62 @@ pub struct CompiledPattern {
     pub base_weight: f64,
 }
 
+/// Precomputed lexical, Pinyin, syllable, and bigram metadata for a single alias or trigger (`H09`).
+#[derive(Debug, Clone)]
+pub struct PrecomputedLexiconTerm {
+    pub raw: String,
+    pub lc: String,
+    pub chars: Vec<char>,
+    pub py_full: String,
+    pub py_init: String,
+    pub syllables: Vec<String>,
+    pub bigrams: Vec<(char, char)>,
+    pub is_alias_or_synonym: bool,
+}
+
+impl PrecomputedLexiconTerm {
+    pub fn build(raw_term: &str, is_alias_or_synonym: bool) -> Self {
+        let lc = raw_term.trim().to_ascii_lowercase();
+        let chars: Vec<char> = lc.chars().collect();
+        let (py_full, py_init) = to_pinyin_pair(&lc);
+        let mut syllables = Vec::with_capacity(chars.len());
+        for &ch in &chars {
+            if let Some(py) = pinyin::ToPinyin::to_pinyin(&ch) {
+                syllables.push(py.plain().to_ascii_lowercase());
+            } else if ch.is_ascii_alphanumeric() {
+                syllables.push(ch.to_ascii_lowercase().to_string());
+            }
+        }
+        let bg_chars: Vec<char> = chars
+            .iter()
+            .copied()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let bigrams: Vec<(char, char)> = bg_chars.windows(2).map(|w| (w[0], w[1])).collect();
+        Self {
+            raw: raw_term.to_string(),
+            lc,
+            chars,
+            py_full,
+            py_init,
+            syllables,
+            bigrams,
+            is_alias_or_synonym,
+        }
+    }
+}
+
 /// Lexicon & pattern index entry for a single registered `CapabilityDescriptor`.
 #[derive(Debug, Clone)]
 pub struct DescriptorLexiconEntry {
     pub capability_id: String,
     pub category: String,
     pub summary: String,
+    pub summary_head: String,
+    pub summary_head_bigrams: Vec<(char, char)>,
     pub aliases: Vec<String>,
     pub colloquial_triggers: Vec<String>,
+    pub precomputed_terms: Vec<PrecomputedLexiconTerm>,
     pub pinyin_full_terms: Vec<(String, String)>, // (pinyin_full, original_term)
     pub pinyin_init_terms: Vec<(String, String)>, // (pinyin_init, original_term)
     pub compiled_patterns: Vec<CompiledPattern>,
@@ -59,6 +107,8 @@ pub struct ColloquialAnalysis {
 pub struct PatternCompiler {
     entries: Vec<DescriptorLexiconEntry>,
     by_id: HashMap<String, usize>,
+    regex_set: Option<RegexSet>,
+    regex_index: Vec<(usize, usize)>,
 }
 
 impl PatternCompiler {
@@ -66,6 +116,8 @@ impl PatternCompiler {
     pub fn compile_from_descriptors(descriptors: &[&CapabilityDescriptor]) -> Self {
         let mut entries = Vec::with_capacity(descriptors.len());
         let mut by_id = HashMap::with_capacity(descriptors.len());
+        let mut regex_sources: Vec<String> = Vec::new();
+        let mut regex_index: Vec<(usize, usize)> = Vec::new();
 
         for desc in descriptors {
             let compiled_patterns = compile_descriptor_patterns(&desc.id, &desc.l0_patterns);
@@ -102,21 +154,62 @@ impl PatternCompiler {
                 }
             }
 
+            let mut precomputed_terms =
+                Vec::with_capacity(desc.aliases.len() + colloquial_triggers.len());
+            for alias in &desc.aliases {
+                precomputed_terms.push(PrecomputedLexiconTerm::build(alias, false));
+            }
+            for trig in &colloquial_triggers {
+                precomputed_terms.push(PrecomputedLexiconTerm::build(trig, true));
+            }
+
+            let scorer_summary_head = desc
+                .summary
+                .split(['（', '('])
+                .next()
+                .unwrap_or(&desc.summary)
+                .to_string();
+            let sh_chars: Vec<char> = scorer_summary_head
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            let summary_head_bigrams: Vec<(char, char)> =
+                sh_chars.windows(2).map(|w| (w[0], w[1])).collect();
+
             let idx = entries.len();
+            for (pat_idx, pat) in compiled_patterns.iter().enumerate() {
+                regex_sources.push(pat.regex.as_str().to_string());
+                regex_index.push((idx, pat_idx));
+            }
             by_id.insert(desc.id.clone(), idx);
             entries.push(DescriptorLexiconEntry {
                 capability_id: desc.id.clone(),
                 category: desc.category.clone(),
                 summary: desc.summary.clone(),
+                summary_head: scorer_summary_head,
+                summary_head_bigrams,
                 aliases: desc.aliases.clone(),
                 colloquial_triggers,
+                precomputed_terms,
                 pinyin_full_terms,
                 pinyin_init_terms,
                 compiled_patterns,
             });
         }
 
-        Self { entries, by_id }
+        let regex_set = if regex_sources.is_empty() {
+            None
+        } else {
+            RegexSet::new(&regex_sources).ok()
+        };
+
+        Self {
+            entries,
+            by_id,
+            regex_set,
+            regex_index,
+        }
     }
 
     pub fn entries(&self) -> &[DescriptorLexiconEntry] {
@@ -144,8 +237,27 @@ impl PatternCompiler {
             };
 
         let mut matches = Vec::new();
-        for entry in &self.entries {
-            for pat in &entry.compiled_patterns {
+        if let Some(ref set) = self.regex_set {
+            let mut hit_flags = vec![false; self.regex_index.len()];
+            let mut any_hit = false;
+            for &text_variant in &candidates_to_test {
+                for flat_idx in set.matches(text_variant) {
+                    if let Some(slot) = hit_flags.get_mut(flat_idx) {
+                        *slot = true;
+                        any_hit = true;
+                    }
+                }
+            }
+            if !any_hit {
+                return matches;
+            }
+            for (flat_idx, &hit) in hit_flags.iter().enumerate() {
+                if !hit {
+                    continue;
+                }
+                let (entry_idx, pat_idx) = self.regex_index[flat_idx];
+                let entry = &self.entries[entry_idx];
+                let pat = &entry.compiled_patterns[pat_idx];
                 for &text_variant in &candidates_to_test {
                     if let Some(caps) = pat.regex.captures(text_variant) {
                         let mut slots = HashMap::new();
@@ -167,6 +279,34 @@ impl PatternCompiler {
                             confidence,
                         });
                         break;
+                    }
+                }
+            }
+        } else {
+            for entry in &self.entries {
+                for pat in &entry.compiled_patterns {
+                    for &text_variant in &candidates_to_test {
+                        if let Some(caps) = pat.regex.captures(text_variant) {
+                            let mut slots = HashMap::new();
+                            for slot_name in &pat.slot_names {
+                                if let Some(m) = caps.name(slot_name) {
+                                    let val = m.as_str().trim();
+                                    if !val.is_empty() {
+                                        slots.insert(slot_name.clone(), val.to_string());
+                                    }
+                                }
+                            }
+                            let specificity_bonus = (pat.slot_names.len() as f64) * 0.02
+                                + (pat.raw_pattern.chars().count().min(20) as f64) * 0.003;
+                            let confidence = (pat.base_weight + specificity_bonus).clamp(0.0, 0.99);
+                            matches.push(PatternMatch {
+                                capability_id: entry.capability_id.clone(),
+                                matched_pattern: pat.raw_pattern.clone(),
+                                captured_slots: slots,
+                                confidence,
+                            });
+                            break;
+                        }
                     }
                 }
             }

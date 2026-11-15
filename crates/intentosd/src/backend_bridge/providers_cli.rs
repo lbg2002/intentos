@@ -24,14 +24,14 @@ use crate::backend_bridge::detector::{
 };
 use crate::backend_bridge::turn_checkpoint::{
     ActiveTurnHandle, SuspendedDialectState, SuspendedTurnCheckpoint, TurnEffectLedger,
-    save_suspended_checkpoint,
+    emit_turn_event, save_suspended_checkpoint,
 };
 use crate::backend_bridge::turn_engine::extract_thinking_and_clean_reply;
 use crate::config::{EgressVerdict, XdgPaths, check_egress_matrix};
 use crate::core::IntentOsCore;
 use crate::runtime::SessionState;
 use crate::security_guard::SensitiveDataGuard;
-use intentos_protocol::{ContextBlock, DataClass, ProviderTrust};
+use intentos_protocol::{AgentEventKind, ContextBlock, DataClass, ProviderTrust};
 use intentos_sandbox::{
     BindMountPair, SandboxDriver, SandboxProbe, SandboxSpec, build_sandboxed_command_with_mounts,
     is_forbidden_credential_path, probe_sandbox_support,
@@ -1755,6 +1755,15 @@ pub async fn run_cli_backend_turn_with_policy(
         } else {
             scrubbed_text
         };
+        if !final_reply.is_empty() {
+            let _ = emit_turn_event(
+                &effect_ledger.turn_id,
+                Some(task_id),
+                AgentEventKind::MessageDelta {
+                    delta: final_reply.clone(),
+                },
+            );
+        }
 
         return Ok(finalize_completed_turn_outcome(
             core,

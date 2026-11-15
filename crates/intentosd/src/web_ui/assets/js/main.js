@@ -2123,14 +2123,16 @@ class QuickChatDialogApp {
 
     if (this.emptyStateEl) this.emptyStateEl.hidden = true;
 
+    const clientTurnId = `turn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const turnObj = {
-      id: `turn_${Date.now()}`,
+      id: clientTurnId,
       userText,
       clipboardContext,
       mentions,
       replyMarkdown: '',
       traceDots: [],
       modelLabel: '',
+      taskStatus: 'running',
       task: null,
     };
     const turnIdx = this.turns.length;
@@ -2141,7 +2143,112 @@ class QuickChatDialogApp {
 
     const abortCtrl = new AbortController();
     this.activeAbortController = abortCtrl;
+    this.activeTurnId = clientTurnId;
     this.setBusyState(true);
+
+    let liveStreamedText = '';
+    let turnEventSource = null;
+    let fallbackPollTimer = null;
+    let lastSeenSeq = 0;
+
+    const applyLiveTurnEvent = (ev) => {
+      if (!ev || abortCtrl.signal.aborted || !mounted || !mounted.mdBody) return;
+      if (typeof ev.seq === 'number' && ev.seq > lastSeenSeq) {
+        lastSeenSeq = ev.seq;
+      }
+      if (ev.event === 'message_delta' && ev.delta) {
+        liveStreamedText += String(ev.delta);
+        const splitLive = splitThinkAndReply(liveStreamedText);
+        renderMarkdown(mounted.mdBody, splitLive.reply || liveStreamedText);
+        this.scrollToBottom();
+      } else if (ev.event === 'tool_started' && ev.capability_id && !liveStreamedText) {
+        mounted.mdBody.innerHTML = `<span class="qc-streaming-placeholder">⚡ 正在执行能力 <code>${escapeHtml(
+          ev.capability_id
+        )}</code>…</span>`;
+      } else if (ev.event === 'progress' && ev.detail && !liveStreamedText) {
+        mounted.mdBody.innerHTML = `<span class="qc-streaming-placeholder">✦ ${escapeHtml(
+          ev.detail
+        )}</span>`;
+      }
+    };
+
+    const stopLiveTurnStream = () => {
+      if (turnEventSource) {
+        try {
+          turnEventSource.close();
+        } catch (_) {}
+        turnEventSource = null;
+      }
+      if (fallbackPollTimer) {
+        clearInterval(fallbackPollTimer);
+        fallbackPollTimer = null;
+      }
+    };
+
+    const startFallbackEventPolling = () => {
+      if (fallbackPollTimer || abortCtrl.signal.aborted) return;
+      let pollBusy = false;
+      fallbackPollTimer = setInterval(async () => {
+        if (pollBusy || abortCtrl.signal.aborted) return;
+        pollBusy = true;
+        try {
+          const snapRes = await moduleRpc(
+            'backend_bridge',
+            'poll_turn_events',
+            { turn_id: clientTurnId, since_seq: lastSeenSeq },
+            async () => null
+          );
+          const evs =
+            (snapRes && snapRes.ok && snapRes.result && snapRes.result.events) || [];
+          if (Array.isArray(evs)) {
+            evs.forEach(applyLiveTurnEvent);
+          }
+        } catch (_) {
+        } finally {
+          pollBusy = false;
+        }
+      }, 150);
+    };
+
+    if (typeof EventSource !== 'undefined') {
+      try {
+        turnEventSource = new EventSource(
+          `/api/turn-events?turn_id=${encodeURIComponent(clientTurnId)}&since_seq=0`
+        );
+        const sseEventNames = [
+          'started',
+          'goal_resolved',
+          'message_delta',
+          'tool_started',
+          'tool_completed',
+          'awaiting_approval',
+          'progress',
+          'completed',
+          'failed',
+          'cancelled',
+        ];
+        sseEventNames.forEach((evName) => {
+          turnEventSource.addEventListener(evName, (msgEv) => {
+            try {
+              applyLiveTurnEvent(JSON.parse(msgEv.data));
+            } catch (_) {}
+          });
+        });
+        turnEventSource.onerror = () => {
+          if (turnEventSource) {
+            try {
+              turnEventSource.close();
+            } catch (_) {}
+            turnEventSource = null;
+          }
+          startFallbackEventPolling();
+        };
+      } catch (_) {
+        startFallbackEventPolling();
+      }
+    } else {
+      startFallbackEventPolling();
+    }
 
     try {
       // Build contextual prompt if mentions or clipboard are attached
@@ -2162,6 +2269,7 @@ class QuickChatDialogApp {
         'backend_bridge',
         'send_quick_chat_turn',
         {
+          turn_id: clientTurnId,
           session_id: this.incognitoMode ? null : this.currentSessionId,
           text: effectiveText,
           clipboard_context: clipboardContext || null,
@@ -2171,6 +2279,7 @@ class QuickChatDialogApp {
         null,
         { signal: abortCtrl.signal }
       );
+      stopLiveTurnStream();
 
       if (bridgeRes && bridgeRes.aborted) {
         turnObj.replyMarkdown = '_（已取消本次提问）_';
@@ -2187,7 +2296,7 @@ class QuickChatDialogApp {
         (typeof bridgeRes.result.reply_markdown === 'string' || typeof bridgeRes.result.reply === 'string')
       ) {
         const r = bridgeRes.result;
-        this.activeTurnId = r.turn_id || null;
+        this.activeTurnId = r.turn_id || clientTurnId;
         if (!this.incognitoMode && r.session_id) {
           this.currentSessionId = r.session_id;
         }
@@ -2197,11 +2306,18 @@ class QuickChatDialogApp {
         const mergedThinking = [r.thinking, split.thinking].filter(Boolean).join('\n\n');
 
         turnObj.replyMarkdown = split.reply || rawReply || '已完成处理。';
+        turnObj.taskStatus = r.task_status || r.status || 'completed';
         turnObj.traceDots = normalizeTraceDots({
           ...r,
           thinking: mergedThinking,
         });
-        turnObj.modelLabel = [r.backend_used, r.model_used].filter(Boolean).join(' · ');
+        const statusBadge =
+          turnObj.taskStatus === 'recovery_required' || r.recovery_required
+            ? '🛑 需恢复核验'
+            : turnObj.taskStatus === 'partially_completed'
+            ? '⚠️ 部分完成'
+            : '';
+        turnObj.modelLabel = [r.backend_used, r.model_used, statusBadge].filter(Boolean).join(' · ');
         turnObj.contextCompression = r.context_compression || null;
         turnObj.task = r.task || null;
 
@@ -2214,7 +2330,7 @@ class QuickChatDialogApp {
           mounted.mdBody,
           turnObj,
           turnIdx,
-          true,
+          liveStreamedText.length === 0,
           abortCtrl.signal
         );
         this.setBusyState(false, hasPendingApproval);
@@ -2237,6 +2353,7 @@ class QuickChatDialogApp {
         abortCtrl.signal
       );
     } finally {
+      stopLiveTurnStream();
       this.activeAbortController = null;
       this.activeTurnId = null;
       if (this.isBusy) {

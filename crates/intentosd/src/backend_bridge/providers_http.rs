@@ -22,14 +22,15 @@ use crate::backend_bridge::detector::{
 };
 use crate::backend_bridge::turn_checkpoint::{
     ActiveTurnHandle, SuspendedDialectState, SuspendedTurnCheckpoint, TurnBudgetTracker,
-    TurnEffectLedger, save_suspended_checkpoint,
+    TurnEffectLedger, emit_turn_event, save_suspended_checkpoint,
 };
 use crate::backend_bridge::turn_engine::extract_thinking_and_clean_reply;
 use crate::config::{EgressVerdict, check_egress_matrix};
 use crate::core::IntentOsCore;
 use crate::runtime::SessionState;
-use intentos_protocol::{ContextBlock, DataClass, ProviderTrust};
+use intentos_protocol::{AgentEventKind, ContextBlock, DataClass, ProviderTrust};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -418,24 +419,26 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                 ));
             }
 
-            let call_res = tokio::select! {
-                _ = turn_handle.wait_cancelled() => {
-                    anyhow::bail!("turn_cancelled");
-                }
-                r = call_openai_upstream_with_budget(
-                    core,
-                    &transport,
-                    data_class,
-                    &active.model,
-                    &active.reasoning_effort,
-                    &messages,
-                    &openai_tools,
-                    Some(&mut effect_ledger.budget_tracker),
-                ) => r,
-            };
-            let resp = match call_res {
+            let call_res = call_openai_upstream_streaming(
+                core,
+                &transport,
+                data_class,
+                &active.model,
+                &active.reasoning_effort,
+                &messages,
+                &openai_tools,
+                Some(&mut effect_ledger.budget_tracker),
+                Some(turn_handle.as_ref()),
+                Some(task_id),
+                &effect_ledger.turn_id,
+            )
+            .await;
+            let (resp, streamed_sse) = match call_res {
                 Ok(v) => v,
                 Err(err) => {
+                    if turn_handle.is_cancelled() {
+                        anyhow::bail!("turn_cancelled");
+                    }
                     if effect_ledger.budget_tracker.budget_exhausted {
                         return Ok(build_budget_exhausted_turn_outcome(
                             core,
@@ -474,6 +477,18 @@ pub async fn run_openai_tool_calling_turn_with_policy(
                 extract_thinking_and_clean_reply(raw_content, api_reasoning);
             if let Some(t) = step_thought {
                 effect_ledger.push_thought(t);
+            }
+            if !streamed_sse
+                && !cleaned_content.is_empty()
+                && (allow_broker_tools
+                    || msg
+                        .get("tool_calls")
+                        .and_then(|tc| tc.as_array())
+                        .is_none_or(|a| a.is_empty()))
+            {
+                turn_handle.emit_event(AgentEventKind::MessageDelta {
+                    delta: cleaned_content.clone(),
+                });
             }
 
             if let Some(tool_calls) = msg
@@ -836,21 +851,21 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
             ));
         }
 
-        let resp = tokio::select! {
-            _ = turn_handle.wait_cancelled() => {
-                anyhow::bail!("turn_cancelled");
-            }
-            r = call_anthropic_upstream(
-                base_url,
-                api_key,
-                trust,
-                data_class,
-                &active.model,
-                &sys_text,
-                &anthropic_messages,
-                &anthropic_tools,
-            ) => r?,
-        };
+        let (resp, streamed_sse) = call_anthropic_upstream_streaming(
+            base_url,
+            api_key,
+            trust,
+            data_class,
+            &active.model,
+            &sys_text,
+            &anthropic_messages,
+            &anthropic_tools,
+            Some(&mut effect_ledger.budget_tracker),
+            Some(turn_handle.as_ref()),
+            Some(task_id),
+            &effect_ledger.turn_id,
+        )
+        .await?;
         record_anthropic_response_usage(&resp, effect_ledger);
 
         let content_blocks = resp
@@ -862,6 +877,14 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
             parse_anthropic_content_blocks(content_blocks);
         if let Some(t) = step_thought {
             effect_ledger.push_thought(t);
+        }
+        if !streamed_sse
+            && !cleaned_content.is_empty()
+            && (allow_broker_tools || tool_uses.is_empty())
+        {
+            turn_handle.emit_event(AgentEventKind::MessageDelta {
+                delta: cleaned_content.clone(),
+            });
         }
 
         if !tool_uses.is_empty() {
@@ -1186,7 +1209,7 @@ pub async fn continue_resumed_openai_turn(
                 break;
             }
 
-            let call_res = call_openai_upstream_with_budget(
+            let call_res = call_openai_upstream_streaming(
                 core,
                 &transport,
                 cp.data_class,
@@ -1195,10 +1218,13 @@ pub async fn continue_resumed_openai_turn(
                 &messages,
                 &openai_tools,
                 Some(&mut cp.effect_ledger.budget_tracker),
+                None,
+                Some(&cp.task_id),
+                &cp.effect_ledger.turn_id,
             )
             .await;
 
-            let resp = match call_res {
+            let (resp, streamed_sse) = match call_res {
                 Ok(v) => v,
                 Err(err) => {
                     if cp.effect_ledger.budget_tracker.budget_exhausted {
@@ -1248,6 +1274,15 @@ pub async fn continue_resumed_openai_turn(
                 extract_thinking_and_clean_reply(raw_content, api_reasoning);
             if let Some(t) = step_thought {
                 cp.effect_ledger.push_thought(t);
+            }
+            if !streamed_sse && !cleaned_content.is_empty() {
+                let _ = emit_turn_event(
+                    &cp.effect_ledger.turn_id,
+                    Some(&cp.task_id),
+                    AgentEventKind::MessageDelta {
+                        delta: cleaned_content.clone(),
+                    },
+                );
             }
 
             if let Some(tool_calls) = msg
@@ -1656,7 +1691,7 @@ pub async fn continue_resumed_anthropic_turn(
             ));
         }
 
-        let call_res = call_anthropic_upstream(
+        let call_res = call_anthropic_upstream_streaming(
             &base_url,
             api_key.as_deref(),
             trust,
@@ -1665,10 +1700,14 @@ pub async fn continue_resumed_anthropic_turn(
             &cp.sys_text,
             &messages,
             &anthropic_tools,
+            Some(&mut cp.effect_ledger.budget_tracker),
+            None,
+            Some(&cp.task_id),
+            &cp.effect_ledger.turn_id,
         )
         .await;
 
-        let resp = match call_res {
+        let (resp, streamed_sse) = match call_res {
             Ok(v) => v,
             Err(err) => {
                 tracing::warn!(
@@ -1688,6 +1727,15 @@ pub async fn continue_resumed_anthropic_turn(
             parse_anthropic_content_blocks(content_blocks);
         if let Some(t) = step_thought {
             cp.effect_ledger.push_thought(t);
+        }
+        if !streamed_sse && !cleaned_content.is_empty() {
+            let _ = emit_turn_event(
+                &cp.effect_ledger.turn_id,
+                Some(&cp.task_id),
+                AgentEventKind::MessageDelta {
+                    delta: cleaned_content.clone(),
+                },
+            );
         }
 
         if !tool_uses.is_empty() {
@@ -1898,6 +1946,760 @@ pub async fn continue_resumed_anthropic_turn(
     ))
 }
 
+/// Byte-buffered W3C SSE (`text/event-stream`) frame decoder (`H10`).
+///
+/// Decodes lines strictly at `\n` (`0x0A`) boundaries so multi-byte UTF-8 CJK characters
+/// split across TCP packets are never corrupted.
+#[derive(Default)]
+pub struct SseFrameDecoder {
+    raw_buf: Vec<u8>,
+    current_event: String,
+    current_data: Vec<String>,
+}
+
+impl SseFrameDecoder {
+    pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<(String, String)> {
+        self.raw_buf.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+        while let Some(nl_idx) = self.raw_buf.iter().position(|&b| b == b'\n') {
+            let mut line_bytes: Vec<u8> = self.raw_buf.drain(..=nl_idx).collect();
+            if line_bytes.last() == Some(&b'\n') {
+                line_bytes.pop();
+            }
+            if line_bytes.last() == Some(&b'\r') {
+                line_bytes.pop();
+            }
+            let line = String::from_utf8(line_bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            self.process_line(&line, &mut frames);
+        }
+        frames
+    }
+
+    pub fn finish(&mut self) -> Vec<(String, String)> {
+        let mut frames = Vec::new();
+        if !self.raw_buf.is_empty() {
+            let mut line_bytes = std::mem::take(&mut self.raw_buf);
+            if line_bytes.last() == Some(&b'\r') {
+                line_bytes.pop();
+            }
+            let line = String::from_utf8(line_bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            self.process_line(&line, &mut frames);
+        }
+        if !self.current_data.is_empty() {
+            let ev = std::mem::take(&mut self.current_event);
+            let data = std::mem::take(&mut self.current_data).join("\n");
+            frames.push((ev, data));
+        }
+        frames
+    }
+
+    fn process_line(&mut self, line: &str, out: &mut Vec<(String, String)>) {
+        if line.is_empty() {
+            if !self.current_data.is_empty() {
+                let ev = std::mem::take(&mut self.current_event);
+                let data = std::mem::take(&mut self.current_data).join("\n");
+                out.push((ev, data));
+            } else {
+                self.current_event.clear();
+            }
+            return;
+        }
+        if line.starts_with(':') {
+            return;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            self.current_event = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            let val = rest.strip_prefix(' ').unwrap_or(rest);
+            self.current_data.push(val.to_string());
+        }
+    }
+}
+
+/// Filters `<think>...</think>` / `<thinking>...</thinking>` blocks and buffers partial secret
+/// token prefixes across SSE chunks so `SensitiveDataGuard` scrubs secrets even if split across chunks.
+#[derive(Default)]
+struct IncrementalMessageDeltaFilter {
+    inside_think: bool,
+    buf: String,
+}
+
+impl IncrementalMessageDeltaFilter {
+    fn feed<F: FnMut(&str)>(&mut self, chunk: &str, on_delta: &mut F) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.buf.push_str(chunk);
+        self.drain_ready(false, on_delta);
+    }
+
+    fn flush<F: FnMut(&str)>(&mut self, on_delta: &mut F) {
+        self.drain_ready(true, on_delta);
+    }
+
+    fn drain_ready<F: FnMut(&str)>(&mut self, eof: bool, on_delta: &mut F) {
+        loop {
+            if self.buf.is_empty() {
+                return;
+            }
+            if self.inside_think {
+                let lower = self.buf.to_ascii_lowercase();
+                if let Some((close_idx, tag_len)) = lower
+                    .find("</thinking>")
+                    .map(|i| (i, 11usize))
+                    .or_else(|| lower.find("</think>").map(|i| (i, 8usize)))
+                {
+                    self.buf.drain(..close_idx + tag_len);
+                    self.inside_think = false;
+                    continue;
+                }
+                if eof {
+                    self.buf.clear();
+                } else if self.buf.len() > 32 {
+                    // Keep last 12 ASCII-safe char boundary bytes in case `</thinking>` spans chunks
+                    let keep_from = self
+                        .buf
+                        .char_indices()
+                        .rev()
+                        .take(12)
+                        .last()
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    self.buf.drain(..keep_from);
+                }
+                return;
+            }
+
+            let lower = self.buf.to_ascii_lowercase();
+            if let Some(lt_idx) = lower.find('<') {
+                let after = &lower[lt_idx..];
+                if after.starts_with("<thinking>") {
+                    let prefix: String = self.buf.drain(..lt_idx).collect();
+                    if !prefix.is_empty() {
+                        on_delta(&prefix);
+                    }
+                    self.buf.drain(..10);
+                    self.inside_think = true;
+                    continue;
+                } else if after.starts_with("<think>") {
+                    let prefix: String = self.buf.drain(..lt_idx).collect();
+                    if !prefix.is_empty() {
+                        on_delta(&prefix);
+                    }
+                    self.buf.drain(..7);
+                    self.inside_think = true;
+                    continue;
+                } else if !eof && ("<thinking>".starts_with(after) || "<think>".starts_with(after))
+                {
+                    let prefix: String = self.buf.drain(..lt_idx).collect();
+                    if !prefix.is_empty() {
+                        on_delta(&prefix);
+                    }
+                    return;
+                }
+            }
+
+            if !eof && Self::might_have_trailing_partial_secret(&self.buf) && self.buf.len() < 96 {
+                return;
+            }
+
+            let out = std::mem::take(&mut self.buf);
+            if !out.is_empty() {
+                on_delta(&out);
+            }
+            return;
+        }
+    }
+
+    fn might_have_trailing_partial_secret(s: &str) -> bool {
+        let lower = s.to_ascii_lowercase();
+        if lower.contains("-----begin") && !lower.contains("-----end") {
+            return true;
+        }
+        let tail_token = s
+            .rsplit(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | ']'))
+            .next()
+            .unwrap_or("");
+        let tail_lower = tail_token.to_ascii_lowercase();
+        tail_token.starts_with("sk-")
+            || tail_token.starts_with("rk-")
+            || tail_token.starts_with("ghp_")
+            || tail_token.starts_with("gho_")
+            || tail_token.starts_with("ghs_")
+            || tail_token.starts_with("xox")
+            || tail_lower == "sk"
+            || tail_lower == "bearer"
+            || lower.ends_with("bearer ")
+    }
+}
+
+#[derive(Default)]
+struct PartialOpenAiToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default)]
+struct OpenAiSseAccumulator {
+    stream_id: Option<String>,
+    finish_reason: Option<String>,
+    content_buf: String,
+    reasoning_buf: String,
+    tool_calls: BTreeMap<usize, PartialOpenAiToolCall>,
+    usage: Option<Value>,
+    saw_done: bool,
+    delta_filter: IncrementalMessageDeltaFilter,
+}
+
+impl OpenAiSseAccumulator {
+    fn feed_frame<F: FnMut(&str)>(&mut self, data: &str, on_delta: &mut F) -> anyhow::Result<bool> {
+        let trimmed = data.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        if trimmed == "[DONE]" {
+            self.saw_done = true;
+            self.delta_filter.flush(on_delta);
+            return Ok(true);
+        }
+
+        let val: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        if let Some(err_obj) = val.get("error") {
+            let msg = err_obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(trimmed);
+            anyhow::bail!("OpenAI SSE error: {}", msg);
+        }
+        if let Some(id) = val.get("id").and_then(|v| v.as_str())
+            && !id.is_empty()
+        {
+            self.stream_id = Some(id.to_string());
+        }
+        if let Some(u) = val.get("usage").filter(|u| !u.is_null()) {
+            self.usage = Some(u.clone());
+        }
+
+        if let Some(choice) = val
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+        {
+            if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                self.finish_reason = Some(fr.to_string());
+            }
+            let delta = choice
+                .get("delta")
+                .or_else(|| choice.get("message"))
+                .unwrap_or(&Value::Null);
+
+            if let Some(rc) = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+                .and_then(|v| v.as_str())
+                && !rc.is_empty()
+            {
+                self.reasoning_buf.push_str(rc);
+            }
+            if let Some(c) = delta.get("content").and_then(|v| v.as_str())
+                && !c.is_empty()
+            {
+                self.content_buf.push_str(c);
+                self.delta_filter.feed(c, on_delta);
+            }
+            if let Some(tc_arr) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                for (pos, tc) in tc_arr.iter().enumerate() {
+                    let idx = tc
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(pos);
+                    let entry = self.tool_calls.entry(idx).or_default();
+                    if let Some(id) = tc.get("id").and_then(|v| v.as_str())
+                        && !id.is_empty()
+                    {
+                        entry.id = id.to_string();
+                    }
+                    if let Some(fn_obj) = tc.get("function") {
+                        if let Some(n) = fn_obj.get("name").and_then(|v| v.as_str())
+                            && !n.is_empty()
+                        {
+                            if entry.name.is_empty() {
+                                entry.name = n.to_string();
+                            } else if entry.name != n {
+                                entry.name.push_str(n);
+                            }
+                        }
+                        if let Some(a) = fn_obj.get("arguments").and_then(|v| v.as_str()) {
+                            entry.arguments.push_str(a);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn into_response_json<F: FnMut(&str)>(mut self, on_delta: &mut F) -> Value {
+        self.delta_filter.flush(on_delta);
+        let mut msg = json!({
+            "role": "assistant",
+            "content": self.content_buf,
+        });
+        if !self.reasoning_buf.is_empty() {
+            msg["reasoning_content"] = json!(self.reasoning_buf);
+        }
+        if !self.tool_calls.is_empty() {
+            let tc_vec: Vec<Value> = self
+                .tool_calls
+                .into_iter()
+                .map(|(idx, tc)| {
+                    let id = if tc.id.is_empty() {
+                        format!("call_sse_{}", idx)
+                    } else {
+                        tc.id
+                    };
+                    let args = if tc.arguments.trim().is_empty() {
+                        "{}".to_string()
+                    } else {
+                        tc.arguments
+                    };
+                    json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": args,
+                        }
+                    })
+                })
+                .collect();
+            msg["tool_calls"] = Value::Array(tc_vec);
+        }
+
+        let mut out = json!({
+            "id": self.stream_id.unwrap_or_else(|| "chatcmpl_sse".to_string()),
+            "choices": [{
+                "index": 0,
+                "finish_reason": self.finish_reason.unwrap_or_else(|| "stop".to_string()),
+                "message": msg,
+            }],
+        });
+        if let Some(u) = self.usage {
+            out["usage"] = u;
+        }
+        out
+    }
+}
+
+enum PartialAnthropicBlock {
+    Text(String),
+    Thinking(String),
+    ToolUse {
+        id: String,
+        name: String,
+        initial_input: Value,
+        partial_json: String,
+    },
+}
+
+#[derive(Default)]
+struct AnthropicSseAccumulator {
+    msg_id: Option<String>,
+    stop_reason: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    blocks: BTreeMap<usize, PartialAnthropicBlock>,
+    delta_filter: IncrementalMessageDeltaFilter,
+}
+
+impl AnthropicSseAccumulator {
+    fn feed_frame<F: FnMut(&str)>(
+        &mut self,
+        event_hint: &str,
+        data: &str,
+        on_delta: &mut F,
+    ) -> anyhow::Result<bool> {
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            if trimmed == "[DONE]" {
+                self.delta_filter.flush(on_delta);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let val: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        let ev_type = if !event_hint.is_empty() {
+            event_hint
+        } else {
+            val.get("type").and_then(|v| v.as_str()).unwrap_or("")
+        };
+
+        match ev_type {
+            "ping" => Ok(false),
+            "error" => {
+                let msg = val
+                    .pointer("/error/message")
+                    .or_else(|| val.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(trimmed);
+                anyhow::bail!("Anthropic SSE error: {}", msg);
+            }
+            "message_start" => {
+                if let Some(m) = val.get("message") {
+                    if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                        self.msg_id = Some(id.to_string());
+                    }
+                    if let Some(u) = m.get("usage") {
+                        if let Some(it) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                            self.input_tokens = it;
+                        }
+                        if let Some(ot) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                            self.output_tokens = ot;
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            "content_block_start" => {
+                let idx = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let cb = val.get("content_block").unwrap_or(&Value::Null);
+                match cb.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "text" => {
+                        let initial = cb.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        if !initial.is_empty() {
+                            self.delta_filter.feed(initial, on_delta);
+                        }
+                        self.blocks
+                            .insert(idx, PartialAnthropicBlock::Text(initial.to_string()));
+                    }
+                    "thinking" => {
+                        let initial = cb.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+                        self.blocks
+                            .insert(idx, PartialAnthropicBlock::Thinking(initial.to_string()));
+                    }
+                    "tool_use" => {
+                        let id = cb
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("toolu_sse_0")
+                            .to_string();
+                        let name = cb
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let initial_input = cb.get("input").cloned().unwrap_or_else(|| json!({}));
+                        self.blocks.insert(
+                            idx,
+                            PartialAnthropicBlock::ToolUse {
+                                id,
+                                name,
+                                initial_input,
+                                partial_json: String::new(),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+                Ok(false)
+            }
+            "content_block_delta" => {
+                let idx = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let delta = val.get("delta").unwrap_or(&Value::Null);
+                let dtype = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match dtype {
+                    "text_delta" => {
+                        let tx = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        if !tx.is_empty() {
+                            if let PartialAnthropicBlock::Text(buf) = self
+                                .blocks
+                                .entry(idx)
+                                .or_insert_with(|| PartialAnthropicBlock::Text(String::new()))
+                            {
+                                buf.push_str(tx);
+                            }
+                            self.delta_filter.feed(tx, on_delta);
+                        }
+                    }
+                    "thinking_delta" => {
+                        let th = delta
+                            .get("thinking")
+                            .or_else(|| delta.get("text"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !th.is_empty()
+                            && let PartialAnthropicBlock::Thinking(buf) = self
+                                .blocks
+                                .entry(idx)
+                                .or_insert_with(|| PartialAnthropicBlock::Thinking(String::new()))
+                        {
+                            buf.push_str(th);
+                        }
+                    }
+                    "input_json_delta" => {
+                        let pj = delta
+                            .get("partial_json")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !pj.is_empty()
+                            && let Some(PartialAnthropicBlock::ToolUse { partial_json, .. }) =
+                                self.blocks.get_mut(&idx)
+                        {
+                            partial_json.push_str(pj);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(false)
+            }
+            "content_block_stop" => Ok(false),
+            "message_delta" => {
+                if let Some(sr) = val
+                    .pointer("/delta/stop_reason")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    self.stop_reason = Some(sr.to_string());
+                }
+                if let Some(u) = val.get("usage") {
+                    if let Some(it) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                        self.input_tokens = it;
+                    }
+                    if let Some(ot) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                        self.output_tokens = ot;
+                    }
+                }
+                Ok(false)
+            }
+            "message_stop" => {
+                self.delta_filter.flush(on_delta);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn into_response_json<F: FnMut(&str)>(mut self, on_delta: &mut F) -> Value {
+        self.delta_filter.flush(on_delta);
+        let content: Vec<Value> = self
+            .blocks
+            .into_values()
+            .map(|b| match b {
+                PartialAnthropicBlock::Text(text) => json!({
+                    "type": "text",
+                    "text": text,
+                }),
+                PartialAnthropicBlock::Thinking(thinking) => json!({
+                    "type": "thinking",
+                    "thinking": thinking,
+                }),
+                PartialAnthropicBlock::ToolUse {
+                    id,
+                    name,
+                    initial_input,
+                    partial_json,
+                } => {
+                    let parsed_input = if partial_json.trim().is_empty() {
+                        initial_input
+                    } else {
+                        serde_json::from_str::<Value>(partial_json.trim()).unwrap_or(initial_input)
+                    };
+                    json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": parsed_input,
+                    })
+                }
+            })
+            .collect();
+
+        json!({
+            "id": self.msg_id.unwrap_or_else(|| "msg_sse".to_string()),
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": self.stop_reason.unwrap_or_else(|| "end_turn".to_string()),
+            "content": content,
+            "usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+            }
+        })
+    }
+}
+
+/// Parse an OpenAI SSE (`text/event-stream`) transcript incrementally (`H10`).
+pub fn parse_openai_sse_transcript<F: FnMut(&str)>(
+    raw_sse: &str,
+    mut on_delta: F,
+) -> anyhow::Result<Value> {
+    let mut decoder = SseFrameDecoder::default();
+    let mut acc = OpenAiSseAccumulator::default();
+    for (_ev, data) in decoder.push_bytes(raw_sse.as_bytes()) {
+        if acc.feed_frame(&data, &mut on_delta)? {
+            return Ok(acc.into_response_json(&mut on_delta));
+        }
+    }
+    for (_ev, data) in decoder.finish() {
+        if acc.feed_frame(&data, &mut on_delta)? {
+            return Ok(acc.into_response_json(&mut on_delta));
+        }
+    }
+    Ok(acc.into_response_json(&mut on_delta))
+}
+
+/// Parse an Anthropic Messages SSE (`text/event-stream`) transcript incrementally (`H10`).
+pub fn parse_anthropic_sse_transcript<F: FnMut(&str)>(
+    raw_sse: &str,
+    mut on_delta: F,
+) -> anyhow::Result<Value> {
+    let mut decoder = SseFrameDecoder::default();
+    let mut acc = AnthropicSseAccumulator::default();
+    for (ev, data) in decoder.push_bytes(raw_sse.as_bytes()) {
+        if acc.feed_frame(&ev, &data, &mut on_delta)? {
+            return Ok(acc.into_response_json(&mut on_delta));
+        }
+    }
+    for (ev, data) in decoder.finish() {
+        if acc.feed_frame(&ev, &data, &mut on_delta)? {
+            return Ok(acc.into_response_json(&mut on_delta));
+        }
+    }
+    Ok(acc.into_response_json(&mut on_delta))
+}
+
+fn response_has_sse_content_type(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn body_looks_like_sse(text_body: &str) -> bool {
+    let t = text_body.trim_start();
+    t.starts_with("data:") || t.starts_with("event:")
+}
+
+/// Decode an OpenAI HTTP `Response` either incrementally via SSE (`text/event-stream`) or via
+/// non-streaming `application/json` fallback (`H10`), returning `(assembled_response, streamed_sse)`.
+pub async fn decode_openai_http_or_sse_response<F>(
+    mut resp: reqwest::Response,
+    turn_handle: Option<&ActiveTurnHandle>,
+    on_delta: &mut F,
+) -> anyhow::Result<(Value, bool)>
+where
+    F: FnMut(&str),
+{
+    if response_has_sse_content_type(&resp) {
+        let mut decoder = SseFrameDecoder::default();
+        let mut acc = OpenAiSseAccumulator::default();
+        loop {
+            let next_chunk = if let Some(th) = turn_handle {
+                tokio::select! {
+                    _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+                    c = resp.chunk() => c?,
+                }
+            } else {
+                resp.chunk().await?
+            };
+            let Some(bytes) = next_chunk else {
+                break;
+            };
+            for (_ev, data) in decoder.push_bytes(&bytes) {
+                if acc.feed_frame(&data, on_delta)? {
+                    return Ok((acc.into_response_json(on_delta), true));
+                }
+            }
+        }
+        for (_ev, data) in decoder.finish() {
+            if acc.feed_frame(&data, on_delta)? {
+                return Ok((acc.into_response_json(on_delta), true));
+            }
+        }
+        return Ok((acc.into_response_json(on_delta), true));
+    }
+
+    let text_body = if let Some(th) = turn_handle {
+        tokio::select! {
+            _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+            t = resp.text() => t?,
+        }
+    } else {
+        resp.text().await?
+    };
+
+    if body_looks_like_sse(&text_body) {
+        let val = parse_openai_sse_transcript(&text_body, |d| on_delta(d))?;
+        return Ok((val, true));
+    }
+    Ok((serde_json::from_str(&text_body)?, false))
+}
+
+/// Decode an Anthropic HTTP `Response` either incrementally via SSE (`text/event-stream`) or via
+/// non-streaming `application/json` fallback (`H10`), returning `(assembled_response, streamed_sse)`.
+pub async fn decode_anthropic_http_or_sse_response<F>(
+    mut resp: reqwest::Response,
+    turn_handle: Option<&ActiveTurnHandle>,
+    on_delta: &mut F,
+) -> anyhow::Result<(Value, bool)>
+where
+    F: FnMut(&str),
+{
+    if response_has_sse_content_type(&resp) {
+        let mut decoder = SseFrameDecoder::default();
+        let mut acc = AnthropicSseAccumulator::default();
+        loop {
+            let next_chunk = if let Some(th) = turn_handle {
+                tokio::select! {
+                    _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+                    c = resp.chunk() => c?,
+                }
+            } else {
+                resp.chunk().await?
+            };
+            let Some(bytes) = next_chunk else {
+                break;
+            };
+            for (ev, data) in decoder.push_bytes(&bytes) {
+                if acc.feed_frame(&ev, &data, on_delta)? {
+                    return Ok((acc.into_response_json(on_delta), true));
+                }
+            }
+        }
+        for (ev, data) in decoder.finish() {
+            if acc.feed_frame(&ev, &data, on_delta)? {
+                return Ok((acc.into_response_json(on_delta), true));
+            }
+        }
+        return Ok((acc.into_response_json(on_delta), true));
+    }
+
+    let text_body = if let Some(th) = turn_handle {
+        tokio::select! {
+            _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+            t = resp.text() => t?,
+        }
+    } else {
+        resp.text().await?
+    };
+
+    if body_looks_like_sse(&text_body) {
+        let val = parse_anthropic_sse_transcript(&text_body, |d| on_delta(d))?;
+        return Ok((val, true));
+    }
+    Ok((serde_json::from_str(&text_body)?, false))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn call_anthropic_upstream(
     base_url: &str,
@@ -1909,6 +2711,39 @@ pub async fn call_anthropic_upstream(
     messages: &[Value],
     tools: &[Value],
 ) -> anyhow::Result<Value> {
+    let (val, _) = call_anthropic_upstream_streaming(
+        base_url,
+        api_key,
+        trust,
+        data_class,
+        model,
+        system_prompt,
+        messages,
+        tools,
+        None,
+        None,
+        None,
+        "",
+    )
+    .await?;
+    Ok(val)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn call_anthropic_upstream_streaming(
+    base_url: &str,
+    api_key: Option<&str>,
+    trust: ProviderTrust,
+    data_class: DataClass,
+    model: &str,
+    system_prompt: &str,
+    messages: &[Value],
+    tools: &[Value],
+    mut budget_tracker: Option<&mut TurnBudgetTracker>,
+    turn_handle: Option<&ActiveTurnHandle>,
+    task_id: Option<&str>,
+    turn_id: &str,
+) -> anyhow::Result<(Value, bool)> {
     let verdict = check_egress_matrix(data_class, trust);
     if verdict == EgressVerdict::Deny {
         anyhow::bail!(
@@ -1918,19 +2753,26 @@ pub async fn call_anthropic_upstream(
         );
     }
 
-    let mut body = json!({
-        "model": model,
-        "max_tokens": 4096,
-        "messages": messages,
-    });
-    if !system_prompt.trim().is_empty() {
-        body["system"] = json!(system_prompt);
-    }
-    if !tools.is_empty() {
-        body["tools"] = json!(tools);
-    }
+    let build_body = |stream_flag: bool| -> Value {
+        let mut body = json!({
+            "model": model,
+            "max_tokens": 4096,
+            "messages": messages,
+        });
+        if stream_flag {
+            body["stream"] = json!(true);
+        }
+        if !system_prompt.trim().is_empty() {
+            body["system"] = json!(system_prompt);
+        }
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+        }
+        body
+    };
 
-    let raw_check = body.to_string();
+    let primary_body = build_body(true);
+    let raw_check = primary_body.to_string();
     if raw_check.contains("BEGIN OPENSSH PRIVATE KEY")
         || raw_check.contains("BEGIN RSA PRIVATE KEY")
     {
@@ -1957,23 +2799,76 @@ pub async fn call_anthropic_upstream(
     }
     let client = builder.build()?;
 
+    let mut emit_delta = |delta_chunk: &str| {
+        if delta_chunk.is_empty() {
+            return;
+        }
+        let kind = AgentEventKind::MessageDelta {
+            delta: delta_chunk.to_string(),
+        };
+        if let Some(th) = turn_handle {
+            th.emit_event(kind);
+        } else if !turn_id.is_empty() {
+            let _ = emit_turn_event(turn_id, task_id, kind);
+        }
+    };
+
     let mut last_err = String::new();
     for (idx, endpoint) in endpoints.iter().enumerate() {
         let mut req = client
             .post(endpoint)
             .header("anthropic-version", "2023-06-01")
-            .json(&body);
+            .header(
+                reqwest::header::ACCEPT,
+                "text/event-stream, application/json",
+            )
+            .json(&primary_body);
         if let Some(k) = api_key {
             req = req.header("x-api-key", k).bearer_auth(k);
         }
 
-        let resp = req.send().await?;
+        let resp = if let Some(th) = turn_handle {
+            tokio::select! {
+                _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+                r = req.send() => r?,
+            }
+        } else {
+            req.send().await?
+        };
         let status = resp.status();
-        let text_body = resp.text().await?;
         if status.is_success() {
-            return Ok(serde_json::from_str(&text_body)?);
+            return decode_anthropic_http_or_sse_response(resp, turn_handle, &mut emit_delta).await;
         }
-        last_err = format!("HTTP {}: {}", status, text_body);
+
+        let err_text = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 400 && err_text.to_ascii_lowercase().contains("stream") {
+            if let Some(ref mut bt) = budget_tracker
+                && let Err(dim) = bt.try_record_retry()
+            {
+                anyhow::bail!("budget_exhausted:{}", dim);
+            }
+            let mut retry_req = client
+                .post(endpoint)
+                .header("anthropic-version", "2023-06-01")
+                .json(&build_body(false));
+            if let Some(k) = api_key {
+                retry_req = retry_req.header("x-api-key", k).bearer_auth(k);
+            }
+            let retry_resp = retry_req.send().await?;
+            let retry_status = retry_resp.status();
+            if retry_status.is_success() {
+                return decode_anthropic_http_or_sse_response(
+                    retry_resp,
+                    turn_handle,
+                    &mut emit_delta,
+                )
+                .await;
+            }
+            let retry_err = retry_resp.text().await.unwrap_or_default();
+            anyhow::bail!("HTTP {}: {}", retry_status, retry_err);
+        }
+
+        last_err = format!("HTTP {}: {}", status, err_text);
         if status.as_u16() == 404 && idx + 1 < endpoints.len() {
             continue;
         }
@@ -2016,6 +2911,37 @@ pub async fn call_openai_upstream_with_budget(
     tools: &[Value],
     budget_tracker: Option<&mut TurnBudgetTracker>,
 ) -> anyhow::Result<Value> {
+    let (val, _) = call_openai_upstream_streaming(
+        core,
+        transport,
+        data_class,
+        model,
+        reasoning_effort,
+        messages,
+        tools,
+        budget_tracker,
+        None,
+        None,
+        "",
+    )
+    .await?;
+    Ok(val)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn call_openai_upstream_streaming(
+    core: &IntentOsCore,
+    transport: &UpstreamTransport,
+    data_class: DataClass,
+    model: &str,
+    reasoning_effort: &str,
+    messages: &[Value],
+    tools: &[Value],
+    mut budget_tracker: Option<&mut TurnBudgetTracker>,
+    turn_handle: Option<&ActiveTurnHandle>,
+    task_id: Option<&str>,
+    turn_id: &str,
+) -> anyhow::Result<(Value, bool)> {
     let mapped_effort = match reasoning_effort {
         "fast" => Some("low"),
         "medium" => Some("medium"),
@@ -2023,11 +2949,14 @@ pub async fn call_openai_upstream_with_budget(
         _ => None,
     };
 
-    let build_body = |include_effort: bool, include_tools: bool| -> Value {
+    let build_body = |include_effort: bool, include_tools: bool, include_stream: bool| -> Value {
         let mut body = json!({
             "model": model,
             "messages": messages,
         });
+        if include_stream {
+            body["stream"] = json!(true);
+        }
         if include_tools && !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -2037,27 +2966,59 @@ pub async fn call_openai_upstream_with_budget(
         body
     };
 
+    let mut emit_delta = |delta_chunk: &str| {
+        if delta_chunk.is_empty() {
+            return;
+        }
+        let kind = AgentEventKind::MessageDelta {
+            delta: delta_chunk.to_string(),
+        };
+        if let Some(th) = turn_handle {
+            th.emit_event(kind);
+        } else if !turn_id.is_empty() {
+            let _ = emit_turn_event(turn_id, task_id, kind);
+        }
+    };
+
     match transport {
         UpstreamTransport::GatewayLease { run_token } => {
             let first = core
                 .gateway
-                .proxy_chat_completion(run_token, build_body(mapped_effort.is_some(), true))
+                .proxy_chat_completion_streaming(
+                    run_token,
+                    build_body(mapped_effort.is_some(), true, true),
+                    true,
+                    turn_handle,
+                    &mut emit_delta,
+                )
                 .await;
             match first {
                 Ok(v) => Ok(v),
                 Err(err) => {
                     let es = err.to_string();
-                    if mapped_effort.is_some()
-                        && (es.contains("reasoning_effort") || es.contains("400"))
+                    if es.contains("turn_cancelled") {
+                        anyhow::bail!("turn_cancelled");
+                    }
+                    if (mapped_effort.is_some() || es.to_ascii_lowercase().contains("stream"))
+                        && (es.contains("reasoning_effort")
+                            || es.to_ascii_lowercase().contains("stream")
+                            || es.contains("400"))
                     {
-                        if let Some(bt) = budget_tracker
+                        if let Some(ref mut bt) = budget_tracker
                             && let Err(dim) = bt.try_record_retry()
                         {
                             anyhow::bail!("budget_exhausted:{}", dim);
                         }
+                        let retry_stream = !es.to_ascii_lowercase().contains("stream");
                         Ok(core
                             .gateway
-                            .proxy_chat_completion(run_token, build_body(false, true))
+                            .proxy_chat_completion_streaming(
+                                run_token,
+                                build_body(false, true, retry_stream),
+                                retry_stream,
+                                turn_handle,
+                                &mut emit_delta,
+                            )
                             .await?)
                     } else {
                         Err(err.into())
@@ -2083,7 +3044,7 @@ pub async fn call_openai_upstream_with_budget(
                     trust
                 );
             }
-            let payload_with_effort = build_body(mapped_effort.is_some(), true);
+            let payload_with_effort = build_body(mapped_effort.is_some(), true, true);
             let raw_check = payload_with_effort.to_string();
             if raw_check.contains("BEGIN OPENSSH PRIVATE KEY")
                 || raw_check.contains("BEGIN RSA PRIVATE KEY")
@@ -2107,32 +3068,54 @@ pub async fn call_openai_upstream_with_budget(
             let client = builder.build()?;
 
             let send_once = |body_val: Value| {
-                let mut req = client.post(&endpoint).json(&body_val);
+                let mut req = client
+                    .post(&endpoint)
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "text/event-stream, application/json",
+                    )
+                    .json(&body_val);
                 if let Some(k) = api_key {
                     req = req.bearer_auth(k);
                 }
                 req.send()
             };
 
-            let resp = send_once(payload_with_effort).await?;
+            let resp = if let Some(th) = turn_handle {
+                tokio::select! {
+                    _ = th.wait_cancelled() => anyhow::bail!("turn_cancelled"),
+                    r = send_once(payload_with_effort) => r?,
+                }
+            } else {
+                send_once(payload_with_effort).await?
+            };
             let status = resp.status();
-            let text_body = resp.text().await?;
             if status.is_success() {
-                return Ok(serde_json::from_str(&text_body)?);
+                return decode_openai_http_or_sse_response(resp, turn_handle, &mut emit_delta)
+                    .await;
             }
 
-            if status.as_u16() == 400 && mapped_effort.is_some() {
-                if let Some(bt) = budget_tracker
+            let text_body = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 400
+                && (mapped_effort.is_some() || text_body.to_ascii_lowercase().contains("stream"))
+            {
+                if let Some(ref mut bt) = budget_tracker
                     && let Err(dim) = bt.try_record_retry()
                 {
                     anyhow::bail!("budget_exhausted:{}", dim);
                 }
-                let retry_resp = send_once(build_body(false, true)).await?;
+                let retry_stream = !text_body.to_ascii_lowercase().contains("stream");
+                let retry_resp = send_once(build_body(false, true, retry_stream)).await?;
                 let retry_status = retry_resp.status();
-                let retry_text = retry_resp.text().await?;
                 if retry_status.is_success() {
-                    return Ok(serde_json::from_str(&retry_text)?);
+                    return decode_openai_http_or_sse_response(
+                        retry_resp,
+                        turn_handle,
+                        &mut emit_delta,
+                    )
+                    .await;
                 }
+                let retry_text = retry_resp.text().await.unwrap_or_default();
                 anyhow::bail!("HTTP {}: {}", retry_status, retry_text);
             }
 

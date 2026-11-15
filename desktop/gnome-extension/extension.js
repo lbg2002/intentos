@@ -162,6 +162,16 @@ export default class IntentOsQuickChatExtension extends Extension {
         this._speechOverview = null;
         this._voiceRecording = false;
         this._voiceTranscribing = false;
+        this._activeTurnId = null;
+
+        if (this._turnPollTimerId) {
+            GLib.source_remove(this._turnPollTimerId);
+            this._turnPollTimerId = 0;
+        }
+        if (this._fallbackSchemaCancellable) {
+            this._fallbackSchemaCancellable.cancel();
+            this._fallbackSchemaCancellable = null;
+        }
         this._voiceTimerId = 0;
         this._voiceStartSec = 0;
         this._deepScanSummary = null;
@@ -193,6 +203,16 @@ export default class IntentOsQuickChatExtension extends Extension {
         }
         this._voiceRecording = false;
         this._voiceTranscribing = false;
+        this._activeTurnId = null;
+
+        if (this._turnPollTimerId) {
+            GLib.source_remove(this._turnPollTimerId);
+            this._turnPollTimerId = 0;
+        }
+        if (this._fallbackSchemaCancellable) {
+            this._fallbackSchemaCancellable.cancel();
+            this._fallbackSchemaCancellable = null;
+        }
 
         if (this._interfaceSettings && this._interfaceThemeSignal) {
             try {
@@ -247,12 +267,6 @@ export default class IntentOsQuickChatExtension extends Extension {
     // GSettings, System Theme Sync & Global Hotkeys (`Super+Shift+Q` & `Super+Shift+Y`)
     // ------------------------------------------------------------------
     _initSettingsAndHotkeys() {
-        try {
-            this._settings = this.getSettings(SCHEMA_ID);
-        } catch (_err) {
-            this._settings = this._loadRuntimeFallbackSettings();
-        }
-
         const systemLight = this._detectSystemLightTheme();
         this._lightTheme = systemLight;
 
@@ -267,70 +281,132 @@ export default class IntentOsQuickChatExtension extends Extension {
             } catch (_e) {}
         }
 
-        if (this._settings) {
-            try {
-                const sx = this._settings.get_int('dialog-x');
-                const sy = this._settings.get_int('dialog-y');
-                if (sx >= 0 && sy >= 0)
-                    this._dialogPos = {x: sx, y: sy};
-                this._pinned = this._settings.get_boolean('pinned');
-                const userThemeVal = this._settings.get_user_value?.('light-theme');
-                if (userThemeVal !== null && userThemeVal !== undefined) {
-                    this._userThemeOverride = true;
-                    this._lightTheme = this._settings.get_boolean('light-theme');
-                }
-            } catch (_e) {
-                // Ignore optional preference read errors
-            }
-
-            try {
-                Main.wm.addKeybinding(
-                    KEY_TOGGLE_CHAT,
-                    this._settings,
-                    Meta.KeyBindingFlags.NONE,
-                    Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
-                    () => this.toggleDialog()
-                );
-                Main.wm.addKeybinding(
-                    KEY_CLIPBOARD_ASK,
-                    this._settings,
-                    Meta.KeyBindingFlags.NONE,
-                    Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
-                    () => this.summonWithClipboard()
-                );
-                this._keybindingsBound = true;
-            } catch (_bindErr) {
-                this._keybindingsBound = false;
-            }
+        try {
+            this._settings = this.getSettings(SCHEMA_ID);
+            this._applySettingsAndBindHotkeys();
+        } catch (_err) {
+            this._settings = null;
+            this._initFallbackSettingsAsync();
         }
     }
 
-    _loadRuntimeFallbackSettings() {
+    _applySettingsAndBindHotkeys() {
+        if (!this._settings)
+            return;
         try {
-            const rtDir = `${GLib.get_user_runtime_dir()}/intentos/gschemas`;
-            GLib.mkdir_with_parents(rtDir, 0o700);
-            const xmlPath = `${rtDir}/${SCHEMA_ID}.gschema.xml`;
-            const compiledPath = `${rtDir}/gschemas.compiled`;
-            if (!GLib.file_test(compiledPath, GLib.FileTest.EXISTS)) {
-                GLib.file_set_contents(xmlPath, FALLBACK_GSCHEMA_XML);
-                const proc = Gio.Subprocess.new(
-                    ['glib-compile-schemas', rtDir],
-                    Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
-                );
-                proc.wait(null);
+            const sx = this._settings.get_int('dialog-x');
+            const sy = this._settings.get_int('dialog-y');
+            if (sx >= 0 && sy >= 0)
+                this._dialogPos = {x: sx, y: sy};
+            this._pinned = this._settings.get_boolean('pinned');
+            const userThemeVal = this._settings.get_user_value?.('light-theme');
+            if (userThemeVal !== null && userThemeVal !== undefined) {
+                this._userThemeOverride = true;
+                this._lightTheme = this._settings.get_boolean('light-theme');
+                this._applyDialogThemeClass();
             }
+        } catch (_e) {
+            // Ignore optional preference read errors
+        }
+
+        if (this._keybindingsBound)
+            return;
+        try {
+            Main.wm.addKeybinding(
+                KEY_TOGGLE_CHAT,
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+                () => this.toggleDialog()
+            );
+            Main.wm.addKeybinding(
+                KEY_CLIPBOARD_ASK,
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+                () => this.summonWithClipboard()
+            );
+            this._keybindingsBound = true;
+        } catch (_bindErr) {
+            this._keybindingsBound = false;
+        }
+    }
+
+    _finishFallbackSchemaLoad(rtDir) {
+        try {
             const source = Gio.SettingsSchemaSource.new_from_directory(
                 rtDir,
                 Gio.SettingsSchemaSource.get_default(),
                 false
             );
             const schema = source.lookup(SCHEMA_ID, false);
-            if (schema)
-                return new Gio.Settings({settings_schema: schema});
+            if (schema) {
+                this._settings = new Gio.Settings({settings_schema: schema});
+                this._applySettingsAndBindHotkeys();
+            }
         } catch (_e) {
             // Schema compilation unavailable; panel click still works
         }
-        return null;
+    }
+
+    _initFallbackSettingsAsync() {
+        try {
+            const rtDir = `${GLib.get_user_runtime_dir()}/intentos/gschemas`;
+            GLib.mkdir_with_parents(rtDir, 0o700);
+            const xmlPath = `${rtDir}/${SCHEMA_ID}.gschema.xml`;
+            const compiledPath = `${rtDir}/gschemas.compiled`;
+            this._fallbackSchemaCancellable = new Gio.Cancellable();
+            const cancellable = this._fallbackSchemaCancellable;
+
+            const compiledFile = Gio.File.new_for_path(compiledPath);
+            compiledFile.query_info_async(
+                'standard::type',
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                (_f, infoRes) => {
+                    try {
+                        compiledFile.query_info_finish(infoRes);
+                        if (!cancellable.is_cancelled())
+                            this._finishFallbackSchemaLoad(rtDir);
+                        return;
+                    } catch (_missingErr) {
+                        if (cancellable.is_cancelled())
+                            return;
+                    }
+
+                    try {
+                        const xmlFile = Gio.File.new_for_path(xmlPath);
+                        const xmlBytes = new GLib.Bytes(new TextEncoder().encode(FALLBACK_GSCHEMA_XML));
+                        xmlFile.replace_contents_bytes_async(
+                            xmlBytes,
+                            null,
+                            false,
+                            Gio.FileCreateFlags.PRIVATE,
+                            cancellable,
+                            (_xf, writeRes) => {
+                                try {
+                                    xmlFile.replace_contents_finish(writeRes);
+                                    const proc = Gio.Subprocess.new(
+                                        ['glib-compile-schemas', rtDir],
+                                        Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
+                                    );
+                                    proc.wait_check_async(cancellable, (_proc, waitRes) => {
+                                        try {
+                                            proc.wait_check_finish(waitRes);
+                                        } catch (_compErr) {}
+                                        if (!cancellable.is_cancelled())
+                                            this._finishFallbackSchemaLoad(rtDir);
+                                    });
+                                } catch (_writeErr) {}
+                            }
+                        );
+                    } catch (_asyncErr) {}
+                }
+            );
+        } catch (_e) {
+            // Schema compilation unavailable; panel click still works
+        }
     }
 
     _unbindHotkeys() {
@@ -2176,17 +2252,23 @@ export default class IntentOsQuickChatExtension extends Extension {
         const bubble = new St.BoxLayout({
             style_class: 'intentos-assistant-bubble',
             vertical: false,
+            x_expand: true,
         });
         bubble.add_child(new St.Button({
             style_class: 'intentos-trace-dot intentos-trace-dot-gray',
             label: '●',
             reactive: false,
         }));
-        bubble.add_child(new St.Label({
+        const lbl = new St.Label({
             style_class: 'intentos-trace-summary',
             text: '  正在思考与调度系统能力… (Esc 中止)',
+            x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
-        }));
+        });
+        lbl.clutter_text.set_line_wrap(true);
+        lbl.clutter_text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
+        bubble.add_child(lbl);
+        bubble._statusLbl = lbl;
         this._chatList.add_child(bubble);
         this._scrollToBottom();
         return bubble;
@@ -2348,6 +2430,36 @@ export default class IntentOsQuickChatExtension extends Extension {
                 duration_ms: null,
             });
         }
+        const taskStatus = String(turnRes?.task_status || turnRes?.status || '').toLowerCase();
+        const completedSteps = Array.isArray(turnRes?.completed_steps) ? turnRes.completed_steps : [];
+        const unresolvedGoals = Array.isArray(turnRes?.unresolved_goals) ? turnRes.unresolved_goals : [];
+        const statusSummaryLines = [];
+        if (completedSteps.length > 0)
+            statusSummaryLines.push(`已完成步骤:\n- ${completedSteps.join('\n- ')}`);
+        if (unresolvedGoals.length > 0)
+            statusSummaryLines.push(`未完成目标:\n- ${unresolvedGoals.join('\n- ')}`);
+
+        if ((taskStatus === 'recovery_required' || turnRes?.recovery_required === true) &&
+            !dots.some(d => String(d.title || '').includes('recovery_required'))) {
+            dots.push({
+                kind: 'tool_err',
+                color: 'red',
+                title: '需人工恢复核验 (recovery_required)',
+                detail: statusSummaryLines.join('\n\n') || '智能体执行期间检测到未确认副作用，已阻止自动重放。',
+                changeset_id: null,
+                duration_ms: null,
+            });
+        } else if (taskStatus === 'partially_completed' &&
+            !dots.some(d => String(d.title || '').includes('部分完成'))) {
+            dots.push({
+                kind: 'task_partial',
+                color: 'amber',
+                title: '部分完成 · 已达预算保护上限',
+                detail: statusSummaryLines.join('\n\n') || '当前任务已触发预算上限保护，仅完成部分步骤。',
+                changeset_id: null,
+                duration_ms: null,
+            });
+        }
         return dots;
     }
 
@@ -2442,6 +2554,11 @@ export default class IntentOsQuickChatExtension extends Extension {
         const engineStr = [turnData?.backend_used, turnData?.model_used].filter(Boolean).join(' · ');
         if (engineStr)
             parts.push(engineStr);
+        const taskStatus = String(turnData?.task_status || '').toLowerCase();
+        if (taskStatus === 'recovery_required' || turnData?.recovery_required === true)
+            parts.push('🛑 需恢复核验');
+        else if (taskStatus === 'partially_completed')
+            parts.push('⚠️ 部分完成');
         const cc = turnData?.context_compression;
         if (cc && cc.enabled !== false && (Number(cc.saved_pct || 0) > 0 || Number(cc.included_qa_turns || 0) > 0)) {
             const estTok = Number(cc.compressed_estimated_tokens ?? cc.estimated_tokens ?? 0);
@@ -2781,10 +2898,71 @@ export default class IntentOsQuickChatExtension extends Extension {
         this._refreshPanelDot();
     }
 
+    _stopTurnEventPolling() {
+        if (this._turnPollTimerId) {
+            try {
+                GLib.source_remove(this._turnPollTimerId);
+            } catch (_e) {}
+            this._turnPollTimerId = 0;
+        }
+    }
+
+    _startTurnEventPolling(turnId, token, thinkingBubble) {
+        this._stopTurnEventPolling();
+        let sinceSeq = 0;
+        let streamedPreview = '';
+        let pollingInFlight = false;
+
+        this._turnPollTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 140, () => {
+            if (!this._turnBusy || token !== this._activeTurnToken) {
+                this._turnPollTimerId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            if (pollingInFlight)
+                return GLib.SOURCE_CONTINUE;
+
+            pollingInFlight = true;
+            this._moduleRpc('backend_bridge', 'poll_turn_events', {
+                turn_id: turnId,
+                since_seq: sinceSeq,
+            }).then(snap => {
+                if (!this._turnBusy || token !== this._activeTurnToken || !thinkingBubble?.get_parent?.())
+                    return;
+                const events = Array.isArray(snap?.events) ? snap.events : [];
+                for (const ev of events) {
+                    if (typeof ev?.seq === 'number' && ev.seq > sinceSeq)
+                        sinceSeq = ev.seq;
+                    if (ev?.event === 'message_delta' && ev?.delta) {
+                        streamedPreview += String(ev.delta);
+                        const preview = streamedPreview.length > 260
+                            ? `…${streamedPreview.slice(-260)}`
+                            : streamedPreview;
+                        thinkingBubble._statusLbl?.set_text(`  ${preview}`);
+                    } else if (ev?.event === 'tool_started' && ev?.capability_id && !streamedPreview) {
+                        thinkingBubble._statusLbl?.set_text(`  ⚡ 正在执行能力 ${ev.capability_id}… (Esc 中止)`);
+                    } else if (ev?.event === 'progress' && ev?.detail && !streamedPreview) {
+                        thinkingBubble._statusLbl?.set_text(`  ✦ ${ev.detail} (Esc 中止)`);
+                    }
+                }
+                if (events.length > 0)
+                    this._scrollToBottom();
+            }).catch(() => {}).finally(() => {
+                pollingInFlight = false;
+            });
+
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
     _abortActiveTurn() {
         this._activeTurnToken += 1;
+        const cancelPayload = {session_id: this._sessionId};
+        if (this._activeTurnId)
+            cancelPayload.turn_id = this._activeTurnId;
+        this._activeTurnId = null;
+        this._stopTurnEventPolling();
         this._setBusyState(false);
-        this._moduleRpc('backend_bridge', 'cancel_turn', {session_id: this._sessionId}).catch(() => {
+        this._moduleRpc('backend_bridge', 'cancel_turn', cancelPayload).catch(() => {
             this._rpcCall({method: 'stop_all'}).catch(() => {});
         });
     }
@@ -2820,11 +2998,14 @@ export default class IntentOsQuickChatExtension extends Extension {
 
         this._activeTurnToken += 1;
         const token = this._activeTurnToken;
+        const clientTurnId = `turn_${GLib.uuid_string_random().replace(/-/g, '').slice(0, 12)}`;
+        this._activeTurnId = clientTurnId;
         this._setBusyState(true);
+        this._startTurnEventPolling(clientTurnId, token, thinkingBubble);
 
         let turnResult = null;
         try {
-            turnResult = await this._executeQuickChatTurn(text, clipCtx);
+            turnResult = await this._executeQuickChatTurn(text, clipCtx, clientTurnId);
         } catch (err) {
             turnResult = {
                 backend_used: 'offline',
@@ -2838,6 +3019,10 @@ export default class IntentOsQuickChatExtension extends Extension {
                 }],
                 pending_approval: null,
             };
+        } finally {
+            this._stopTurnEventPolling();
+            if (this._activeTurnId === clientTurnId)
+                this._activeTurnId = null;
         }
 
         if (thinkingBubble && thinkingBubble.get_parent())
@@ -2856,9 +3041,10 @@ export default class IntentOsQuickChatExtension extends Extension {
         this._refreshMemoryAsync(false);
     }
 
-    async _executeQuickChatTurn(text, clipCtx) {
+    async _executeQuickChatTurn(text, clipCtx, clientTurnId = null) {
         try {
             const bridgeResp = await this._moduleRpc('backend_bridge', 'send_quick_chat_turn', {
+                turn_id: clientTurnId,
                 session_id: this._incognito ? null : this._sessionId,
                 text,
                 clipboard_context: clipCtx || null,
@@ -2873,9 +3059,14 @@ export default class IntentOsQuickChatExtension extends Extension {
                 bridgeResp.pending_approval
             )) {
                 return {
+                    turn_id: bridgeResp.turn_id || clientTurnId,
                     session_id: bridgeResp.session_id || this._sessionId,
                     backend_used: bridgeResp.backend_used || bridgeResp.backend || this._selectedBackend,
                     model_used: bridgeResp.model_used || bridgeResp.model || this._selectedModel,
+                    task_status: bridgeResp.task_status || bridgeResp.status || 'completed',
+                    completed_steps: bridgeResp.completed_steps || [],
+                    unresolved_goals: bridgeResp.unresolved_goals || [],
+                    recovery_required: Boolean(bridgeResp.recovery_required),
                     thinking: bridgeResp.thinking || '',
                     reply_markdown: String(
                         bridgeResp.reply_markdown ?? bridgeResp.reply ?? bridgeResp.assistant_message ?? '✓ 已完成'
@@ -3417,6 +3608,16 @@ export default class IntentOsQuickChatExtension extends Extension {
             this._showVoiceSetupBanner(`⚠️ 语音转写异常: ${err?.message || err}`, false, false);
         } finally {
             this._voiceTranscribing = false;
+        this._activeTurnId = null;
+
+        if (this._turnPollTimerId) {
+            GLib.source_remove(this._turnPollTimerId);
+            this._turnPollTimerId = 0;
+        }
+        if (this._fallbackSchemaCancellable) {
+            this._fallbackSchemaCancellable.cancel();
+            this._fallbackSchemaCancellable = null;
+        }
             this._micBtn?.set_style_class_name('intentos-mic-btn');
             this._micBtn?.set_label('🎙');
             if (this._inputEntry)
@@ -3433,6 +3634,16 @@ export default class IntentOsQuickChatExtension extends Extension {
         }
         this._voiceRecording = false;
         this._voiceTranscribing = false;
+        this._activeTurnId = null;
+
+        if (this._turnPollTimerId) {
+            GLib.source_remove(this._turnPollTimerId);
+            this._turnPollTimerId = 0;
+        }
+        if (this._fallbackSchemaCancellable) {
+            this._fallbackSchemaCancellable.cancel();
+            this._fallbackSchemaCancellable = null;
+        }
         this._micBtn?.set_style_class_name('intentos-mic-btn');
         this._micBtn?.set_label('🎙');
         if (this._inputEntry)

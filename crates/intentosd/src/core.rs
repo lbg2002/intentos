@@ -1051,10 +1051,11 @@ impl IntentOsCore {
                     } else if privacy.allows_memory_write() {
                         let (out, prog) = self
                             .decision
-                            .classify_colloquial_intent_progressive(
+                            .classify_colloquial_intent_progressive_with_privacy(
                                 &resolved_text,
                                 &descriptors,
                                 req.cwd.as_deref(),
+                                privacy,
                             )
                             .await;
                         progressive_goal = Some(prog);
@@ -1064,10 +1065,11 @@ impl IntentOsCore {
                             self.gateway.clone(),
                             self.ephemeral_state_db.clone(),
                         )
-                        .classify_colloquial_intent_progressive(
+                        .classify_colloquial_intent_progressive_with_privacy(
                             &resolved_text,
                             &descriptors,
                             req.cwd.as_deref(),
+                            privacy,
                         )
                         .await;
                         progressive_goal = Some(prog);
@@ -1461,19 +1463,17 @@ impl IntentOsCore {
                     None => {
                         let cap_snap =
                             crate::capability_snapshot::capability_snapshot_for_core(self);
-                        let cal_db = if privacy.allows_memory_read() {
-                            Some(self.state_db.as_ref())
-                        } else {
-                            None
-                        };
-                        crate::intent_engine::resolve_progressive_intent(
-                            &self.gateway,
-                            cal_db,
+                        let mut g = crate::intent_engine::parse_structured_intent(
                             &resolved_text,
-                            req.cwd.as_deref(),
                             cap_snap.descriptors_slice(),
-                        )
-                        .await
+                        );
+                        if privacy.allows_memory_read() {
+                            crate::decision::apply_empirical_calibration_to_intent(
+                                &self.state_db,
+                                &mut g,
+                            );
+                        }
+                        g
                     }
                 };
                 if (matches!(
