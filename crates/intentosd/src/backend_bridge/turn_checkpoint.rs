@@ -24,6 +24,7 @@ use crate::backend_bridge::providers_http::{
 };
 use crate::core::IntentOsCore;
 use crate::runtime::SessionState;
+use crate::security_guard::PrivacySessionPolicy;
 use intentos_protocol::{
     ContextBlock, DataClass, Effect, ExecutionStatus, PendingApproval, ProviderTrust, Taint,
     TaskStep,
@@ -249,50 +250,311 @@ impl TurnEffectLedger {
     }
 }
 
-/// Active turn cancellation & idempotency handle.
+/// TTL for cached completed turn outcomes (`IdempotentReplay`).
+pub const COMPLETED_TURN_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Maximum number of completed turn outcomes retained in memory.
+pub const MAX_COMPLETED_TURN_CACHE: usize = 64;
+/// TTL for cancelled turn tombstones (`PreCancelled`).
+pub const CANCELLED_TURN_CACHE_TTL: Duration = Duration::from_secs(600);
+/// Maximum number of cancelled turn tombstones retained in memory.
+pub const MAX_CANCELLED_TURN_CACHE: usize = 128;
+
+const LEGACY_WILDCARD_SESSION: &str = "__legacy_wildcard__";
+const ANONYMOUS_SESSION_SENTINEL: &str = "__anonymous__";
+
+/// Unified lifecycle states for a registered turn in `TurnRegistry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnLifecycleState {
+    Running,
+    PausedApproval,
+    Finished,
+    Cancelled,
+}
+
+/// Request identity bound to a `turn_id` to prevent cross-session cache mixing,
+/// payload tampering on replay, or duplicate concurrent execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnIdentity {
+    pub turn_id: String,
+    pub session_id: String,
+    pub request_digest: String,
+    pub model_key: String,
+    pub execution_mode: String,
+    pub privacy: PrivacySessionPolicy,
+}
+
+/// Compute a deterministic SHA-256 hex digest binding normalized `user_text`,
+/// optional `clipboard`, and `allow_broker_tools`.
+pub fn compute_request_digest(
+    user_text: &str,
+    clipboard: Option<&str>,
+    allow_broker_tools: bool,
+) -> String {
+    let norm_text = user_text.trim();
+    let norm_clip = clipboard
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let canonical = canonicalize_json_value(&json!({
+        "allow_broker_tools": allow_broker_tools,
+        "clipboard": norm_clip,
+        "user_text": norm_text,
+    }));
+    let mut hasher = Sha256::new();
+    hasher.update(b"turn_req_v1:");
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+impl TurnIdentity {
+    pub fn new(
+        turn_id: impl Into<String>,
+        session_id: impl Into<String>,
+        request_digest: impl Into<String>,
+        model_key: impl Into<String>,
+        execution_mode: impl Into<String>,
+        privacy: PrivacySessionPolicy,
+    ) -> Self {
+        Self {
+            turn_id: turn_id.into(),
+            session_id: session_id.into(),
+            request_digest: request_digest.into(),
+            model_key: model_key.into(),
+            execution_mode: execution_mode.into(),
+            privacy,
+        }
+    }
+
+    /// Build a `TurnIdentity` from raw request parameters. When `explicit_session_id` is omitted
+    /// (`None` or empty), binds to a canonical anonymous sentinel so anonymous retries of the
+    /// identical payload match each other while never matching an explicit `session_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_request(
+        turn_id: impl Into<String>,
+        explicit_session_id: Option<&str>,
+        user_text: &str,
+        clipboard: Option<&str>,
+        allow_broker_tools: bool,
+        model_key: impl Into<String>,
+        execution_mode: impl Into<String>,
+        privacy: PrivacySessionPolicy,
+    ) -> Self {
+        let sid = explicit_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ANONYMOUS_SESSION_SENTINEL)
+            .to_string();
+        Self {
+            turn_id: turn_id.into(),
+            session_id: sid,
+            request_digest: compute_request_digest(user_text, clipboard, allow_broker_tools),
+            model_key: model_key.into(),
+            execution_mode: execution_mode.into(),
+            privacy,
+        }
+    }
+
+    /// Returns `Some(reason)` when `incoming` attempts to reuse `self.turn_id` with a mismatched
+    /// `session_id`, `privacy`, `request_digest`, `model_key`, or `execution_mode`.
+    pub fn conflict_reason(&self, incoming: &TurnIdentity) -> Option<String> {
+        if self.session_id != LEGACY_WILDCARD_SESSION
+            && incoming.session_id != LEGACY_WILDCARD_SESSION
+            && self.session_id != incoming.session_id
+        {
+            return Some(format!(
+                "turn_id '{}' is already bound to a different session_id",
+                self.turn_id
+            ));
+        }
+        if self.privacy != incoming.privacy {
+            return Some(format!(
+                "turn_id '{}' is already bound to privacy policy {:?} (got {:?})",
+                self.turn_id, self.privacy, incoming.privacy
+            ));
+        }
+        if !self.request_digest.is_empty()
+            && !incoming.request_digest.is_empty()
+            && self.request_digest != incoming.request_digest
+        {
+            return Some(format!(
+                "turn_id '{}' is already bound to a different request_digest",
+                self.turn_id
+            ));
+        }
+        if !self.model_key.is_empty()
+            && !incoming.model_key.is_empty()
+            && self.model_key != incoming.model_key
+        {
+            return Some(format!(
+                "turn_id '{}' is already bound to model_key '{}' (got '{}')",
+                self.turn_id, self.model_key, incoming.model_key
+            ));
+        }
+        if !self.execution_mode.is_empty()
+            && !incoming.execution_mode.is_empty()
+            && self.execution_mode != incoming.execution_mode
+        {
+            return Some(format!(
+                "turn_id '{}' is already bound to execution_mode '{}' (got '{}')",
+                self.turn_id, self.execution_mode, incoming.execution_mode
+            ));
+        }
+        None
+    }
+}
+
+/// Active turn ownership, cancellation & completion-coalescing handle.
 pub struct ActiveTurnHandle {
+    pub instance_seq: u64,
+    pub identity: TurnIdentity,
     pub turn_id: String,
     pub session_id: Option<String>,
     pub task_id: Mutex<Option<String>>,
     cancelled: AtomicBool,
+    aborted: AtomicBool,
+    lifecycle: Mutex<TurnLifecycleState>,
+    terminal_result: Mutex<Option<Value>>,
     notify: Notify,
     pub started_at: Instant,
 }
 
 impl ActiveTurnHandle {
     pub fn new(turn_id: String, session_id: Option<String>) -> Self {
+        let privacy = PrivacySessionPolicy::from_session(false, session_id.as_deref());
+        let identity = TurnIdentity {
+            turn_id: turn_id.clone(),
+            session_id: session_id
+                .clone()
+                .unwrap_or_else(|| ANONYMOUS_SESSION_SENTINEL.to_string()),
+            request_digest: String::new(),
+            model_key: String::new(),
+            execution_mode: String::new(),
+            privacy,
+        };
+        Self::new_registered(0, identity, session_id, Instant::now())
+    }
+
+    fn new_registered(
+        instance_seq: u64,
+        identity: TurnIdentity,
+        session_override: Option<String>,
+        started_at: Instant,
+    ) -> Self {
+        let turn_id = identity.turn_id.clone();
+        let session_id = session_override.or_else(|| {
+            if identity.session_id == LEGACY_WILDCARD_SESSION
+                || identity.session_id == ANONYMOUS_SESSION_SENTINEL
+                || identity.session_id.is_empty()
+            {
+                None
+            } else {
+                Some(identity.session_id.clone())
+            }
+        });
         Self {
+            instance_seq,
+            identity,
             turn_id,
             session_id,
             task_id: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
+            lifecycle: Mutex::new(TurnLifecycleState::Running),
+            terminal_result: Mutex::new(None),
             notify: Notify::new(),
-            started_at: Instant::now(),
+            started_at,
         }
+    }
+
+    pub fn lifecycle_state(&self) -> TurnLifecycleState {
+        *self.lifecycle.lock().unwrap()
+    }
+
+    pub fn terminal_result(&self) -> Option<Value> {
+        self.terminal_result.lock().unwrap().clone()
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    pub fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+
     pub fn cancel(&self) -> bool {
         let was_already = self.cancelled.swap(true, Ordering::SeqCst);
+        {
+            let mut st = self.lifecycle.lock().unwrap();
+            *st = TurnLifecycleState::Cancelled;
+        }
         self.notify.notify_waiters();
         !was_already
     }
 
+    fn set_finished_and_notify(&self, next_state: TurnLifecycleState, result: Value) {
+        {
+            let mut res_guard = self.terminal_result.lock().unwrap();
+            *res_guard = Some(result);
+        }
+        {
+            let mut st_guard = self.lifecycle.lock().unwrap();
+            *st_guard = next_state;
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn mark_aborted_and_notify(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
     pub async fn wait_cancelled(&self) {
         loop {
-            if self.is_cancelled() {
-                return;
-            }
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_cancelled() {
                 return;
             }
             notified.await;
         }
     }
+
+    /// Await completion of an in-flight turn (`AlreadyRunning`).
+    /// Returns `Some(result)` when the leader finishes (or transitions to `PausedApproval`),
+    /// or `None` if the leader turn was cancelled or aborted without a completion payload.
+    pub async fn wait_finished_result(&self) -> Option<Value> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if let Some(res) = self.terminal_result() {
+                return Some(res);
+            }
+            if self.is_cancelled() || self.is_aborted() {
+                return None;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Outcome of atomic turn registration in `TurnRegistry`.
+pub enum TurnRegistrationOutcome {
+    /// Sole active owner (`instance_seq`) authorized to execute side effects and model calls.
+    Started(Arc<ActiveTurnHandle>),
+    /// Identical `TurnIdentity` is already `Running`; await `handle.wait_finished_result().await`
+    /// or return in-progress status without spawning a second agent or second ledger.
+    AlreadyRunning(Arc<ActiveTurnHandle>),
+    /// Identical `TurnIdentity` completed within TTL (`300s`, max `64`) and allows memory write.
+    IdempotentReplay(Value),
+    /// Same `turn_id` submitted with different `session_id`, `request_digest`, `privacy`, or mode.
+    Conflict { reason: String },
+    /// Turn was cancelled prior to or during execution.
+    PreCancelled,
 }
 
 pub(crate) enum TurnStartOutcome {
@@ -301,160 +563,480 @@ pub(crate) enum TurnStartOutcome {
     PreCancelled,
 }
 
-pub(crate) static ACTIVE_TURNS: OnceLock<Mutex<HashMap<String, Arc<ActiveTurnHandle>>>> =
-    OnceLock::new();
-pub(crate) static RECENT_COMPLETED_TURNS: OnceLock<Mutex<VecDeque<(String, Value)>>> =
-    OnceLock::new();
-static CANCELLED_TURN_IDS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-
-fn active_turns() -> &'static Mutex<HashMap<String, Arc<ActiveTurnHandle>>> {
-    ACTIVE_TURNS.get_or_init(|| Mutex::new(HashMap::new()))
+struct ActiveTurnEntry {
+    instance_seq: u64,
+    handle: Arc<ActiveTurnHandle>,
 }
 
-fn recent_completed_turns() -> &'static Mutex<VecDeque<(String, Value)>> {
-    RECENT_COMPLETED_TURNS.get_or_init(|| Mutex::new(VecDeque::new()))
+#[derive(Clone)]
+struct CompletedTurnEntry {
+    #[allow(dead_code)]
+    instance_seq: u64,
+    identity: TurnIdentity,
+    state: TurnLifecycleState,
+    result: Value,
+    completed_at: Instant,
 }
 
-fn cancelled_turn_ids() -> &'static Mutex<VecDeque<String>> {
-    CANCELLED_TURN_IDS.get_or_init(|| Mutex::new(VecDeque::new()))
+#[derive(Clone)]
+struct CancelledTurnEntry {
+    turn_id: String,
+    instance_seq: Option<u64>,
+    identity: Option<TurnIdentity>,
+    cancelled_at: Instant,
 }
 
-fn record_cancelled_id(turn_id: &str) {
-    let mut c = cancelled_turn_ids().lock().unwrap();
-    if !c.iter().any(|id| id == turn_id) {
-        if c.len() >= 128 {
-            c.pop_front();
-        }
-        c.push_back(turn_id.to_string());
+/// Single atomic state machine managing active, paused-approval, finished, and cancelled turns.
+pub struct TurnRegistry {
+    next_instance_seq: u64,
+    active: HashMap<String, ActiveTurnEntry>,
+    completed: VecDeque<CompletedTurnEntry>,
+    cancelled: VecDeque<CancelledTurnEntry>,
+    completed_tombstones: VecDeque<(String, Instant)>,
+}
+
+impl Default for TurnRegistry {
+    fn default() -> Self {
+        Self::new()
     }
+}
+
+impl TurnRegistry {
+    pub fn new() -> Self {
+        Self {
+            next_instance_seq: 0,
+            active: HashMap::new(),
+            completed: VecDeque::new(),
+            cancelled: VecDeque::new(),
+            completed_tombstones: VecDeque::new(),
+        }
+    }
+
+    fn evict_expired(&mut self, now: Instant) {
+        self.completed
+            .retain(|e| now.saturating_duration_since(e.completed_at) <= COMPLETED_TURN_CACHE_TTL);
+        self.cancelled
+            .retain(|e| now.saturating_duration_since(e.cancelled_at) <= CANCELLED_TURN_CACHE_TTL);
+        self.completed_tombstones
+            .retain(|(_, ts)| now.saturating_duration_since(*ts) <= COMPLETED_TURN_CACHE_TTL);
+    }
+
+    fn push_cancelled_entry(&mut self, entry: CancelledTurnEntry) {
+        if let Some(existing) = self
+            .cancelled
+            .iter_mut()
+            .find(|c| c.turn_id == entry.turn_id)
+        {
+            if entry.instance_seq.is_some() {
+                existing.instance_seq = entry.instance_seq;
+            }
+            if entry.identity.is_some() {
+                existing.identity = entry.identity;
+            }
+            existing.cancelled_at = entry.cancelled_at;
+            return;
+        }
+        while self.cancelled.len() >= MAX_CANCELLED_TURN_CACHE {
+            self.cancelled.pop_front();
+        }
+        self.cancelled.push_back(entry);
+    }
+
+    fn push_completed_tombstone(&mut self, turn_id: &str, now: Instant) {
+        if let Some(existing) = self
+            .completed_tombstones
+            .iter_mut()
+            .find(|(id, _)| id == turn_id)
+        {
+            existing.1 = now;
+            return;
+        }
+        while self.completed_tombstones.len() >= MAX_COMPLETED_TURN_CACHE {
+            self.completed_tombstones.pop_front();
+        }
+        self.completed_tombstones
+            .push_back((turn_id.to_string(), now));
+    }
+
+    pub fn register_or_join_at(
+        &mut self,
+        identity: TurnIdentity,
+        session_override: Option<String>,
+        now: Instant,
+    ) -> TurnRegistrationOutcome {
+        self.evict_expired(now);
+
+        if let Some(active_entry) = self.active.get(&identity.turn_id) {
+            if let Some(reason) = active_entry.handle.identity.conflict_reason(&identity) {
+                return TurnRegistrationOutcome::Conflict { reason };
+            }
+            if active_entry.handle.is_cancelled()
+                || active_entry.handle.lifecycle_state() == TurnLifecycleState::Cancelled
+            {
+                return TurnRegistrationOutcome::PreCancelled;
+            }
+            return TurnRegistrationOutcome::AlreadyRunning(active_entry.handle.clone());
+        }
+
+        if let Some(cancel_entry) = self
+            .cancelled
+            .iter()
+            .find(|c| c.turn_id == identity.turn_id)
+        {
+            if let Some(ref orig_id) = cancel_entry.identity
+                && let Some(reason) = orig_id.conflict_reason(&identity)
+            {
+                return TurnRegistrationOutcome::Conflict { reason };
+            }
+            return TurnRegistrationOutcome::PreCancelled;
+        }
+
+        if let Some(comp_entry) = self
+            .completed
+            .iter()
+            .find(|c| c.identity.turn_id == identity.turn_id)
+        {
+            if let Some(reason) = comp_entry.identity.conflict_reason(&identity) {
+                return TurnRegistrationOutcome::Conflict { reason };
+            }
+            if identity.privacy.allows_memory_write()
+                && comp_entry.identity.privacy.allows_memory_write()
+            {
+                return TurnRegistrationOutcome::IdempotentReplay(comp_entry.result.clone());
+            }
+        }
+
+        self.next_instance_seq += 1;
+        let seq = self.next_instance_seq;
+        let handle = Arc::new(ActiveTurnHandle::new_registered(
+            seq,
+            identity.clone(),
+            session_override,
+            now,
+        ));
+        self.active.insert(
+            identity.turn_id,
+            ActiveTurnEntry {
+                instance_seq: seq,
+                handle: handle.clone(),
+            },
+        );
+        TurnRegistrationOutcome::Started(handle)
+    }
+
+    pub fn complete_turn_at(
+        &mut self,
+        handle: &Arc<ActiveTurnHandle>,
+        result: Value,
+        cache_for_replay: bool,
+        now: Instant,
+    ) -> bool {
+        self.evict_expired(now);
+
+        let was_cancelled = handle.is_cancelled()
+            || self.cancelled.iter().any(|c| {
+                c.turn_id == handle.turn_id
+                    && (c.instance_seq.is_none() || c.instance_seq == Some(handle.instance_seq))
+            });
+
+        if was_cancelled {
+            if self
+                .active
+                .get(&handle.turn_id)
+                .is_some_and(|e| e.instance_seq == handle.instance_seq)
+            {
+                self.active.remove(&handle.turn_id);
+            }
+            handle.cancel();
+            return false;
+        }
+
+        let is_current_owner = self
+            .active
+            .get(&handle.turn_id)
+            .is_some_and(|e| e.instance_seq == handle.instance_seq);
+        if !is_current_owner {
+            handle.mark_aborted_and_notify();
+            return false;
+        }
+
+        self.active.remove(&handle.turn_id);
+
+        let is_paused_approval = result.get("status").and_then(|v| v.as_str())
+            == Some("awaiting_approval")
+            || result.get("pending_approval").is_some_and(|v| !v.is_null());
+        let next_state = if is_paused_approval {
+            TurnLifecycleState::PausedApproval
+        } else {
+            TurnLifecycleState::Finished
+        };
+
+        handle.set_finished_and_notify(next_state, result.clone());
+
+        if handle.identity.privacy.allows_memory_write() {
+            self.push_completed_tombstone(&handle.turn_id, now);
+        }
+
+        if cache_for_replay && handle.identity.privacy.allows_memory_write() {
+            self.completed
+                .retain(|c| c.identity.turn_id != handle.turn_id);
+            while self.completed.len() >= MAX_COMPLETED_TURN_CACHE {
+                self.completed.pop_front();
+            }
+            self.completed.push_back(CompletedTurnEntry {
+                instance_seq: handle.instance_seq,
+                identity: handle.identity.clone(),
+                state: next_state,
+                result,
+                completed_at: now,
+            });
+        }
+
+        true
+    }
+
+    pub fn abort_turn(&mut self, handle: &Arc<ActiveTurnHandle>) -> bool {
+        let removed = if self
+            .active
+            .get(&handle.turn_id)
+            .is_some_and(|e| e.instance_seq == handle.instance_seq)
+        {
+            self.active.remove(&handle.turn_id);
+            true
+        } else {
+            false
+        };
+        handle.mark_aborted_and_notify();
+        removed
+    }
+
+    pub fn lifecycle_state(&mut self, turn_id: &str, now: Instant) -> Option<TurnLifecycleState> {
+        self.evict_expired(now);
+        if let Some(active) = self.active.get(turn_id) {
+            return Some(active.handle.lifecycle_state());
+        }
+        if self.cancelled.iter().any(|c| c.turn_id == turn_id) {
+            return Some(TurnLifecycleState::Cancelled);
+        }
+        if let Some(comp) = self
+            .completed
+            .iter()
+            .find(|c| c.identity.turn_id == turn_id)
+        {
+            return Some(comp.state);
+        }
+        if self
+            .completed_tombstones
+            .iter()
+            .any(|(id, _)| id == turn_id)
+        {
+            return Some(TurnLifecycleState::Finished);
+        }
+        None
+    }
+}
+
+static TURN_REGISTRY: OnceLock<Mutex<TurnRegistry>> = OnceLock::new();
+
+fn turn_registry() -> &'static Mutex<TurnRegistry> {
+    TURN_REGISTRY.get_or_init(|| Mutex::new(TurnRegistry::new()))
+}
+
+/// Atomically register a new turn or coalesce/reject concurrent and replayed requests
+/// according to `TurnIdentity` (`session_id`, `request_digest`, `model_key`, `execution_mode`, `privacy`).
+pub fn register_or_join_turn(identity: TurnIdentity) -> TurnRegistrationOutcome {
+    turn_registry()
+        .lock()
+        .unwrap()
+        .register_or_join_at(identity, None, Instant::now())
+}
+
+/// Atomically transition an active turn owned by `handle` (`instance_seq` verified) from
+/// `Running` -> `Finished` (or `PausedApproval`), notify any `AlreadyRunning` waiters, and
+/// optionally insert into the TTL-bounded replay cache when `privacy.allows_memory_write()`.
+pub fn complete_turn_atomic(
+    handle: &Arc<ActiveTurnHandle>,
+    result: Value,
+    cache_for_replay: bool,
+) -> bool {
+    turn_registry().lock().unwrap().complete_turn_at(
+        handle,
+        result,
+        cache_for_replay,
+        Instant::now(),
+    )
+}
+
+/// Safely release an active turn slot owned by `handle` (`instance_seq` verified) without
+/// caching a replay outcome, waking any `AlreadyRunning` waiters so they never hang.
+pub fn abort_turn_atomic(handle: &Arc<ActiveTurnHandle>) -> bool {
+    turn_registry().lock().unwrap().abort_turn(handle)
+}
+
+/// Inspect the current `TurnLifecycleState` of `turn_id` in `TurnRegistry`.
+pub fn turn_lifecycle_state(turn_id: &str) -> Option<TurnLifecycleState> {
+    turn_registry()
+        .lock()
+        .unwrap()
+        .lifecycle_state(turn_id, Instant::now())
 }
 
 pub(crate) fn begin_turn(turn_id: &str, session_id: Option<&str>) -> TurnStartOutcome {
-    if let Some((_, cached)) = recent_completed_turns()
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(id, _)| id == turn_id)
-        .cloned()
-    {
-        return TurnStartOutcome::IdempotentReplay(cached);
-    }
-
-    if cancelled_turn_ids()
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|id| id == turn_id)
-    {
-        return TurnStartOutcome::PreCancelled;
-    }
-
-    let mut active_map = active_turns().lock().unwrap();
-    if let Some(existing) = active_map.get(turn_id)
-        && existing.is_cancelled()
-    {
-        return TurnStartOutcome::PreCancelled;
-    }
-
-    let handle = Arc::new(ActiveTurnHandle::new(
-        turn_id.to_string(),
+    let privacy = PrivacySessionPolicy::from_session(false, session_id);
+    let identity = TurnIdentity {
+        turn_id: turn_id.to_string(),
+        session_id: LEGACY_WILDCARD_SESSION.to_string(),
+        request_digest: String::new(),
+        model_key: String::new(),
+        execution_mode: String::new(),
+        privacy,
+    };
+    let outcome = turn_registry().lock().unwrap().register_or_join_at(
+        identity,
         session_id.map(String::from),
-    ));
-    active_map.insert(turn_id.to_string(), handle.clone());
-    TurnStartOutcome::Started(handle)
+        Instant::now(),
+    );
+    match outcome {
+        TurnRegistrationOutcome::Started(h) | TurnRegistrationOutcome::AlreadyRunning(h) => {
+            TurnStartOutcome::Started(h)
+        }
+        TurnRegistrationOutcome::IdempotentReplay(cached) => {
+            TurnStartOutcome::IdempotentReplay(cached)
+        }
+        TurnRegistrationOutcome::PreCancelled | TurnRegistrationOutcome::Conflict { .. } => {
+            TurnStartOutcome::PreCancelled
+        }
+    }
 }
 
 pub(crate) fn complete_turn(turn_id: &str, result: Value, cache_for_replay: bool) {
-    active_turns().lock().unwrap().remove(turn_id);
-    if cache_for_replay {
-        let mut comp = recent_completed_turns().lock().unwrap();
-        if !comp.iter().any(|(id, _)| id == turn_id) {
-            if comp.len() >= 64 {
-                comp.pop_front();
-            }
-            comp.push_back((turn_id.to_string(), result));
-        }
+    let mut reg = turn_registry().lock().unwrap();
+    if let Some(handle) = reg.active.get(turn_id).map(|e| e.handle.clone()) {
+        reg.complete_turn_at(&handle, result, cache_for_replay, Instant::now());
     }
 }
 
 pub(crate) fn remove_active_turn(turn_id: &str) {
-    active_turns().lock().unwrap().remove(turn_id);
+    let mut reg = turn_registry().lock().unwrap();
+    if let Some(handle) = reg.active.get(turn_id).map(|e| e.handle.clone()) {
+        reg.abort_turn(&handle);
+    }
 }
 
 pub fn cancel_turn(core: &IntentOsCore, payload: &Value) -> Value {
     let target_turn_id = payload.get("turn_id").and_then(|v| v.as_str());
     let target_session_id = payload.get("session_id").and_then(|v| v.as_str());
+    let now = Instant::now();
 
     if let Some(tid) = target_turn_id.map(str::trim).filter(|s| !s.is_empty()) {
-        let maybe_handle = active_turns().lock().unwrap().get(tid).cloned();
-        if let Some(handle) = maybe_handle {
-            let first_cancel = handle.cancel();
-            if let Some(ref task_id) = *handle.task_id.lock().unwrap() {
-                core.gateway.cancel_task_leases(task_id);
+        let mut task_to_cancel: Option<String> = None;
+        let response = {
+            let mut reg = turn_registry().lock().unwrap();
+            reg.evict_expired(now);
+
+            if let Some(active_entry) = reg.active.remove(tid) {
+                let first_cancel = active_entry.handle.cancel();
+                task_to_cancel = active_entry.handle.task_id.lock().unwrap().clone();
+                reg.push_cancelled_entry(CancelledTurnEntry {
+                    turn_id: tid.to_string(),
+                    instance_seq: Some(active_entry.instance_seq),
+                    identity: Some(active_entry.handle.identity.clone()),
+                    cancelled_at: now,
+                });
+                json!({
+                    "ok": true,
+                    "turn_id": tid,
+                    "status": if first_cancel { "cancelled" } else { "already_cancelled" },
+                    "was_running": first_cancel,
+                    "idempotent": !first_cancel,
+                })
+            } else if reg.cancelled.iter().any(|c| c.turn_id == tid) {
+                json!({
+                    "ok": true,
+                    "turn_id": tid,
+                    "status": "already_cancelled",
+                    "was_running": false,
+                    "idempotent": true,
+                })
+            } else if reg.completed.iter().any(|c| c.identity.turn_id == tid)
+                || reg.completed_tombstones.iter().any(|(id, _)| id == tid)
+            {
+                json!({
+                    "ok": true,
+                    "turn_id": tid,
+                    "status": "already_completed",
+                    "was_running": false,
+                    "idempotent": true,
+                })
+            } else {
+                reg.push_cancelled_entry(CancelledTurnEntry {
+                    turn_id: tid.to_string(),
+                    instance_seq: None,
+                    identity: None,
+                    cancelled_at: now,
+                });
+                json!({
+                    "ok": true,
+                    "turn_id": tid,
+                    "status": "cancelled",
+                    "was_running": false,
+                    "idempotent": false,
+                })
             }
-            record_cancelled_id(tid);
-            return json!({
-                "ok": true,
-                "turn_id": tid,
-                "status": if first_cancel { "cancelled" } else { "already_cancelled" },
-                "was_running": first_cancel,
-                "idempotent": !first_cancel,
-            });
+        };
+
+        if let Some(ref task_id) = task_to_cancel {
+            core.gateway.cancel_task_leases(task_id);
         }
-
-        let already_cancelled = cancelled_turn_ids()
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|id| id == tid);
-        let already_completed = recent_completed_turns()
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(id, _)| id == tid);
-
-        if already_completed {
-            return json!({
-                "ok": true,
-                "turn_id": tid,
-                "status": "already_completed",
-                "was_running": false,
-                "idempotent": true,
-            });
-        }
-
-        // Pre-register cancellation so an arriving turn with this `turn_id` aborts immediately
-        record_cancelled_id(tid);
-        return json!({
-            "ok": true,
-            "turn_id": tid,
-            "status": if already_cancelled { "already_cancelled" } else { "cancelled" },
-            "was_running": false,
-            "idempotent": already_cancelled,
-        });
+        return response;
     }
 
     // Cancel by `session_id` or latest active turn
-    let target_handle = {
-        let map = active_turns().lock().unwrap();
-        if let Some(sid) = target_session_id.map(str::trim).filter(|s| !s.is_empty()) {
-            map.values()
-                .find(|h| h.session_id.as_deref() == Some(sid))
-                .cloned()
+    let mut task_to_cancel: Option<String> = None;
+    let cancelled_info = {
+        let mut reg = turn_registry().lock().unwrap();
+        reg.evict_expired(now);
+        let target_key =
+            if let Some(sid) = target_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+                reg.active
+                    .iter()
+                    .find(|(_, e)| {
+                        e.handle.session_id.as_deref() == Some(sid)
+                            || e.handle.identity.session_id == sid
+                    })
+                    .map(|(k, _)| k.clone())
+            } else {
+                reg.active
+                    .iter()
+                    .max_by_key(|(_, e)| e.handle.started_at)
+                    .map(|(k, _)| k.clone())
+            };
+
+        if let Some(tid) = target_key
+            && let Some(active_entry) = reg.active.remove(&tid)
+        {
+            let first_cancel = active_entry.handle.cancel();
+            task_to_cancel = active_entry.handle.task_id.lock().unwrap().clone();
+            reg.push_cancelled_entry(CancelledTurnEntry {
+                turn_id: tid.clone(),
+                instance_seq: Some(active_entry.instance_seq),
+                identity: Some(active_entry.handle.identity.clone()),
+                cancelled_at: now,
+            });
+            Some((tid, first_cancel))
         } else {
-            map.values().max_by_key(|h| h.started_at).cloned()
+            None
         }
     };
 
-    if let Some(handle) = target_handle {
-        let first_cancel = handle.cancel();
-        if let Some(ref task_id) = *handle.task_id.lock().unwrap() {
-            core.gateway.cancel_task_leases(task_id);
-        }
-        record_cancelled_id(&handle.turn_id);
+    if let Some(ref task_id) = task_to_cancel {
+        core.gateway.cancel_task_leases(task_id);
+    }
+
+    if let Some((tid, first_cancel)) = cancelled_info {
         json!({
             "ok": true,
-            "turn_id": handle.turn_id,
+            "turn_id": tid,
             "status": if first_cancel { "cancelled" } else { "already_cancelled" },
             "was_running": first_cancel,
             "idempotent": !first_cancel,
@@ -926,4 +1508,401 @@ pub(crate) fn build_denied_resume_response(
     });
     scrub_json_secrets(&mut resp);
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn h01_ten_concurrent_identical_turn_requests_execute_side_effect_once() {
+        let turn_id = format!("h01_conc_{}", uuid::Uuid::new_v4().simple());
+        let base_identity = TurnIdentity::from_request(
+            &turn_id,
+            Some("ses_h01_alpha"),
+            "set volume to 35%",
+            None,
+            true,
+            "openai:gpt-4o-mini",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+
+        let barrier = Arc::new(Barrier::new(10));
+        let side_effect_runs = Arc::new(AtomicUsize::new(0));
+        let started_count = Arc::new(AtomicUsize::new(0));
+        let joined_count = Arc::new(AtomicUsize::new(0));
+
+        let mut joins = Vec::with_capacity(10);
+        for _ in 0..10 {
+            let b = barrier.clone();
+            let id = base_identity.clone();
+            let se = side_effect_runs.clone();
+            let sc = started_count.clone();
+            let jc = joined_count.clone();
+            joins.push(tokio::spawn(async move {
+                b.wait().await;
+                match register_or_join_turn(id) {
+                    TurnRegistrationOutcome::Started(handle) => {
+                        sc.fetch_add(1, Ordering::SeqCst);
+                        // Hold active ownership briefly while sibling tasks hit AlreadyRunning
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        se.fetch_add(1, Ordering::SeqCst);
+                        let res = json!({
+                            "turn_id": handle.turn_id,
+                            "task_id": "task_sole_owner_01",
+                            "session_id": "ses_h01_alpha",
+                            "status": "completed",
+                            "reply": "Volume set to 35%",
+                        });
+                        assert!(complete_turn_atomic(&handle, res.clone(), true));
+                        res
+                    }
+                    TurnRegistrationOutcome::AlreadyRunning(handle) => {
+                        jc.fetch_add(1, Ordering::SeqCst);
+                        handle
+                            .wait_finished_result()
+                            .await
+                            .expect("AlreadyRunning follower must receive finished result")
+                    }
+                    TurnRegistrationOutcome::IdempotentReplay(cached) => {
+                        jc.fetch_add(1, Ordering::SeqCst);
+                        cached
+                    }
+                    TurnRegistrationOutcome::Conflict { reason } => {
+                        panic!("unexpected Conflict for identical TurnIdentity: {reason}")
+                    }
+                    TurnRegistrationOutcome::PreCancelled => {
+                        panic!("unexpected PreCancelled")
+                    }
+                }
+            }));
+        }
+
+        let mut results = Vec::with_capacity(10);
+        for j in joins {
+            results.push(j.await.unwrap());
+        }
+
+        assert_eq!(
+            side_effect_runs.load(Ordering::SeqCst),
+            1,
+            "side effect closure must execute strictly once across 10 concurrent callers"
+        );
+        assert_eq!(started_count.load(Ordering::SeqCst), 1);
+        assert_eq!(joined_count.load(Ordering::SeqCst), 9);
+        for r in &results {
+            assert_eq!(r["task_id"], "task_sole_owner_01");
+            assert_eq!(r["reply"], "Volume set to 35%");
+            assert_eq!(r["status"], "completed");
+        }
+
+        // Subsequent identical request within TTL gets IdempotentReplay
+        match register_or_join_turn(base_identity) {
+            TurnRegistrationOutcome::IdempotentReplay(replayed) => {
+                assert_eq!(replayed["task_id"], "task_sole_owner_01");
+            }
+            _ => panic!("expected IdempotentReplay on sequential retry within TTL"),
+        }
+    }
+
+    #[test]
+    fn h01_conflict_on_mismatched_session_payload_privacy_and_ephemeral_isolation() {
+        let turn_id = format!("h01_conflict_{}", uuid::Uuid::new_v4().simple());
+        let id_owner = TurnIdentity::from_request(
+            &turn_id,
+            Some("ses_owner"),
+            "summarize ~/notes/work.md",
+            Some("clip_a"),
+            true,
+            "openai:gpt-4o",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+
+        let handle = match register_or_join_turn(id_owner.clone()) {
+            TurnRegistrationOutcome::Started(h) => h,
+            _ => panic!("expected Started"),
+        };
+
+        // 1. Different session_id while Running -> Conflict
+        let diff_session = TurnIdentity::from_request(
+            &turn_id,
+            Some("ses_attacker"),
+            "summarize ~/notes/work.md",
+            Some("clip_a"),
+            true,
+            "openai:gpt-4o",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        assert!(matches!(
+            register_or_join_turn(diff_session.clone()),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+
+        // 2. Different request payload (user_text or allow_broker_tools) while Running -> Conflict
+        let diff_payload = TurnIdentity::from_request(
+            &turn_id,
+            Some("ses_owner"),
+            "delete ~/notes/work.md",
+            Some("clip_a"),
+            true,
+            "openai:gpt-4o",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        assert!(matches!(
+            register_or_join_turn(diff_payload.clone()),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+
+        // 3. Different privacy policy while Running -> Conflict
+        let diff_privacy = TurnIdentity::from_request(
+            &turn_id,
+            Some("ses_owner"),
+            "summarize ~/notes/work.md",
+            Some("clip_a"),
+            true,
+            "openai:gpt-4o",
+            "managed_broker_tools",
+            PrivacySessionPolicy::StrictIsolated,
+        );
+        assert!(matches!(
+            register_or_join_turn(diff_privacy.clone()),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+
+        assert!(complete_turn_atomic(
+            &handle,
+            json!({ "turn_id": turn_id, "reply": "private_owner_summary", "status": "completed" }),
+            true
+        ));
+
+        // 4. After completion, cross-session / tampered payload / privacy mismatch STILL Conflict (never leaks cache!)
+        assert!(matches!(
+            register_or_join_turn(diff_session),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+        assert!(matches!(
+            register_or_join_turn(diff_payload),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+        assert!(matches!(
+            register_or_join_turn(diff_privacy),
+            TurnRegistrationOutcome::Conflict { .. }
+        ));
+
+        // 5. StrictIsolated & EphemeralReadOnly never cache finished payload for replay
+        for priv_policy in [
+            PrivacySessionPolicy::EphemeralReadOnly,
+            PrivacySessionPolicy::StrictIsolated,
+        ] {
+            let p_turn = format!("h01_priv_{}", uuid::Uuid::new_v4().simple());
+            let pid = TurnIdentity::from_request(
+                &p_turn,
+                Some("ses_priv"),
+                "inspect system status",
+                None,
+                true,
+                "openai:gpt-4o-mini",
+                "managed_broker_tools",
+                priv_policy,
+            );
+            let ph = match register_or_join_turn(pid.clone()) {
+                TurnRegistrationOutcome::Started(h) => h,
+                _ => panic!("expected Started for non-persistent privacy policy"),
+            };
+            assert!(complete_turn_atomic(
+                &ph,
+                json!({ "turn_id": p_turn, "reply": "ephemeral_secret", "status": "completed" }),
+                true
+            ));
+            // Must NOT return IdempotentReplay because !privacy.allows_memory_write()
+            match register_or_join_turn(pid) {
+                TurnRegistrationOutcome::Started(ph2) => {
+                    abort_turn_atomic(&ph2);
+                }
+                TurnRegistrationOutcome::IdempotentReplay(_) => {
+                    panic!(
+                        "Privacy policy {:?} must NEVER retain or replay cached turn outputs!",
+                        priv_policy
+                    );
+                }
+                _ => panic!("unexpected registration outcome"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn h01_cancel_vs_complete_race_stale_instance_seq_and_ttl_capacity_eviction() {
+        let now = Instant::now();
+        let mut reg = TurnRegistry::new();
+
+        // A. Cancel wins before complete_turn_at -> complete_turn_at rejected, stays Cancelled
+        let id_cancel_wins = TurnIdentity::from_request(
+            "turn_race_cancel_wins",
+            Some("ses_race"),
+            "long task",
+            None,
+            true,
+            "openai:gpt-4o-mini",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        let h_cancel = match reg.register_or_join_at(id_cancel_wins.clone(), None, now) {
+            TurnRegistrationOutcome::Started(h) => h,
+            _ => panic!("expected Started"),
+        };
+        let waiter_handle = h_cancel.clone();
+        let waiter = tokio::spawn(async move { waiter_handle.wait_finished_result().await });
+
+        h_cancel.cancel();
+        reg.push_cancelled_entry(CancelledTurnEntry {
+            turn_id: "turn_race_cancel_wins".to_string(),
+            instance_seq: Some(h_cancel.instance_seq),
+            identity: Some(id_cancel_wins.clone()),
+            cancelled_at: now,
+        });
+
+        assert!(
+            !reg.complete_turn_at(
+                &h_cancel,
+                json!({ "status": "completed", "reply": "late_finish" }),
+                true,
+                now
+            ),
+            "cancelled turn must never overwrite Cancelled state with Finished"
+        );
+        assert_eq!(
+            reg.lifecycle_state("turn_race_cancel_wins", now),
+            Some(TurnLifecycleState::Cancelled)
+        );
+        assert!(
+            waiter.await.unwrap().is_none(),
+            "AlreadyRunning waiter must wake with None on cancellation"
+        );
+        assert!(matches!(
+            reg.register_or_join_at(id_cancel_wins, None, now),
+            TurnRegistrationOutcome::PreCancelled
+        ));
+
+        // B. Stale instance_seq handle must NEVER evict or overwrite newer turn owner
+        let id_stale = TurnIdentity::from_request(
+            "turn_stale_seq",
+            Some("ses_stale"),
+            "query status",
+            None,
+            true,
+            "openai:gpt-4o-mini",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        let h1 = match reg.register_or_join_at(id_stale.clone(), None, now) {
+            TurnRegistrationOutcome::Started(h) => h,
+            _ => panic!("expected Started h1"),
+        };
+        assert!(reg.abort_turn(&h1));
+
+        let h2 = match reg.register_or_join_at(id_stale.clone(), None, now) {
+            TurnRegistrationOutcome::Started(h) => h,
+            _ => panic!("expected Started h2"),
+        };
+        assert!(h2.instance_seq > h1.instance_seq);
+
+        // Stale h1 tries to abort and complete while h2 is active -> both rejected!
+        assert!(!reg.abort_turn(&h1));
+        assert!(!reg.complete_turn_at(
+            &h1,
+            json!({ "status": "completed", "reply": "stale_h1" }),
+            true,
+            now
+        ));
+        assert_eq!(
+            reg.lifecycle_state("turn_stale_seq", now),
+            Some(TurnLifecycleState::Running)
+        );
+
+        // Valid owner h2 completes cleanly into PausedApproval when pending_approval is set
+        assert!(reg.complete_turn_at(
+            &h2,
+            json!({
+                "status": "awaiting_approval",
+                "pending_approval": { "approval_id": "apr_1" }
+            }),
+            true,
+            now
+        ));
+        assert_eq!(
+            reg.lifecycle_state("turn_stale_seq", now),
+            Some(TurnLifecycleState::PausedApproval)
+        );
+
+        // C. 300s TTL eviction & 64-entry max capacity eviction
+        let mut reg_ttl = TurnRegistry::new();
+        for idx in 0..(MAX_COMPLETED_TURN_CACHE + 1) {
+            let tid = format!("turn_cap_{idx}");
+            let tid_ident = TurnIdentity::from_request(
+                &tid,
+                Some("ses_cap"),
+                &format!("cmd {idx}"),
+                None,
+                true,
+                "openai:gpt-4o-mini",
+                "managed_broker_tools",
+                PrivacySessionPolicy::Standard,
+            );
+            let h = match reg_ttl.register_or_join_at(tid_ident, None, now) {
+                TurnRegistrationOutcome::Started(h) => h,
+                _ => panic!("expected Started"),
+            };
+            assert!(reg_ttl.complete_turn_at(
+                &h,
+                json!({ "idx": idx, "status": "completed" }),
+                true,
+                now
+            ));
+        }
+        // Entry 0 was evicted by capacity cap (64); entry 1 is still cached at t = now + 299s
+        let id_0 = TurnIdentity::from_request(
+            "turn_cap_0",
+            Some("ses_cap"),
+            "cmd 0",
+            None,
+            true,
+            "openai:gpt-4o-mini",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        match reg_ttl.register_or_join_at(id_0, None, now) {
+            TurnRegistrationOutcome::Started(h0) => {
+                reg_ttl.abort_turn(&h0);
+            }
+            _ => panic!("oldest entry beyond MAX_COMPLETED_TURN_CACHE (64) must be evicted"),
+        }
+
+        let id_1 = TurnIdentity::from_request(
+            "turn_cap_1",
+            Some("ses_cap"),
+            "cmd 1",
+            None,
+            true,
+            "openai:gpt-4o-mini",
+            "managed_broker_tools",
+            PrivacySessionPolicy::Standard,
+        );
+        assert!(matches!(
+            reg_ttl.register_or_join_at(id_1.clone(), None, now + Duration::from_secs(299)),
+            TurnRegistrationOutcome::IdempotentReplay(_)
+        ));
+        // Past 300s TTL -> evicted, starts fresh!
+        match reg_ttl.register_or_join_at(id_1, None, now + Duration::from_secs(301)) {
+            TurnRegistrationOutcome::Started(h_fresh) => {
+                reg_ttl.abort_turn(&h_fresh);
+            }
+            _ => panic!("completed entry older than 300s TTL must be evicted"),
+        }
+    }
 }
