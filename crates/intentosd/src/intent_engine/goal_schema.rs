@@ -28,7 +28,11 @@ pub enum CognitiveIntentKind {
     #[serde(alias = "SystemDiagnosis", alias = "diagnosis")]
     SystemDiagnosis,
     /// How-to / procedural / command-guidance or open knowledge query (`怎么批量查找最近7天修改过的日志`).
-    #[serde(alias = "ProceduralOrKnowledge", alias = "procedural", alias = "knowledge")]
+    #[serde(
+        alias = "ProceduralOrKnowledge",
+        alias = "procedural",
+        alias = "knowledge"
+    )]
     ProceduralOrKnowledge,
     /// Multi-goal or cross-domain sequential request (`帮我看下今天的天气，告诉我早上起床穿什么衣服，然后告诉我今天最应该完成哪些任务`).
     #[serde(alias = "CompoundTask", alias = "compound")]
@@ -122,7 +126,11 @@ impl StructuredIntent {
             self.goal
         )];
         if !self.sub_goals.is_empty() {
-            parts.push(format!("子目标({})：{}", self.sub_goals.len(), self.sub_goals.join("；")));
+            parts.push(format!(
+                "子目标({})：{}",
+                self.sub_goals.len(),
+                self.sub_goals.join("；")
+            ));
         }
         if !self.constraints.is_empty() {
             parts.push(format!("约束：{}", self.constraints.join("、")));

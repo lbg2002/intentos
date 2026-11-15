@@ -15,13 +15,9 @@
 //! on any candidate item (`file`, `app`, `web`, `setting`, `skill`).
 
 use crate::core::IntentOsCore;
-use crate::intent_engine::fuzzy_scorer::{
-    MatchTier, rank_capabilities, score_query_against_term,
-};
+use crate::intent_engine::fuzzy_scorer::{MatchTier, rank_capabilities, score_query_against_term};
 use crate::intent_engine::pattern_compiler::PatternCompiler;
-use crate::intent_engine::slot_extractor::{
-    extract_slots_for_descriptor, extract_universal_slots,
-};
+use crate::intent_engine::slot_extractor::{extract_slots_for_descriptor, extract_universal_slots};
 use crate::resource::{FileSearchFilter, FileSortOrder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -217,7 +213,11 @@ pub fn get_candidate_actions(
             if let Some(site) = core.resources.find_site(target_str)
                 && site.search.is_some()
             {
-                let site_display = site.names.first().cloned().unwrap_or_else(|| site.id.clone());
+                let site_display = site
+                    .names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| site.id.clone());
                 actions.push(CandidateAction {
                     id: "search_site".to_string(),
                     title: format!("在 {} 中站内搜索...", site_display),
@@ -351,7 +351,7 @@ pub fn query_grouped_candidates(
                 let default_args = extract_slots_for_descriptor(
                     desc,
                     desc.aliases.first().map(|s| s.as_str()).unwrap_or(&desc.id),
-                    & std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
                     &core.resources,
                 );
                 let actions = get_candidate_actions(
@@ -374,7 +374,11 @@ pub fn query_grouped_candidates(
                     capability_id: Some(desc.id.clone()),
                     arguments: default_args,
                     target: None,
-                    completion_text: desc.aliases.first().cloned().unwrap_or_else(|| desc.id.clone()),
+                    completion_text: desc
+                        .aliases
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| desc.id.clone()),
                     actions,
                 });
             }
@@ -386,12 +390,8 @@ pub fn query_grouped_candidates(
             let Some(desc) = core.broker.get_descriptor(&sc.capability_id) else {
                 continue;
             };
-            let args = extract_slots_for_descriptor(
-                desc,
-                trimmed,
-                &sc.captured_slots,
-                &core.resources,
-            );
+            let args =
+                extract_slots_for_descriptor(desc, trimmed, &sc.captured_slots, &core.resources);
             let is_setting = desc.category == "settings"
                 || desc.setting.is_some()
                 || desc.id.starts_with("sound.")
@@ -404,12 +404,14 @@ pub fn query_grouped_candidates(
                 || desc.id == "scene.apply";
 
             let kind = if is_setting { "setting" } else { "skill" };
-            let actions =
-                get_candidate_actions(core, &desc.id, kind, None, Some(&desc.id), &args);
+            let actions = get_candidate_actions(core, &desc.id, kind, None, Some(&desc.id), &args);
             let completion = desc
                 .aliases
                 .iter()
-                .find(|a| a.to_ascii_lowercase().starts_with(&trimmed.to_ascii_lowercase()))
+                .find(|a| {
+                    a.to_ascii_lowercase()
+                        .starts_with(&trimmed.to_ascii_lowercase())
+                })
                 .or_else(|| desc.aliases.first())
                 .cloned()
                 .unwrap_or_else(|| trimmed.to_string());
@@ -421,7 +423,11 @@ pub fn query_grouped_candidates(
                     group_key: "direct_intent".to_string(),
                     kind: "intent".to_string(),
                     title: format!("{} ({})", desc.summary, format_args_preview(&args)),
-                    subtitle: format!("直达执行 · {} · 置信度 {:.0}%", desc.id, sc.confidence * 100.0),
+                    subtitle: format!(
+                        "直达执行 · {} · 置信度 {:.0}%",
+                        desc.id,
+                        sc.confidence * 100.0
+                    ),
                     badge: "直达意图".to_string(),
                     score: sc.total_score + 15.0,
                     match_tier: sc.breakdown.tier,
@@ -434,7 +440,11 @@ pub fn query_grouped_candidates(
             }
 
             let group_key = if is_setting { "settings" } else { "skills" };
-            let badge = if is_setting { "系统设置" } else { "技能工具" };
+            let badge = if is_setting {
+                "系统设置"
+            } else {
+                "技能工具"
+            };
             let item = GroupedCandidateItem {
                 id: format!("cap:{}", desc.id),
                 group_key: group_key.to_string(),
@@ -536,10 +546,7 @@ pub fn query_grouped_candidates(
                 .map(|ft| ft.extensions.clone())
                 .unwrap_or_default(),
             category: None,
-            directory_prefix: uni_slots
-                .locations
-                .first()
-                .map(|l| l.resolved_path.clone()),
+            directory_prefix: uni_slots.locations.first().map(|l| l.resolved_path.clone()),
             min_size_bytes: uni_slots
                 .size_range
                 .as_ref()
@@ -604,14 +611,8 @@ pub fn query_grouped_candidates(
                 92.0
             };
             let args = json!({ "target": url });
-            let actions = get_candidate_actions(
-                core,
-                &url,
-                "web",
-                Some(&url),
-                Some("web.open"),
-                &args,
-            );
+            let actions =
+                get_candidate_actions(core, &url, "web", Some(&url), Some("web.open"), &args);
             web_items.push(GroupedCandidateItem {
                 id: format!("web:{}", url),
                 group_key: "web".to_string(),
@@ -631,14 +632,8 @@ pub fn query_grouped_candidates(
 
         for (bm_title, bm_url, bm_source) in core.resources.search_bookmarks(trimmed, 4) {
             let args = json!({ "target": bm_url });
-            let actions = get_candidate_actions(
-                core,
-                &bm_url,
-                "web",
-                Some(&bm_url),
-                Some("web.open"),
-                &args,
-            );
+            let actions =
+                get_candidate_actions(core, &bm_url, "web", Some(&bm_url), Some("web.open"), &args);
             web_items.push(GroupedCandidateItem {
                 id: format!("bm:{}", bm_url),
                 group_key: "web".to_string(),
@@ -700,18 +695,40 @@ pub fn query_grouped_candidates(
             arguments: pass_args.clone(),
             target: Some(trimmed.to_string()),
             completion_text: trimmed.to_string(),
-            actions: get_candidate_actions(core, trimmed, "passthrough", Some(trimmed), None, &pass_args),
+            actions: get_candidate_actions(
+                core,
+                trimmed,
+                "passthrough",
+                Some(trimmed),
+                None,
+                &pass_args,
+            ),
         });
     }
 
     let raw_groups = vec![
-        ("direct_intent", "直达意图", "Enter 立即执行", direct_intent_items),
+        (
+            "direct_intent",
+            "直达意图",
+            "Enter 立即执行",
+            direct_intent_items,
+        ),
         ("apps", "应用程序", "Alt+Enter 更多操作", app_items),
         ("files", "文件与目录", "Alt+Enter 打开方式/位置", file_items),
         ("web", "网页与书签", "Alt+Enter 复制/站内搜索", web_items),
-        ("settings", "系统设置", "Alt+Enter 恢复默认/面板", setting_items),
+        (
+            "settings",
+            "系统设置",
+            "Alt+Enter 恢复默认/面板",
+            setting_items,
+        ),
         ("skills", "技能与系统工具", "Enter 调用能力", skill_items),
-        ("passthrough", "AI 深度理解兜底", "Enter 发送给 AI", passthrough_items),
+        (
+            "passthrough",
+            "AI 深度理解兜底",
+            "Enter 发送给 AI",
+            passthrough_items,
+        ),
     ];
 
     let mut groups = Vec::new();
@@ -721,7 +738,11 @@ pub fn query_grouped_candidates(
         if items.is_empty() {
             continue;
         }
-        if cat_filter != "all" && !cat_filter.is_empty() && key != cat_filter && !key.starts_with(&cat_filter) {
+        if cat_filter != "all"
+            && !cat_filter.is_empty()
+            && key != cat_filter
+            && !key.starts_with(&cat_filter)
+        {
             continue;
         }
         items.sort_by(|a, b| {

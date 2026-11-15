@@ -9,7 +9,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "intentosd", version, about = "IntentOS Trusted Rust Core Daemon")]
+#[command(
+    name = "intentosd",
+    version,
+    about = "IntentOS Trusted Rust Core Daemon"
+)]
 struct Args {
     /// Optional override base directory for isolated state/config/cache/run
     #[arg(long, env = "INTENTOS_BASE_DIR")]
@@ -77,8 +81,9 @@ async fn main() -> anyhow::Result<()> {
 
 fn detect_repo_root() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir()
-        && cwd.join("modules/builtin").exists() {
-            return cwd;
-        }
+        && cwd.join("modules/builtin").exists()
+    {
+        return cwd;
+    }
     PathBuf::from("/home/antigravity/intentos")
 }

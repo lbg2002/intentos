@@ -12,10 +12,11 @@
 //!    across `core` and `execution_hub`.
 
 use chrono::Utc;
-use intentos_protocol::{ChangeOp, ChangeSet, Task, TaskStatus};
+pub use intentos_protocol::PrivacySessionPolicy;
+use intentos_protocol::{ChangeOp, ChangeSet, DataClass, Taint, Task, TaskBudget, TaskStatus};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::OnceLock;
 
 /// Canonical placeholder written in place of redacted credentials.
@@ -95,10 +96,7 @@ fn patterns() -> &'static CompiledSecretPatterns {
 
 fn is_already_redacted_token(token: &str) -> bool {
     let trimmed = token.trim();
-    trimmed.is_empty()
-        || trimmed.contains("REDACTED")
-        || trimmed == "****"
-        || trimmed == "***"
+    trimmed.is_empty() || trimmed.contains("REDACTED") || trimmed == "****" || trimmed == "***"
 }
 
 /// Unified pre-persistence secret detection and redaction guard.
@@ -202,7 +200,12 @@ impl SensitiveDataGuard {
             changed = true;
         }
 
-        for token_re in [&p.sk_key, &p.github_token, &p.aws_access_key, &p.google_api_key] {
+        for token_re in [
+            &p.sk_key,
+            &p.github_token,
+            &p.aws_access_key,
+            &p.google_api_key,
+        ] {
             if token_re.is_match(&out) {
                 let next = token_re
                     .replace_all(&out, |caps: &Captures<'_>| {
@@ -397,56 +400,135 @@ fn is_explicit_secret_json_key(key: &str) -> bool {
     )
 }
 
-/// Three-tier privacy session memory & persistence isolation policy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrivacySessionPolicy {
-    /// Normal persistent session: reads and writes personal memories & session history.
-    #[default]
-    Standard,
-    /// Ephemeral read-only session: may consult existing user preferences, never writes new memories/history.
-    EphemeralReadOnly,
-    /// Strict isolated incognito session: ZERO memory reads and ZERO memory/task writes.
-    StrictIsolated,
+/// Trusted execution context propagated end-to-end across Quick-Chat, Core `L0`/`L1`/`L2`,
+/// `AgentCoordinator`, `CapabilityBroker`, and `MemoryHub` (`H05`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionContext {
+    pub session_id: String,
+    pub task_id: String,
+    pub turn_id: Option<String>,
+    pub privacy: PrivacySessionPolicy,
+    pub taints: Vec<Taint>,
+    pub data_class: DataClass,
+    pub budget: TaskBudget,
 }
 
-impl PrivacySessionPolicy {
-    /// Map boolean `incognito` flag to `StrictIsolated` (`true`) or `Standard` (`false`).
-    pub fn from_incognito(incognito: bool) -> Self {
-        if incognito {
-            Self::StrictIsolated
-        } else {
-            Self::Standard
+impl ExecutionContext {
+    pub fn new(
+        session_id: impl Into<String>,
+        task_id: impl Into<String>,
+        turn_id: Option<String>,
+        privacy: PrivacySessionPolicy,
+        taints: Vec<Taint>,
+        data_class: DataClass,
+        budget: TaskBudget,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            task_id: task_id.into(),
+            turn_id,
+            privacy,
+            taints,
+            data_class,
+            budget,
         }
     }
 
-    /// Resolve policy from both explicit `incognito` flag and `session_id` convention (`incog_*` / `ephemeral_ro_*`).
-    pub fn from_session(incognito: bool, session_id: Option<&str>) -> Self {
-        if incognito
-            || session_id.is_some_and(|sid| sid.trim().starts_with("incog_"))
-        {
-            Self::StrictIsolated
-        } else if session_id.is_some_and(|sid| sid.trim().starts_with("ephemeral_ro_")) {
-            Self::EphemeralReadOnly
-        } else {
-            Self::Standard
+    /// Generate a task identifier carrying the canonical privacy prefix so downstream
+    /// defense-in-depth checks (`StateDb`, `CapabilityBroker`) also recognize non-persistent tasks.
+    pub fn new_task_id(privacy: PrivacySessionPolicy) -> String {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..10];
+        match privacy {
+            PrivacySessionPolicy::Standard => format!("task_{}", suffix),
+            PrivacySessionPolicy::EphemeralReadOnly => format!("ephemeral_ro_task_{}", suffix),
+            PrivacySessionPolicy::StrictIsolated => format!("incog_task_{}", suffix),
         }
     }
 
-    /// Whether long-term preferences (`StateDb`) and `MemoryHubDb` may be read into prompts/routing.
-    pub fn allows_memory_read(self) -> bool {
-        matches!(self, Self::Standard | Self::EphemeralReadOnly)
+    /// Generate a fallback session identifier when caller omitted `session_id`.
+    pub fn fallback_session_id(privacy: PrivacySessionPolicy) -> String {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..10];
+        match privacy {
+            PrivacySessionPolicy::Standard => format!("ses_{}", suffix),
+            PrivacySessionPolicy::EphemeralReadOnly => format!("ephemeral_ro_{}", &suffix[..8]),
+            PrivacySessionPolicy::StrictIsolated => format!("incog_{}", &suffix[..8]),
+        }
+    }
+}
+
+/// Returns `true` when `tool_name` represents a memory-writing or memory-mutating capability.
+pub fn is_memory_write_tool(tool_name: &str) -> bool {
+    let norm = tool_name.trim().replace('.', "_").to_ascii_lowercase();
+    norm.starts_with("memory_save")
+        || norm.starts_with("memory_upsert")
+        || norm.starts_with("memory_record")
+        || norm.starts_with("memory_write")
+        || norm.starts_with("memory_delete")
+        || norm.starts_with("memory_forget")
+        || norm.starts_with("memory_hub_record")
+        || matches!(
+            norm.as_str(),
+            "save_explicit_memory" | "record_conversation_turn" | "upsert_memory" | "delete_memory"
+        )
+}
+
+/// Returns `true` when `tool_name` belongs to the personal memory / session subsystem.
+pub fn is_memory_or_session_tool(tool_name: &str) -> bool {
+    let norm = tool_name.trim().replace('.', "_").to_ascii_lowercase();
+    crate::memory_hub::is_memory_tool(&norm)
+        || is_memory_write_tool(&norm)
+        || norm.starts_with("memory_")
+        || norm.starts_with("session_")
+}
+
+/// Enforce trusted `session_id` and `PrivacySessionPolicy` on model-supplied tool arguments (`H05`):
+/// 1. Blocks any memory-writing tool when `!privacy.allows_memory_write()`;
+/// 2. Overwrites any model-supplied `"session_id"`, `"incognito"`, or `"privacy_policy"` with the
+///    daemon's trusted `ExecutionContext` values so models can NEVER hijack another session's
+///    memories or downgrade `StrictIsolated` / `EphemeralReadOnly` policies.
+pub fn enforce_trusted_tool_context(
+    canonical_tool: &str,
+    sanitized_args: &Value,
+    trusted_session_id: &str,
+    privacy: PrivacySessionPolicy,
+) -> Result<Value, String> {
+    if is_memory_write_tool(canonical_tool) && !privacy.allows_memory_write() {
+        return Err(format!(
+            "隐私策略拦截 ({}): 当前会话禁止调用记忆写入或修改工具 `{}`",
+            privacy.as_str(),
+            canonical_tool
+        ));
     }
 
-    /// Whether conversation history, extracted entities, or explicit memories may be written to disk.
-    pub fn allows_memory_write(self) -> bool {
-        matches!(self, Self::Standard)
+    let is_mem_tool = is_memory_or_session_tool(canonical_tool);
+    let mut out = if sanitized_args.is_object() {
+        sanitized_args.clone()
+    } else if is_mem_tool {
+        json!({})
+    } else {
+        return Ok(sanitized_args.clone());
+    };
+
+    if let Some(obj) = out.as_object_mut() {
+        // Strip any untrusted model-supplied privacy flags first
+        obj.remove("incognito");
+        obj.remove("privacy_policy");
+
+        if is_mem_tool {
+            // Unconditionally force trusted `session_id` and `privacy_policy` on all memory/session tools
+            obj.insert("session_id".to_string(), json!(trusted_session_id));
+            obj.insert("privacy_policy".to_string(), json!(privacy));
+            obj.insert(
+                "incognito".to_string(),
+                json!(!privacy.allows_memory_read()),
+            );
+        } else if obj.contains_key("session_id") {
+            // Never allow model-supplied `session_id` spoofing on any other tool either
+            obj.insert("session_id".to_string(), json!(trusted_session_id));
+        }
     }
 
-    /// Whether tasks and audit entries should be persisted to `state.db`.
-    pub fn allows_task_persistence(self) -> bool {
-        matches!(self, Self::Standard)
-    }
+    Ok(out)
 }
 
 /// Unified Task Lifecycle State Machine across `core` and `execution_hub` (§13.2).
@@ -585,8 +667,8 @@ impl UnifiedTaskStateMachine {
 mod tests {
     use super::*;
     use intentos_protocol::{
-        DataClass, Effect, ExecutionStatus, PendingApproval, RouteLayer, TaskBudget, TaskStep,
-        TaskTrigger, Taint, VerificationReport, VerificationState,
+        DataClass, Effect, ExecutionStatus, PendingApproval, RouteLayer, Taint, TaskBudget,
+        TaskStep, TaskTrigger, VerificationReport, VerificationState,
     };
     use serde_json::json;
 
@@ -647,10 +729,19 @@ mod tests {
                 "b3BlbnNzaC1rZXktdjE=",
             ),
             ("记住密码是 MySup3rS3cret!", "MySup3rS3cret!"),
-            ("my password is correct-horse-battery", "correct-horse-battery"),
+            (
+                "my password is correct-horse-battery",
+                "correct-horse-battery",
+            ),
             ("api_key=custom_tok_889900", "custom_tok_889900"),
-            ("secret: internal_signing_seed_42", "internal_signing_seed_42"),
-            ("私钥: MIIEvgIBADANBgkqhkiG9w0BAQE", "MIIEvgIBADANBgkqhkiG9w0BAQE"),
+            (
+                "secret: internal_signing_seed_42",
+                "internal_signing_seed_42",
+            ),
+            (
+                "私钥: MIIEvgIBADANBgkqhkiG9w0BAQE",
+                "MIIEvgIBADANBgkqhkiG9w0BAQE",
+            ),
         ];
 
         for (input, forbidden_substr) in cases {
@@ -668,7 +759,10 @@ mod tests {
 
             // Idempotency check: second pass makes zero changes and detects zero raw secrets
             let (scrubbed_again, modified_again) = SensitiveDataGuard::redact_text(&scrubbed);
-            assert!(!modified_again, "redact_text must be idempotent: {scrubbed}");
+            assert!(
+                !modified_again,
+                "redact_text must be idempotent: {scrubbed}"
+            );
             assert_eq!(scrubbed, scrubbed_again);
             assert!(SensitiveDataGuard::contains_sensitive_secret(&scrubbed).is_none());
         }
@@ -904,6 +998,7 @@ mod tests {
                     selected_candidate_id: None,
                     cwd: None,
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )
@@ -949,6 +1044,7 @@ mod tests {
                     selected_candidate_id: None,
                     cwd: None,
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )
@@ -982,6 +1078,7 @@ mod tests {
                     selected_candidate_id: None,
                     cwd: None,
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )

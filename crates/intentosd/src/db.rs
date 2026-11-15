@@ -283,6 +283,12 @@ impl StateDb {
     }
 
     pub fn upsert_task(&self, task: &Task) -> anyhow::Result<()> {
+        if !PrivacySessionPolicy::from_task_id(&task.id).allows_task_persistence()
+            || !PrivacySessionPolicy::from_session(false, task.session_id.as_deref())
+                .allows_task_persistence()
+        {
+            return Ok(());
+        }
         let clean_task = crate::security_guard::SensitiveDataGuard::sanitize_task_for_storage(task);
         let conn = self.conn.lock().unwrap();
         let steps_json = serde_json::to_string(&clean_task.steps)?;
@@ -433,6 +439,9 @@ impl StateDb {
     }
 
     pub fn save_changeset(&self, cs: &ChangeSet) -> anyhow::Result<()> {
+        if !PrivacySessionPolicy::from_task_id(&cs.task_id).allows_task_persistence() {
+            return Ok(());
+        }
         let clean_cs =
             crate::security_guard::SensitiveDataGuard::sanitize_changeset_for_storage(cs);
         let conn = self.conn.lock().unwrap();
@@ -561,6 +570,11 @@ impl StateDb {
         args: &serde_json::Value,
         details: Option<&str>,
     ) -> anyhow::Result<()> {
+        if task_id
+            .is_some_and(|tid| !PrivacySessionPolicy::from_task_id(tid).allows_task_persistence())
+        {
+            return Ok(());
+        }
         let redacted = redact_json_value(args);
         let clean_details =
             details.map(|d| crate::security_guard::SensitiveDataGuard::redact_text(d).0);
@@ -589,6 +603,10 @@ impl StateDb {
         value: &str,
         task_id: Option<&str>,
     ) -> anyhow::Result<String> {
+        if task_id.is_some_and(|tid| !PrivacySessionPolicy::from_task_id(tid).allows_memory_write())
+        {
+            anyhow::bail!("隐私策略禁止持久化显式记忆");
+        }
         // Never persist raw private keys, API tokens, or passwords in memory (§11.3, M-02)
         let lower_val = value.to_ascii_lowercase();
         let lower_subj = subject.to_ascii_lowercase();

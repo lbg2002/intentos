@@ -84,7 +84,11 @@ impl IntentRouter {
                 kind: CandidateKind::Passthrough,
                 title: format!(
                     "执行终端命令: {}",
-                    if clean_cmd.is_empty() { "<输入命令>" } else { clean_cmd }
+                    if clean_cmd.is_empty() {
+                        "<输入命令>"
+                    } else {
+                        clean_cmd
+                    }
                 ),
                 subtitle: "命令直通模式（以当前用户身份执行，不可撤销）".into(),
                 badge: "直通".into(),
@@ -272,7 +276,11 @@ impl IntentRouter {
             resource_uri: None,
         });
 
-        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         items.truncate(10);
 
         CandidateResponse {
@@ -304,8 +312,9 @@ impl IntentRouter {
             || text.contains("提权到 root")
         {
             return RoutedIntent::Rejected {
-                reason: "安全策略拒绝直接请求 sudo 或无限制 root Shell；系统级任务须走受控 Polkit 能力"
-                    .into(),
+                reason:
+                    "安全策略拒绝直接请求 sudo 或无限制 root Shell；系统级任务须走受控 Polkit 能力"
+                        .into(),
             };
         }
 
@@ -416,15 +425,19 @@ impl IntentRouter {
         let rest = text
             .strip_prefix("记住")
             .or_else(|| text.strip_prefix("以后默认"))?;
-        let fact = rest.trim().trim_start_matches(['：', ':', '，', ',']).trim();
+        let fact = rest
+            .trim()
+            .trim_start_matches(['：', ':', '，', ','])
+            .trim();
         if fact.is_empty() {
             return None;
         }
 
         // Structured file-association preference (`A22`: "docx 用 WPS 打开" / "用 Okular 打开 pdf")
-        let assoc_re1 =
-            Regex::new(r"^(?:把)?\s*\.?([a-zA-Z0-9]{1,10})\s*(?:文件|文档)?\s*(?:默认|都)?用\s*(.+?)\s*打开$")
-                .unwrap();
+        let assoc_re1 = Regex::new(
+            r"^(?:把)?\s*\.?([a-zA-Z0-9]{1,10})\s*(?:文件|文档)?\s*(?:默认|都)?用\s*(.+?)\s*打开$",
+        )
+        .unwrap();
         let assoc_re2 =
             Regex::new(r"^用\s*(.+?)\s*打开\s*\.?([a-zA-Z0-9]{1,10})\s*(?:文件|文档)?$").unwrap();
 
@@ -486,8 +499,7 @@ impl IntentRouter {
                 });
             }
         }
-        let focus_front_re =
-            Regex::new(r"^把\s*(.+?)\s*(?:窗口)?(?:切到前台|置顶|前置)$").unwrap();
+        let focus_front_re = Regex::new(r"^把\s*(.+?)\s*(?:窗口)?(?:切到前台|置顶|前置)$").unwrap();
         if let Some(caps) = focus_front_re.captures(t) {
             let q = caps[1].trim();
             if !q.is_empty() {
@@ -502,11 +514,33 @@ impl IntentRouter {
         let quit_re =
             Regex::new(r"^(?:关闭应用|退出应用|关闭软件|关闭进程|关闭|关掉|退出)\s*(.+)$").unwrap();
         if let Some(caps) = quit_re.captures(t) {
-            let target = caps[1].trim().trim_matches(['"', '\'', '“', '”', '「', '」']);
+            let target = caps[1]
+                .trim()
+                .trim_matches(['"', '\'', '“', '”', '「', '」']);
             let setting_words = [
-                "静音", "勿扰", "蓝牙", "wifi", "wi-fi", "无线", "夜灯", "护眼", "防蓝光", "动画",
-                "飞行模式", "自动锁屏", "自然滚动", "轻触点击", "电脑", "深色", "浅色", "暗黑",
-                "省电", "续航", "性能", "麦克风", "秒数",
+                "静音",
+                "勿扰",
+                "蓝牙",
+                "wifi",
+                "wi-fi",
+                "无线",
+                "夜灯",
+                "护眼",
+                "防蓝光",
+                "动画",
+                "飞行模式",
+                "自动锁屏",
+                "自然滚动",
+                "轻触点击",
+                "电脑",
+                "深色",
+                "浅色",
+                "暗黑",
+                "省电",
+                "续航",
+                "性能",
+                "麦克风",
+                "秒数",
             ];
             let tl = target.to_ascii_lowercase();
             if !target.is_empty() && !setting_words.iter().any(|w| tl.contains(w)) {
@@ -585,7 +619,11 @@ impl IntentRouter {
                 if let Some(d) = dst_dir
                     && let Some(leaf) = Path::new(&src_path).file_name()
                 {
-                    let final_dst = if d.extension().is_some() { d } else { d.join(leaf) };
+                    let final_dst = if d.extension().is_some() {
+                        d
+                    } else {
+                        d.join(leaf)
+                    };
                     return Some(RoutedIntent::ExecuteL0 {
                         capability_id: "file.copy".into(),
                         arguments: json!({
@@ -599,9 +637,10 @@ impl IntentRouter {
         }
 
         // 5. Trash ("把 X 移到回收站" / "删除文件 X")
-        let trash_re =
-            Regex::new(r"^(?:把\s*(.+?)\s*(?:移到|丢进|放入)回收站|(?:删除文件|移入回收站)\s+(.+))$")
-                .unwrap();
+        let trash_re = Regex::new(
+            r"^(?:把\s*(.+?)\s*(?:移到|丢进|放入)回收站|(?:删除文件|移入回收站)\s+(.+))$",
+        )
+        .unwrap();
         if let Some(caps) = trash_re.captures(t) {
             let raw = caps.get(1).or_else(|| caps.get(2))?.as_str().trim();
             if let Some(p) = self.resolve_single_file_hint(raw) {
@@ -652,13 +691,11 @@ impl IntentRouter {
         if let Some(caps) = pack_re.captures(t) {
             let src_raw = caps[1].trim();
             let out_raw = caps[2].trim();
-            let src_resolved = self
-                .resolve_single_file_hint(src_raw)
-                .or_else(|| {
-                    self.resources
-                        .resolve_named_directory(src_raw)
-                        .map(|p| p.to_string_lossy().to_string())
-                });
+            let src_resolved = self.resolve_single_file_hint(src_raw).or_else(|| {
+                self.resources
+                    .resolve_named_directory(src_raw)
+                    .map(|p| p.to_string_lossy().to_string())
+            });
             if let Some(src_p) = src_resolved {
                 let out_p = if out_raw.starts_with('/') {
                     out_raw.to_string()
@@ -730,7 +767,8 @@ impl IntentRouter {
         }
 
         // Composite Scenes (`scene.apply`, §7.8.2 K, A11e)
-        for scene_name in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"] {
+        for scene_name in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"]
+        {
             if t == scene_name
                 || t == format!("开启{}", scene_name)
                 || t == format!("打开{}", scene_name)
@@ -763,7 +801,9 @@ impl IntentRouter {
         }
 
         // Reset to default ("字体恢复默认", "音量恢复默认", "亮度恢复默认")
-        if let Some(prefix) = t.strip_suffix("恢复默认").or_else(|| t.strip_suffix("重置默认"))
+        if let Some(prefix) = t
+            .strip_suffix("恢复默认")
+            .or_else(|| t.strip_suffix("重置默认"))
         {
             let p = prefix.trim();
             let key_id = if p.contains("等宽字体") {
@@ -1005,9 +1045,10 @@ impl IntentRouter {
                 summary: "列出可用音频输出设备".into(),
             });
         }
-        let out_re =
-            Regex::new(r"^(?:把)?(?:声音|音频|音频输出)?(?:切到|切换到|改到)\s*(耳机|扬声器|外放|音响|HDMI)$")
-                .unwrap();
+        let out_re = Regex::new(
+            r"^(?:把)?(?:声音|音频|音频输出)?(?:切到|切换到|改到)\s*(耳机|扬声器|外放|音响|HDMI)$",
+        )
+        .unwrap();
         if let Some(caps) = out_re.captures(t) {
             let dev = caps[1].trim();
             return Some(RoutedIntent::ExecuteL0 {
@@ -1123,7 +1164,13 @@ impl IntentRouter {
         }
         if matches!(
             t,
-            "暖一点" | "屏幕暖一点" | "色温暖一点" | "黄一点" | "冷一点" | "屏幕冷一点" | "色温冷一点"
+            "暖一点"
+                | "屏幕暖一点"
+                | "色温暖一点"
+                | "黄一点"
+                | "冷一点"
+                | "屏幕冷一点"
+                | "色温冷一点"
         ) {
             let rel = if t.contains("暖") || t.contains("黄") {
                 "warmer"
@@ -1140,7 +1187,8 @@ impl IntentRouter {
             });
         }
         let temp_re =
-            Regex::new(r"^(?:把)?(?:夜灯)?色温\s*(?:调到|设为|改成)?\s*(\d{3,4})\s*[kK]?$").unwrap();
+            Regex::new(r"^(?:把)?(?:夜灯)?色温\s*(?:调到|设为|改成)?\s*(\d{3,4})\s*[kK]?$")
+                .unwrap();
         if let Some(caps) = temp_re.captures(t)
             && let Ok(k) = caps[1].parse::<f64>()
         {
@@ -1205,9 +1253,15 @@ impl IntentRouter {
             && (has_bright_down || has_bright_up)
             && extract_first_number(t).is_none())
         {
-            let up = if has_bright_down && !t_no_bright_noun.contains("太暗") && !t_no_bright_noun.contains("太低") {
+            let up = if has_bright_down
+                && !t_no_bright_noun.contains("太暗")
+                && !t_no_bright_noun.contains("太低")
+            {
                 false
-            } else if has_bright_up && !t_no_bright_noun.contains("太亮") && !t_no_bright_noun.contains("太高") {
+            } else if has_bright_up
+                && !t_no_bright_noun.contains("太亮")
+                && !t_no_bright_noun.contains("太高")
+            {
                 true
             } else {
                 t_no_bright_noun.contains("太暗") || t_no_bright_noun.contains("太低")
@@ -1216,10 +1270,7 @@ impl IntentRouter {
             return Some(RoutedIntent::ExecuteL0 {
                 capability_id: "display.brightness.set".into(),
                 arguments: json!({ "relative": dir }),
-                summary: format!(
-                    "相对调整屏幕亮度 ({})",
-                    if up { "+10%" } else { "-10%" }
-                ),
+                summary: format!("相对调整屏幕亮度 ({})", if up { "+10%" } else { "-10%" }),
             });
         }
         let bright_num_re = Regex::new(
@@ -1347,7 +1398,11 @@ impl IntentRouter {
             }
             let t_cur_dir = t.replace("大小", "");
             if t_cur_dir.contains("大") || t_cur_dir.contains("小") {
-                let rel = if t_cur_dir.contains("小") { "down" } else { "up" };
+                let rel = if t_cur_dir.contains("小") {
+                    "down"
+                } else {
+                    "up"
+                };
                 return Some(RoutedIntent::ExecuteL0 {
                     capability_id: "appearance.cursor_size.set".into(),
                     arguments: json!({ "relative": rel }),
@@ -1357,7 +1412,13 @@ impl IntentRouter {
         }
         if matches!(
             t,
-            "关闭动画" | "关掉动画" | "关闭桌面动画" | "减少动画" | "开启动画" | "打开动画" | "开启桌面动画"
+            "关闭动画"
+                | "关掉动画"
+                | "关闭桌面动画"
+                | "减少动画"
+                | "开启动画"
+                | "打开动画"
+                | "开启桌面动画"
         ) {
             let st = if t.contains("关") || t.contains("减") {
                 "off"
@@ -1412,15 +1473,20 @@ impl IntentRouter {
         }
 
         // Screen Lock & Autolock
-        if matches!(lc.as_str(), "锁屏" | "锁定屏幕" | "立刻锁屏" | "lock screen") {
+        if matches!(
+            lc.as_str(),
+            "锁屏" | "锁定屏幕" | "立刻锁屏" | "lock screen"
+        ) {
             return Some(RoutedIntent::ExecuteL0 {
                 capability_id: "screen.lock".into(),
                 arguments: json!({}),
                 summary: "锁定当前桌面屏幕".into(),
             });
         }
-        if matches!(t, "开启自动锁屏" | "打开自动锁屏" | "关闭自动锁屏" | "禁止自动锁屏")
-        {
+        if matches!(
+            t,
+            "开启自动锁屏" | "打开自动锁屏" | "关闭自动锁屏" | "禁止自动锁屏"
+        ) {
             let st = if t.contains("关") || t.contains("禁") {
                 "off"
             } else {
@@ -1641,8 +1707,7 @@ impl IntentRouter {
                 summary: "调整鼠标指针速度".into(),
             });
         }
-        if (t.contains("触控板") || t.contains("触摸板"))
-            && (t.contains("快") || t.contains("慢"))
+        if (t.contains("触控板") || t.contains("触摸板")) && (t.contains("快") || t.contains("慢"))
         {
             let rel = if t.contains("慢") { "down" } else { "up" };
             return Some(RoutedIntent::ExecuteL0 {
@@ -1772,7 +1837,8 @@ impl IntentRouter {
             });
         }
 
-        if t.contains("目录大小") || t.contains("占了多少空间") || t.contains("占用空间") {
+        if t.contains("目录大小") || t.contains("占了多少空间") || t.contains("占用空间")
+        {
             let dir_opt = self.resources.resolve_named_directory(t);
             let args = match dir_opt {
                 Some(d) => json!({ "path": d.to_string_lossy().to_string() }),
@@ -1835,7 +1901,8 @@ impl IntentRouter {
             });
         }
 
-        let kill_pid_re = Regex::new(r"^(?:结束进程|终止进程|杀掉进程)\s*(?:PID\s*)?(\d+)$").unwrap();
+        let kill_pid_re =
+            Regex::new(r"^(?:结束进程|终止进程|杀掉进程)\s*(?:PID\s*)?(\d+)$").unwrap();
         if let Some(caps) = kill_pid_re.captures(t)
             && let Ok(pid) = caps[1].parse::<u32>()
         {
@@ -1857,7 +1924,8 @@ impl IntentRouter {
             });
         }
 
-        let pkg_re = Regex::new(r"^(?:搜索软件包|查找软件包|apt\s*搜索)\s+([a-zA-Z0-9._+\-]+)$").unwrap();
+        let pkg_re =
+            Regex::new(r"^(?:搜索软件包|查找软件包|apt\s*搜索)\s+([a-zA-Z0-9._+\-]+)$").unwrap();
         if let Some(caps) = pkg_re.captures(t) {
             let q = &caps[1];
             return Some(RoutedIntent::ExecuteL0 {
@@ -1930,7 +1998,9 @@ impl IntentRouter {
             });
         }
 
-        if let Some(proj) = t.strip_prefix("打开项目").or_else(|| t.strip_prefix("用编辑器打开项目"))
+        if let Some(proj) = t
+            .strip_prefix("打开项目")
+            .or_else(|| t.strip_prefix("用编辑器打开项目"))
         {
             let hint = proj.trim();
             let resolved = self
@@ -2245,7 +2315,8 @@ impl IntentRouter {
         // Check explicit user preference memory `open_with.<ext>` (`A22` & §11.2)!
         if !ext.is_empty()
             && let Some(ref db) = self.state_db
-            && let Some(pref_app) = db.get_memory_value(&format!("open_with.{}", ext.to_ascii_lowercase()))
+            && let Some(pref_app) =
+                db.get_memory_value(&format!("open_with.{}", ext.to_ascii_lowercase()))
         {
             return RoutedIntent::ExecuteL0 {
                 capability_id: "file.open_with".into(),
@@ -2360,10 +2431,7 @@ impl IntentRouter {
                 && (exp_p.exists() || clean_path.contains("/.ssh/") || clean_path == "/etc/shadow")
             {
                 let p_str = exp_p.to_string_lossy().to_string();
-                let name = exp_p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&p_str);
+                let name = exp_p.file_name().and_then(|s| s.to_str()).unwrap_or(&p_str);
                 let ext = exp_p.extension().and_then(|s| s.to_str()).unwrap_or("");
                 return Some(self.build_file_open_intent(&p_str, name, ext));
             }
@@ -2433,10 +2501,7 @@ impl IntentRouter {
                             })
                             .collect();
                         Some(RoutedIntent::Disambiguate {
-                            prompt: format!(
-                                "找到多个匹配“{}”的文件，请选择要打开的一项：",
-                                target
-                            ),
+                            prompt: format!("找到多个匹配“{}”的文件，请选择要打开的一项：", target),
                             candidates: cands,
                         })
                     }
@@ -2510,7 +2575,8 @@ pub fn parse_file_conditions(expr: &str, resources: &ResourceEngine) -> FileSear
         work = work.replace(verb_noise, " ");
     }
 
-    let size_gt_re = Regex::new(r"(?i)(?:大于|超过|高于|>)\s*(\d+(?:\.\d+)?)\s*([kmgt])b?").unwrap();
+    let size_gt_re =
+        Regex::new(r"(?i)(?:大于|超过|高于|>)\s*(\d+(?:\.\d+)?)\s*([kmgt])b?").unwrap();
     if let Some(caps) = size_gt_re.captures(&work)
         && let Some(bytes) = parse_size_unit(&caps[1], &caps[2])
     {
@@ -2564,11 +2630,7 @@ pub fn parse_file_conditions(expr: &str, resources: &ResourceEngine) -> FileSear
             &["png", "jpg", "jpeg", "webp", "svg"],
         ),
         (&["视频"], Some("video"), &["mp4", "mkv", "mov", "webm"]),
-        (
-            &["压缩包"],
-            Some("archive"),
-            &["zip", "tar", "gz", "7z"],
-        ),
+        (&["压缩包"], Some("archive"), &["zip", "tar", "gz", "7z"]),
         (&["markdown", "md"], None, &["md"]),
     ];
 
@@ -2648,8 +2710,19 @@ fn parse_size_unit(num_s: &str, unit_s: &str) -> Option<u64> {
 
 fn has_structured_file_condition(s: &str) -> bool {
     let indicators = [
-        "下载里", "文档里", "桌面上", "大于", "小于", "超过", "昨天", "今天", "上周", "改过的",
-        "最近的", "最大的", "*.",
+        "下载里",
+        "文档里",
+        "桌面上",
+        "大于",
+        "小于",
+        "超过",
+        "昨天",
+        "今天",
+        "上周",
+        "改过的",
+        "最近的",
+        "最大的",
+        "*.",
     ];
     indicators.iter().any(|k| s.contains(k))
 }
@@ -2660,7 +2733,12 @@ fn is_open_verb(s: &str) -> bool {
 
 fn strip_open_verb(s: &str) -> Option<&str> {
     for p in [
-        "打开应用", "打开软件", "启动应用", "启动软件", "运行应用", "运行软件",
+        "打开应用",
+        "打开软件",
+        "启动应用",
+        "启动软件",
+        "运行应用",
+        "运行软件",
     ] {
         if let Some(rest) = s.strip_prefix(p) {
             let trimmed = rest.trim();
@@ -2841,10 +2919,7 @@ mod tests {
             ("打开 SodaM", "sodam.desktop"),
             ("启动飞书", "bytedance-feishu.desktop"),
             ("打开轻笺", "com.github.paperhead.BetterNotes.desktop"),
-            (
-                "打开不存在的宇宙飞船软件XYZ",
-                "不存在的宇宙飞船软件XYZ",
-            ),
+            ("打开不存在的宇宙飞船软件XYZ", "不存在的宇宙飞船软件XYZ"),
         ] {
             match router.route_text(query, false) {
                 RoutedIntent::ExecuteL0 {
@@ -2877,7 +2952,8 @@ mod tests {
         let router = IntentRouter::new(res);
 
         // 1. Local LAN / intranet IP queries must route to `network.ip` L0, NEVER `web.search`
-        for ip_query in ["查一下内网地址", "内网地址", "局域网地址", "查看内网IP"] {
+        for ip_query in ["查一下内网地址", "内网地址", "局域网地址", "查看内网IP"]
+        {
             match router.route_text(ip_query, false) {
                 RoutedIntent::ExecuteL0 { capability_id, .. } => {
                     assert_eq!(capability_id, "network.ip", "ip_query={ip_query}");

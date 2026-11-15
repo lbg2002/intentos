@@ -323,11 +323,12 @@ pub fn propose_memory_candidates_from_task(
     if task.status != TaskStatus::Completed {
         return Vec::new();
     }
-    if task
-        .session_id
-        .as_deref()
-        .map(|s| s.starts_with("incog_"))
-        .unwrap_or(false)
+    if !core.task_privacy_policy(&task.id).allows_habit_learning()
+        || !crate::security_guard::PrivacySessionPolicy::from_session(
+            false,
+            task.session_id.as_deref(),
+        )
+        .allows_habit_learning()
     {
         return Vec::new();
     }
@@ -335,7 +336,8 @@ pub fn propose_memory_candidates_from_task(
     let mut extracted = Vec::new();
 
     for step in &task.steps {
-        let args: Value = serde_json::from_str(&step.arguments_summary).unwrap_or_else(|_| json!({}));
+        let args: Value =
+            serde_json::from_str(&step.arguments_summary).unwrap_or_else(|_| json!({}));
         match step.capability_id.as_str() {
             "scene.apply" => {
                 if let Some(scene) = args.get("scene").and_then(|v| v.as_str()) {
@@ -440,10 +442,8 @@ pub fn propose_memory_candidates_from_task(
                 continue;
             }
 
-            let candidate_id = format!(
-                "mcand_{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..10]
-            );
+            let candidate_id =
+                format!("mcand_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
             let cand = MemoryCandidate {
                 candidate_id: candidate_id.clone(),
                 mem_type,
@@ -483,10 +483,7 @@ pub fn propose_custom_memory_candidate(
         if store.rejected_fingerprints.contains(&fp) {
             anyhow::bail!("该记忆候选已被用户拒绝或删除（已命中墓碑指纹），不再重复提议");
         }
-        let candidate_id = format!(
-            "mcand_{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..10]
-        );
+        let candidate_id = format!("mcand_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
         let cand = MemoryCandidate {
             candidate_id: candidate_id.clone(),
             mem_type: mem_type.unwrap_or("preference").to_string(),
@@ -528,11 +525,8 @@ pub fn list_memory_candidates(core: &IntentOsCore) -> anyhow::Result<Value> {
             .filter(|c| c.status == "pending")
             .count();
 
-        let mut provenance: Vec<MemoryProvenanceItem> = store
-            .project_memories
-            .values()
-            .cloned()
-            .collect();
+        let mut provenance: Vec<MemoryProvenanceItem> =
+            store.project_memories.values().cloned().collect();
         for m in &db_memories {
             if !provenance.iter().any(|p| p.memory_id == m.id) {
                 provenance.push(MemoryProvenanceItem {

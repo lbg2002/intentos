@@ -43,7 +43,9 @@ pub enum FsOpsError {
     EscapeBlocked(String),
     #[error("target already exists (RENAME_NOREPLACE): {0}")]
     TargetAlreadyExists(String),
-    #[error("backup quota exceeded (needed {needed} bytes, max single/remaining {limit} bytes); upgrade to write.destructive")]
+    #[error(
+        "backup quota exceeded (needed {needed} bytes, max single/remaining {limit} bytes); upgrade to write.destructive"
+    )]
     BackupQuotaExceeded { needed: u64, limit: u64 },
     #[error("changeset cannot be undone (status: {0:?})")]
     NotUndoable(ChangeSetStatus),
@@ -212,14 +214,23 @@ impl SafeFsEngine {
                 && let Some(s) = seg.to_str()
                 && matches!(
                     s,
-                    ".ssh" | ".gnupg" | ".aws" | ".kube" | ".netrc" | ".git-credentials" | "keyrings"
+                    ".ssh"
+                        | ".gnupg"
+                        | ".aws"
+                        | ".kube"
+                        | ".netrc"
+                        | ".git-credentials"
+                        | "keyrings"
                 )
             {
                 return true;
             }
         }
         if let Some(file_name) = candidate.file_name().and_then(|n| n.to_str())
-            && matches!(file_name, "id_rsa" | "id_ed25519" | "Cookies" | "Login Data")
+            && matches!(
+                file_name,
+                "id_rsa" | "id_ed25519" | "Cookies" | "Login Data"
+            )
         {
             return true;
         }
@@ -441,7 +452,8 @@ impl SafeFsEngine {
                     ) {
                         Ok(_existing) => {}
                         Err(FsOpsError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                            let parent_of_cur = current_rel.parent().unwrap_or_else(|| Path::new(""));
+                            let parent_of_cur =
+                                current_rel.parent().unwrap_or_else(|| Path::new(""));
                             let pfd = self.openat2_beneath(
                                 &root_fd,
                                 parent_of_cur,
@@ -452,7 +464,8 @@ impl SafeFsEngine {
                                 FsOpsError::InvalidPath(current_rel.display().to_string())
                             })?;
                             // SAFETY: `pfd` is a valid directory fd and `c_seg` is a single normal path segment.
-                            let rc = unsafe { libc::mkdirat(pfd.as_raw_fd(), c_seg.as_ptr(), 0o755) };
+                            let rc =
+                                unsafe { libc::mkdirat(pfd.as_raw_fd(), c_seg.as_ptr(), 0o755) };
                             if rc < 0 {
                                 let mk_err = std::io::Error::last_os_error();
                                 if mk_err.kind() != std::io::ErrorKind::AlreadyExists {
@@ -493,7 +506,10 @@ impl SafeFsEngine {
     }
 
     /// Compute SHA-256 and `(dev, ino)` of an authorized file via `openat2`.
-    pub fn hash_and_identity(&self, path: &Path) -> Result<(String, FileIdentity, u64), FsOpsError> {
+    pub fn hash_and_identity(
+        &self,
+        path: &Path,
+    ) -> Result<(String, FileIdentity, u64), FsOpsError> {
         let mut file = self.open_readonly_safe(path)?;
         let meta = file.metadata()?;
         let id = FileIdentity {
@@ -517,7 +533,11 @@ impl SafeFsEngine {
     }
 
     /// Verify leaf entry is not a symlink using `fstatat(AT_SYMLINK_NOFOLLOW)`.
-    fn ensure_leaf_not_symlink(parent_fd: &OwnedFd, leaf: &CString, display: &Path) -> Result<(), FsOpsError> {
+    fn ensure_leaf_not_symlink(
+        parent_fd: &OwnedFd,
+        leaf: &CString,
+        display: &Path,
+    ) -> Result<(), FsOpsError> {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: `parent_fd` is valid, `leaf` is NUL-terminated, `st` is valid writable stat struct.
         let rc = unsafe {
@@ -573,9 +593,16 @@ impl SafeFsEngine {
                 }
                 Some(libc::EXDEV) => {
                     // Cross-filesystem move: copy -> verify sha256 -> unlink source.
-                    self.copy_fd_verified(&src_parent_fd, &src_leaf, &dst_parent_fd, &dst_leaf, &pre_hash)?;
+                    self.copy_fd_verified(
+                        &src_parent_fd,
+                        &src_leaf,
+                        &dst_parent_fd,
+                        &dst_leaf,
+                        &pre_hash,
+                    )?;
                     // SAFETY: `src_parent_fd` and `src_leaf` are valid.
-                    let ul = unsafe { libc::unlinkat(src_parent_fd.as_raw_fd(), src_leaf.as_ptr(), 0) };
+                    let ul =
+                        unsafe { libc::unlinkat(src_parent_fd.as_raw_fd(), src_leaf.as_ptr(), 0) };
                     if ul < 0 {
                         // Rollback copied destination if source unlink failed.
                         unsafe {
@@ -629,7 +656,13 @@ impl SafeFsEngine {
         let (pre_hash, _, _) = self.hash_and_identity(source)?;
         let (dst_parent_fd, dst_leaf) = self.ensure_parent_dirfd(dest)?;
 
-        self.copy_fd_verified(&src_parent_fd, &src_leaf, &dst_parent_fd, &dst_leaf, &pre_hash)?;
+        self.copy_fd_verified(
+            &src_parent_fd,
+            &src_leaf,
+            &dst_parent_fd,
+            &dst_leaf,
+            &pre_hash,
+        )?;
         let (post_hash, _, _) = self.hash_and_identity(dest)?;
 
         let now = Utc::now();
@@ -881,14 +914,15 @@ impl SafeFsEngine {
                     let _ = self.move_file(&cs.task_id, to_path, from_path)?;
                     restored_ops += 1;
                 }
-                ChangeOp::Copy { to, post_hash, .. } | ChangeOp::Create { path: to, post_hash } => {
+                ChangeOp::Copy { to, post_hash, .. }
+                | ChangeOp::Create {
+                    path: to,
+                    post_hash,
+                } => {
                     let to_path = Path::new(to);
                     let (cur_hash, _, _) = self.hash_and_identity(to_path)?;
                     if &cur_hash != post_hash {
-                        conflicts.push(format!(
-                            "{} 在生成后已被修改，未删除以保护用户内容",
-                            to
-                        ));
+                        conflicts.push(format!("{} 在生成后已被修改，未删除以保护用户内容", to));
                         continue;
                     }
                     let _ = self.trash_file(&cs.task_id, to_path)?;
@@ -947,7 +981,8 @@ impl SafeFsEngine {
                             path,
                             cs.id.trim_start_matches("cs_")
                         ));
-                        let _ = self.write_file_reversible(&cs.task_id, &conflict_copy, &backup_bytes)?;
+                        let _ =
+                            self.write_file_reversible(&cs.task_id, &conflict_copy, &backup_bytes)?;
                         conflicts.push(format!(
                             "{} 已被后续修改，已保留当前版本并将旧版本恢复至 {}",
                             path,
@@ -1098,8 +1133,7 @@ mod tests {
         let backup = tmp.path().join("undo");
         let trash = tmp.path().join("trash");
         fs::create_dir_all(&auth).unwrap();
-        let engine =
-            SafeFsEngine::new(vec![auth.clone()], vec![], backup, trash).unwrap();
+        let engine = SafeFsEngine::new(vec![auth.clone()], vec![], backup, trash).unwrap();
         (tmp, engine, auth)
     }
 

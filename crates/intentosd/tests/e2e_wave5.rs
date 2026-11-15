@@ -68,7 +68,10 @@ fn write_executable_file(path: &Path, content: &str) {
     }
 }
 
-fn make_isolated_openai_discovery(mock_home: &Path, addr: std::net::SocketAddr) -> DiscoveryOptions {
+fn make_isolated_openai_discovery(
+    mock_home: &Path,
+    addr: std::net::SocketAddr,
+) -> DiscoveryOptions {
     let zcode_cfg_path = mock_home.join(".zcode/v2/provider_config.json");
     std::fs::create_dir_all(zcode_cfg_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -244,7 +247,7 @@ async fn mock_wave5_approval_chat_completions(
 
 #[tokio::test]
 async fn wave5_test1_approval_resumes_llm_turn_with_tool_data_and_enters_session_plus_session_grant()
-{
+ {
     let temp = tempfile::tempdir().expect("tempdir");
     let base = temp.path().join("xdg_base");
     let ws = base.join("workspace");
@@ -253,11 +256,7 @@ async fn wave5_test1_approval_resumes_llm_turn_with_tool_data_and_enters_session
     std::fs::create_dir_all(&outside_dir).unwrap();
 
     let secret_file = outside_dir.join("secret_report_2026.md");
-    std::fs::write(
-        &secret_file,
-        "# 2026 年度战略报告\n核心指标已达成 128%。\n",
-    )
-    .unwrap();
+    std::fs::write(&secret_file, "# 2026 年度战略报告\n核心指标已达成 128%。\n").unwrap();
 
     let core = init_test_core(&base, &ws);
 
@@ -411,9 +410,11 @@ async fn wave5_test1_approval_resumes_llm_turn_with_tool_data_and_enters_session
         .as_array()
         .expect("memory_hub session messages");
     assert!(
-        persisted_msgs
-            .iter()
-            .any(|m| m["role"] == "user" && m["content"].as_str().unwrap_or("").contains("secret_report")),
+        persisted_msgs.iter().any(|m| m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("secret_report")),
         "memory_hub get_session missing user turn: {:?}",
         persisted_msgs
     );
@@ -623,9 +624,7 @@ async fn wave5_test2_deep_local_software_scan_9_categories_and_rich_translation(
     )
     .await;
 
-    let categories = scan_res["categories"]
-        .as_array()
-        .expect("categories array");
+    let categories = scan_res["categories"].as_array().expect("categories array");
     assert_eq!(
         categories.len(),
         9,
@@ -666,8 +665,14 @@ async fn wave5_test2_deep_local_software_scan_9_categories_and_rich_translation(
             .unwrap_or_else(|| panic!("Missing scanned app '{}': {:?}", desktop_id, apps))
     };
 
-    assert_eq!(find_app("sodam.desktop")["category_id"], "media_entertainment");
-    assert_eq!(find_app("wemeetapp.desktop")["category_id"], "social_collab");
+    assert_eq!(
+        find_app("sodam.desktop")["category_id"],
+        "media_entertainment"
+    );
+    assert_eq!(
+        find_app("wemeetapp.desktop")["category_id"],
+        "social_collab"
+    );
     assert_eq!(
         find_app("wps-office-wps.desktop")["category_id"],
         "office_notes_doc"
@@ -751,7 +756,11 @@ async fn wave5_test2_deep_local_software_scan_9_categories_and_rich_translation(
         }),
     )
     .await;
-    assert_eq!(da_res["ok"], true, "execute_desktop_action result: {:?}", da_res);
+    assert_eq!(
+        da_res["ok"], true,
+        "execute_desktop_action result: {:?}",
+        da_res
+    );
     // Wait briefly if spawned asynchronously
     for _ in 0..20 {
         if wps_action_marker.exists() {

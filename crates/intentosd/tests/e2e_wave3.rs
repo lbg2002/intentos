@@ -18,7 +18,7 @@ use axum::{
     routing::{get, post},
 };
 use intentos_protocol::{
-    CapabilityCall, ExecutionStatus, IntentRequest, InvocationOrigin, TaskStatus, Taint,
+    CapabilityCall, ExecutionStatus, IntentRequest, InvocationOrigin, Taint, TaskStatus,
     UiRpcRequest, VerificationState,
 };
 use intentosd::broker::BrokerDispatchOutcome;
@@ -261,9 +261,7 @@ async fn wave3_e2e_live_v1_models_auto_discovery_and_utility_filtering() {
         );
     }
     assert!(
-        !zcode_models
-            .iter()
-            .any(|m| m == "text-embedding-3-small"),
+        !zcode_models.iter().any(|m| m == "text-embedding-3-small"),
         "utility embedding model `text-embedding-3-small` must be filtered out, got {:?}",
         zcode_models
     );
@@ -291,7 +289,11 @@ async fn wave3_e2e_live_v1_models_auto_discovery_and_utility_filtering() {
             },
         )
         .await;
-    assert!(switch_resp.ok, "set_active_backend failed: {:?}", switch_resp.error);
+    assert!(
+        switch_resp.ok,
+        "set_active_backend failed: {:?}",
+        switch_resp.error
+    );
     assert_eq!(
         switch_resp
             .result
@@ -486,7 +488,9 @@ async fn wave3_e2e_chinese_desktop_docx_chapter_open_and_zero_noise_recall() {
     // Ensure `memory_inspect_document` is registered as the 5th memory tool on CapabilityBroker
     let aios_specs = core.broker.aios_tool_specs();
     assert!(
-        aios_specs.iter().any(|s| s.name == "memory_inspect_document"),
+        aios_specs
+            .iter()
+            .any(|s| s.name == "memory_inspect_document"),
         "CapabilityBroker::aios_tool_specs must expose `memory_inspect_document`"
     );
 
@@ -536,6 +540,7 @@ async fn wave3_e2e_chinese_desktop_docx_chapter_open_and_zero_noise_recall() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -605,6 +610,7 @@ async fn wave3_e2e_chinese_desktop_docx_chapter_open_and_zero_noise_recall() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -635,12 +641,16 @@ async fn wave3_e2e_chinese_desktop_docx_chapter_open_and_zero_noise_recall() {
 
     // Verify the system prompt sent to the LLM included the compact Layer-0 semantic card AND both tools
     let recorded = llm_calls.lock().unwrap();
-    assert!(recorded.len() >= 3, "expected 3 LLM turns (inspect -> open -> summary)");
+    assert!(
+        recorded.len() >= 3,
+        "expected 3 LLM turns (inspect -> open -> summary)"
+    );
     let first_sys = recorded[0]["messages"][0]["content"]
         .as_str()
         .unwrap_or_default();
     assert!(
-        first_sys.contains("硕士学位论文：智能操作系统研究") && first_sys.contains("paper_main.docx"),
+        first_sys.contains("硕士学位论文：智能操作系统研究")
+            && first_sys.contains("paper_main.docx"),
         "expected Layer-0 semantic outline card in [Personal OS Memory] prompt, got:\n{}",
         first_sys
     );
@@ -712,6 +722,7 @@ async fn wave3_e2e_sensitive_path_interactive_approval_incognito_and_forbidden_g
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -786,13 +797,16 @@ async fn wave3_e2e_sensitive_path_interactive_approval_incognito_and_forbidden_g
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: true,
+                privacy_policy: None,
             },
             Vec::new(),
         )
         .await
         .unwrap();
     assert_eq!(incog_task.status, TaskStatus::AwaitingApproval);
-    let pa_incog = incog_task.pending_approval.expect("incognito PendingApproval");
+    let pa_incog = incog_task
+        .pending_approval
+        .expect("incognito PendingApproval");
 
     let incog_approved = core
         .approve_pending(&pa_incog.approval_id, &pa_incog.nonce, &pa_incog.digest)
@@ -918,7 +932,11 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
                 arguments,
                 ..
             } => {
-                assert_eq!(capability_id, "app.quit", "utterance `{}` wrong cap", utterance);
+                assert_eq!(
+                    capability_id, "app.quit",
+                    "utterance `{}` wrong cap",
+                    utterance
+                );
                 assert_eq!(
                     arguments.get("app").and_then(|v| v.as_str()),
                     Some(expected_app),
@@ -950,7 +968,11 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
             },
         )
         .await;
-    assert!(save_resp.ok, "save_custom_adapter failed: {:?}", save_resp.error);
+    assert!(
+        save_resp.ok,
+        "save_custom_adapter failed: {:?}",
+        save_resp.error
+    );
 
     // 3. Spawn real sleeping tray-like child process `sodam-test-player` and close it via `"关闭SODAM音乐"`
     let sodam_script = bin_dir.join("sodam-test-player");
@@ -976,6 +998,7 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -1015,6 +1038,7 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -1035,10 +1059,7 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
 
     // 5. Hung Process Escalation: process ignoring `SIGTERM` surfaces `PendingApproval`, and `approve_pending` terminates it!
     let hung_script = bin_dir.join("sodam-hung-player");
-    write_executable_script(
-        &hung_script,
-        "#!/bin/sh\ntrap '' TERM\nsleep 30\n",
-    );
+    write_executable_script(&hung_script, "#!/bin/sh\ntrap '' TERM\nsleep 30\n");
     let _ = core
         .handle_trusted_ui_rpc(
             "rpc_save_hung".into(),
@@ -1069,6 +1090,7 @@ async fn wave3_e2e_real_verified_process_close_sodam_tray_and_hung_escalation() 
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )

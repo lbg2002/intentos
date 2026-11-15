@@ -349,7 +349,11 @@ fn clean_part_files_in_dir(dir: &Path) {
         return;
     }
     let mut part_paths = Vec::new();
-    for entry in walkdir::WalkDir::new(dir).max_depth(4).into_iter().flatten() {
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(4)
+        .into_iter()
+        .flatten()
+    {
         if entry.file_type().is_file() && entry.file_name().to_string_lossy().ends_with(".part") {
             part_paths.push(entry.path().to_path_buf());
         }
@@ -418,9 +422,7 @@ pub fn list_models_with_status(core: &IntentOsCore) -> Vec<Value> {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             let dl_state = tasks_snapshot.get(&entry.id);
-            let is_downloading = dl_state
-                .map(|s| s.status == "downloading")
-                .unwrap_or(false);
+            let is_downloading = dl_state.map(|s| s.status == "downloading").unwrap_or(false);
             let progress_pct = dl_state
                 .map(|s| (s.progress_pct * 100.0).round() / 100.0)
                 .unwrap_or(if installed { 100.0 } else { 0.0 });
@@ -431,9 +433,8 @@ pub fn list_models_with_status(core: &IntentOsCore) -> Vec<Value> {
             } else {
                 "not_installed"
             };
-            let active_download = dl_state.map(|s| {
-                task_state_to_json(&core.paths.data_dir, &core.paths.config_dir, s)
-            });
+            let active_download = dl_state
+                .map(|s| task_state_to_json(&core.paths.data_dir, &core.paths.config_dir, s));
 
             json!({
                 "id": entry.id,
@@ -467,10 +468,7 @@ pub fn get_download_progress(core: &IntentOsCore, model_id: Option<&str>) -> Val
         if let Some(per_core) = reg.get(&core.paths.data_dir) {
             if let Some(mid) = requested {
                 per_core.tasks.get(mid).cloned()
-            } else if let Some(active) = per_core
-                .tasks
-                .values()
-                .find(|t| t.status == "downloading")
+            } else if let Some(active) = per_core.tasks.values().find(|t| t.status == "downloading")
             {
                 Some(active.clone())
             } else if let Some(ref last_id) = per_core.last_model_id {
@@ -869,7 +867,8 @@ async fn run_streaming_download_worker(
                 if base_url_override.is_some() || idx + 1 == num_files {
                     known_total_bytes = completed_files_bytes.saturating_add(cl);
                 } else {
-                    known_total_bytes = known_total_bytes.max(completed_files_bytes.saturating_add(cl));
+                    known_total_bytes =
+                        known_total_bytes.max(completed_files_bytes.saturating_add(cl));
                 }
                 Some(cl)
             } else {

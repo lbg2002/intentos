@@ -10,9 +10,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{
-        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use intentos_protocol::{
     CandidateItem, CandidateResponse, IntentRequest, PendingApproval, Task, TaskStatus,
@@ -42,12 +40,14 @@ pub async fn run_interactive_tui(client: &mut ClientHandle) -> anyhow::Result<()
     let _guard = RawScreenGuard::enter()?;
     let mut input = String::new();
     let mut selected_idx: usize = 0;
-    let mut last_candidates = fetch_candidates(client, "").await.unwrap_or(CandidateResponse {
-        query: String::new(),
-        elapsed_us: 0,
-        l0_direct_match: false,
-        items: Vec::new(),
-    });
+    let mut last_candidates = fetch_candidates(client, "")
+        .await
+        .unwrap_or(CandidateResponse {
+            query: String::new(),
+            elapsed_us: 0,
+            l0_direct_match: false,
+            items: Vec::new(),
+        });
     let mut status_banner: Option<(Color, String)> = Some((
         Color::Cyan,
         "就绪：输入自然语言意图、应用/文件名/网址，或以 `$ ` 输入终端命令。↑↓ 选择，Enter 执行，Ctrl+Z 撤销，Esc 退出".into(),
@@ -221,7 +221,10 @@ pub async fn run_interactive_tui(client: &mut ClientHandle) -> anyhow::Result<()
     Ok(())
 }
 
-async fn fetch_candidates(client: &mut ClientHandle, query: &str) -> anyhow::Result<CandidateResponse> {
+async fn fetch_candidates(
+    client: &mut ClientHandle,
+    query: &str,
+) -> anyhow::Result<CandidateResponse> {
     let val = client
         .call(UiRpcRequest::QueryCandidates {
             query: query.to_string(),
@@ -258,6 +261,7 @@ async fn execute_submission(
             .ok()
             .map(|p| p.to_string_lossy().to_string()),
         incognito: false,
+        privacy_policy: None,
     };
 
     match client.call(UiRpcRequest::SubmitIntent(req)).await {
@@ -347,7 +351,10 @@ fn render_frame(
         SetForegroundColor(Color::DarkGrey),
         Print("█\r\n"),
         SetForegroundColor(Color::Cyan),
-        Print(format!("├{}\r\n", "─".repeat(cols.saturating_sub(2) as usize))),
+        Print(format!(
+            "├{}\r\n",
+            "─".repeat(cols.saturating_sub(2) as usize)
+        )),
         ResetColor
     )?;
 
@@ -358,8 +365,14 @@ fn render_frame(
             Print(format!("│ ⚠ 需要审批确认 [{}]\r\n", pa.capability_id)),
             ResetColor,
             Print(format!("│   摘要: {}\r\n", pa.summary)),
-            Print(format!("│   预览: {}\r\n", pa.diff_preview.replace('\n', " | "))),
-            Print(format!("│   摘要校验: {}\r\n", &pa.digest[..pa.digest.len().min(32)])),
+            Print(format!(
+                "│   预览: {}\r\n",
+                pa.diff_preview.replace('\n', " | ")
+            )),
+            Print(format!(
+                "│   摘要校验: {}\r\n",
+                &pa.digest[..pa.digest.len().min(32)]
+            )),
             SetForegroundColor(Color::Green),
             Print("│   按 [Y] 确认执行   "),
             SetForegroundColor(Color::Red),
@@ -370,7 +383,9 @@ fn render_frame(
         queue!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            Print("│   输入以检索应用（支持拼音/首字母）、文件、网站（默认 Google 搜索）、系统设置或自然语言意图…\r\n"),
+            Print(
+                "│   输入以检索应用（支持拼音/首字母）、文件、网站（默认 Google 搜索）、系统设置或自然语言意图…\r\n"
+            ),
             ResetColor
         )?;
     } else {
@@ -408,7 +423,10 @@ fn render_frame(
         queue!(
             out,
             SetForegroundColor(Color::Cyan),
-            Print(format!("├{}\r\n", "─".repeat(cols.saturating_sub(2) as usize))),
+            Print(format!(
+                "├{}\r\n",
+                "─".repeat(cols.saturating_sub(2) as usize)
+            )),
             SetForegroundColor(*color),
             Print(format!("╰─ {}\r\n", msg)),
             ResetColor

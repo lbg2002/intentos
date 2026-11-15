@@ -73,9 +73,7 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, &cb) in b_chars.iter().enumerate() {
             let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j + 1] + 1)
-                .min(curr[j] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -137,8 +135,7 @@ pub fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
     }
 
     let m = matches as f64;
-    let jaro =
-        (m / len1 as f64 + m / len2 as f64 + (m - (transpositions as f64 / 2.0)) / m) / 3.0;
+    let jaro = (m / len1 as f64 + m / len2 as f64 + (m - (transpositions as f64 / 2.0)) / m) / 3.0;
 
     let prefix_len = s1
         .iter()
@@ -237,10 +234,7 @@ pub fn score_query_against_term(
         } else if !q_py_full.is_empty() && q_py_full == t_py_full && q != t {
             // Homophone typo tolerance in Chinese (e.g. 护眼魔式 -> 护眼模式)
             pinyin_score = 0.88;
-        } else if !q_py_init.is_empty()
-            && q_py_init == t_py_init
-            && q_py_init.len() >= 3
-            && q != t
+        } else if !q_py_init.is_empty() && q_py_init == t_py_init && q_py_init.len() >= 3 && q != t
         {
             pinyin_score = 0.80;
         }
@@ -385,7 +379,12 @@ pub fn score_descriptor_entry(
 
         // 2. Check aliases & colloquial triggers
         for alias in &entry.aliases {
-            update_best(score_query_against_term(q_var, alias, false, frecency_boost));
+            update_best(score_query_against_term(
+                q_var,
+                alias,
+                false,
+                frecency_boost,
+            ));
         }
         for trig in &entry.colloquial_triggers {
             update_best(score_query_against_term(q_var, trig, true, frecency_boost));
@@ -431,9 +430,11 @@ pub fn rank_capabilities(
     let pattern_hits = compiler.match_patterns(trimmed);
     let mut pattern_map: HashMap<String, (f64, HashMap<String, String>, String)> = HashMap::new();
     for hit in pattern_hits {
-        pattern_map
-            .entry(hit.capability_id.clone())
-            .or_insert((hit.confidence, hit.captured_slots, hit.matched_pattern));
+        pattern_map.entry(hit.capability_id.clone()).or_insert((
+            hit.confidence,
+            hit.captured_slots,
+            hit.matched_pattern,
+        ));
     }
 
     let mut results = Vec::new();

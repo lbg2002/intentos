@@ -214,7 +214,8 @@ impl SystemSettingsEngine {
                 .and_then(|p| Command::new(p).args(["networking"]).output().ok())
                 .map(|o| o.status.success())
                 .unwrap_or(false);
-        let bluetoothctl_available = has_dbus && resolve_trusted_executable("bluetoothctl").is_some();
+        let bluetoothctl_available =
+            has_dbus && resolve_trusted_executable("bluetoothctl").is_some();
         let powerprofilesctl_available = has_dbus
             && resolve_trusted_executable("powerprofilesctl")
                 .and_then(|p| Command::new(p).arg("get").output().ok())
@@ -238,21 +239,100 @@ impl SystemSettingsEngine {
         let s = raw.trim().to_ascii_lowercase();
         let table: &[(&[&str], &str, &str)] = &[
             (&["蓝牙", "bluetooth", "bt"], "bluetooth", "蓝牙"),
-            (&["显示", "屏幕", "分辨率", "显示器", "护眼", "夜灯", "display", "screen"], "display", "显示"),
-            (&["声音", "音频", "音量", "麦克风", "耳机", "扬声器", "sound", "audio"], "sound", "声音"),
+            (
+                &[
+                    "显示",
+                    "屏幕",
+                    "分辨率",
+                    "显示器",
+                    "护眼",
+                    "夜灯",
+                    "display",
+                    "screen",
+                ],
+                "display",
+                "显示",
+            ),
+            (
+                &[
+                    "声音",
+                    "音频",
+                    "音量",
+                    "麦克风",
+                    "耳机",
+                    "扬声器",
+                    "sound",
+                    "audio",
+                ],
+                "sound",
+                "声音",
+            ),
             (&["wifi", "wi-fi", "无线", "无线网"], "wifi", "Wi-Fi"),
-            (&["网络", "以太网", "有线", "代理", "vpn", "network"], "network", "网络"),
-            (&["电源", "电池", "节能", "省电", "power", "battery"], "power", "电源"),
-            (&["外观", "主题", "壁纸", "深色", "强调色", "appearance", "background", "ubuntu"], "ubuntu", "外观"),
-            (&["多任务", "工作区", "multitasking"], "multitasking", "多任务"),
-            (&["通知", "勿扰", "notifications", "notification"], "notifications", "通知"),
-            (&["鼠标", "触控板", "触摸板", "mouse", "touchpad"], "mouse", "鼠标与触控板"),
-            (&["键盘", "快捷键", "输入源", "输入法", "keyboard"], "keyboard", "键盘"),
+            (
+                &["网络", "以太网", "有线", "代理", "vpn", "network"],
+                "network",
+                "网络",
+            ),
+            (
+                &["电源", "电池", "节能", "省电", "power", "battery"],
+                "power",
+                "电源",
+            ),
+            (
+                &[
+                    "外观",
+                    "主题",
+                    "壁纸",
+                    "深色",
+                    "强调色",
+                    "appearance",
+                    "background",
+                    "ubuntu",
+                ],
+                "ubuntu",
+                "外观",
+            ),
+            (
+                &["多任务", "工作区", "multitasking"],
+                "multitasking",
+                "多任务",
+            ),
+            (
+                &["通知", "勿扰", "notifications", "notification"],
+                "notifications",
+                "通知",
+            ),
+            (
+                &["鼠标", "触控板", "触摸板", "mouse", "touchpad"],
+                "mouse",
+                "鼠标与触控板",
+            ),
+            (
+                &["键盘", "快捷键", "输入源", "输入法", "keyboard"],
+                "keyboard",
+                "键盘",
+            ),
             (&["语言", "区域", "region"], "region", "区域与语言"),
-            (&["无障碍", "辅助功能", "accessibility", "universal-access"], "universal-access", "无障碍"),
-            (&["隐私", "安全", "锁屏", "privacy"], "privacy", "隐私与安全"),
-            (&["应用", "默认应用", "applications", "apps"], "applications", "应用"),
-            (&["关于", "系统信息", "about", "system"], "system", "系统关于"),
+            (
+                &["无障碍", "辅助功能", "accessibility", "universal-access"],
+                "universal-access",
+                "无障碍",
+            ),
+            (
+                &["隐私", "安全", "锁屏", "privacy"],
+                "privacy",
+                "隐私与安全",
+            ),
+            (
+                &["应用", "默认应用", "applications", "apps"],
+                "applications",
+                "应用",
+            ),
+            (
+                &["关于", "系统信息", "about", "system"],
+                "system",
+                "系统关于",
+            ),
         ];
         for (keys, panel_id, label) in table {
             if keys.iter().any(|k| s == *k || s.contains(k)) {
@@ -423,10 +503,7 @@ impl SystemSettingsEngine {
             let p = Path::new(p_str);
             if let Some(ref fs_eng) = self.fs_engine
                 && (fs_eng.is_forbidden(p)
-                    || !fs_eng
-                        .authorized_roots()
-                        .iter()
-                        .any(|r| p.starts_with(r)))
+                    || !fs_eng.authorized_roots().iter().any(|r| p.starts_with(r)))
             {
                 anyhow::bail!("壁纸路径超出授权目录或属于受保护路径: {}", p_str);
             }
@@ -476,7 +553,14 @@ impl SystemSettingsEngine {
                 let (before_val, m) = self.read_setting_value(&meta.key_id)?;
                 let (target_val, rel_flag, note) =
                     self.compute_target_value(meta, &before_val, args)?;
-                (meta.key_id.clone(), rel_flag, note, target_val, before_val, m)
+                (
+                    meta.key_id.clone(),
+                    rel_flag,
+                    note,
+                    target_val,
+                    before_val,
+                    m,
+                )
             };
 
         // 10. Write value to backend
@@ -584,7 +668,10 @@ impl SystemSettingsEngine {
         if trimmed.is_empty()
             || trimmed.chars().any(|c| {
                 c.is_control()
-                    || matches!(c, ';' | '|' | '&' | '`' | '$' | '\\' | '\'' | '"' | '<' | '>')
+                    || matches!(
+                        c,
+                        ';' | '|' | '&' | '`' | '$' | '\\' | '\'' | '"' | '<' | '>'
+                    )
             })
         {
             return Err(vec!["Ubuntu Sans".into(), "JetBrains Mono".into()]);
@@ -600,10 +687,7 @@ impl SystemSettingsEngine {
             "JetBrains Mono",
             "Fira Code",
         ];
-        if let Some(hit) = builtin
-            .iter()
-            .find(|f| f.eq_ignore_ascii_case(trimmed))
-        {
+        if let Some(hit) = builtin.iter().find(|f| f.eq_ignore_ascii_case(trimmed)) {
             Ok((*hit).to_string())
         } else {
             Err(vec![
@@ -691,10 +775,9 @@ impl SystemSettingsEngine {
                 let mut parsed = Vec::new();
                 if let Some(arr) = json_steps.as_array() {
                     for item in arr {
-                        if let (Some(k), Some(v)) = (
-                            item.get("key").and_then(|x| x.as_str()),
-                            item.get("value"),
-                        ) {
+                        if let (Some(k), Some(v)) =
+                            (item.get("key").and_then(|x| x.as_str()), item.get("value"))
+                        {
                             parsed.push((k.to_string(), v.clone()));
                         }
                     }
@@ -760,7 +843,10 @@ impl SystemSettingsEngine {
             verification: VerificationReport {
                 state: VerificationState::Passed,
                 method: format!("scene_readback:{}", last_mode),
-                checks: vec!["all_scene_keys_verified".into(), "single_changeset_bound".into()],
+                checks: vec![
+                    "all_scene_keys_verified".into(),
+                    "single_changeset_bound".into(),
+                ],
                 details: None,
             },
             backend_mode: last_mode,
@@ -825,7 +911,10 @@ impl SystemSettingsEngine {
                 verification: VerificationReport {
                     state: VerificationState::RequestedUnverified,
                     method: "nmcli_saved_check".into(),
-                    checks: vec!["no_password_prompted".into(), "control_center_handoff".into()],
+                    checks: vec![
+                        "no_password_prompted".into(),
+                        "control_center_handoff".into(),
+                    ],
                     details: Some("unsaved network handed off to GNOME Control Center".into()),
                 },
                 backend_mode: "control_center_handoff".into(),
@@ -1036,9 +1125,7 @@ impl SystemSettingsEngine {
                     .get("mode")
                     .and_then(|v| v.as_str())
                     .unwrap_or("interactive");
-                if has_gui
-                    && let Some(bin) = resolve_trusted_executable("gnome-screenshot")
-                {
+                if has_gui && let Some(bin) = resolve_trusted_executable("gnome-screenshot") {
                     let flag = match mode {
                         "window" => "-w",
                         "interactive" => "-i",
@@ -1360,8 +1447,7 @@ impl SystemSettingsEngine {
             }
             "appearance.color_scheme" => {
                 if self.probe.gsettings_session_available
-                    && let Some(val) =
-                        gsettings_get("org.gnome.desktop.interface", "color-scheme")
+                    && let Some(val) = gsettings_get("org.gnome.desktop.interface", "color-scheme")
                 {
                     return Ok((json!(val), "gsettings".into()));
                 }
@@ -1372,8 +1458,7 @@ impl SystemSettingsEngine {
             }
             "appearance.accent_color" => {
                 if self.probe.gsettings_session_available
-                    && let Some(val) =
-                        gsettings_get("org.gnome.desktop.interface", "accent-color")
+                    && let Some(val) = gsettings_get("org.gnome.desktop.interface", "accent-color")
                 {
                     return Ok((json!(val), "gsettings".into()));
                 }
@@ -1494,8 +1579,7 @@ impl SystemSettingsEngine {
             }
             "screen.autolock" => {
                 if self.probe.gsettings_session_available
-                    && let Some(v) =
-                        gsettings_get("org.gnome.desktop.screensaver", "lock-enabled")
+                    && let Some(v) = gsettings_get("org.gnome.desktop.screensaver", "lock-enabled")
                 {
                     return Ok((
                         json!(if v == "true" { "on" } else { "off" }),
@@ -1747,9 +1831,7 @@ impl SystemSettingsEngine {
                             .map(|s| s.success())
                             .unwrap_or(false);
                     }
-                    if !ok
-                        && let Some(bctl) = resolve_trusted_executable("brightnessctl")
-                    {
+                    if !ok && let Some(bctl) = resolve_trusted_executable("brightnessctl") {
                         ok = Command::new(bctl)
                             .args(["set", &format!("{}%", pct.round() as u64)])
                             .status()
@@ -1887,7 +1969,10 @@ impl SystemSettingsEngine {
     ) -> anyhow::Result<(Value, bool, Option<String>)> {
         match meta.key_id.as_str() {
             "sound.mute" => {
-                let req = args.get("mode").and_then(|v| v.as_str()).unwrap_or("toggle");
+                let req = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("toggle");
                 let cur = before.as_str().unwrap_or("off");
                 let next = toggle_on_off(cur, req)?;
                 Ok((json!(next), false, None))
@@ -1901,7 +1986,10 @@ impl SystemSettingsEngine {
             | "network.airplane"
             | "input.touchpad.natural_scroll"
             | "input.touchpad.tap_to_click" => {
-                let req = args.get("state").and_then(|v| v.as_str()).unwrap_or("toggle");
+                let req = args
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("toggle");
                 let cur = before.as_str().unwrap_or("off");
                 let next = toggle_on_off(cur, req)?;
                 Ok((json!(next), false, None))
@@ -2459,10 +2547,7 @@ mod tests {
             .iter()
             .find(|d| d.id == "display.brightness.set")
             .unwrap();
-        let vol_set = descs
-            .iter()
-            .find(|d| d.id == "sound.volume.set")
-            .unwrap();
+        let vol_set = descs.iter().find(|d| d.id == "sound.volume.set").unwrap();
 
         let rb = eng
             .execute("r_zero", "t_z", bright_set, &json!({"value": 0}))

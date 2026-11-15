@@ -413,11 +413,7 @@ pub fn is_sensitive_credential_path(path: &str) -> bool {
 /// Detect whether `core` was initialized with an isolated `Some(custom_base)` directory (unit/E2E tests)
 /// rather than the real user XDG layout (`~/.local/share/intentos`).
 pub fn is_hermetic_test_core(core: &IntentOsCore) -> bool {
-    core.paths
-        .data_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        != Some("intentos")
+    core.paths.data_dir.file_name().and_then(|s| s.to_str()) != Some("intentos")
 }
 
 /// Check whether a file path is an OS package installer or raw system image artifact

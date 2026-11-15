@@ -7,12 +7,12 @@ use crate::broker::{BrokerDispatchOutcome, CapabilityBroker};
 use crate::config::XdgPaths;
 use crate::db::StateDb;
 use crate::gateway::ModelGateway;
-use crate::security_guard::PrivacySessionPolicy;
+use crate::security_guard::{ExecutionContext, PrivacySessionPolicy};
 use chrono::{DateTime, Duration, Utc};
 use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
     CapabilityCall, CapabilityDescriptor, ChatMessage, ContextBlock, DataClass, ExecutionStatus,
-    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, TaskBudget, TaskStep, Taint,
+    InvocationOrigin, PendingApproval, RunRequest, RuntimeEvent, Taint, TaskBudget, TaskStep,
     ToolSpec,
 };
 use intentos_sandbox::{SandboxSpec, build_sandboxed_command};
@@ -55,6 +55,11 @@ impl SessionBuffer {
             .lock()
             .unwrap()
             .retain(|_, s| s.updated_at >= cutoff);
+    }
+
+    pub fn peek(&self, session_id: &str) -> Option<SessionState> {
+        self.evict_expired();
+        self.sessions.lock().unwrap().get(session_id).cloned()
     }
 
     pub fn get_or_create(&self, session_id: Option<&str>) -> SessionState {
@@ -162,9 +167,7 @@ pub fn build_context_blocks_with_privacy(
         blocks.extend(extra_blocks);
     } else {
         blocks.extend(extra_blocks.into_iter().filter(|b| {
-            b.taint != Taint::Memory
-                && b.label != "memories"
-                && b.label != "personal_os_memory"
+            b.taint != Taint::Memory && b.label != "memories" && b.label != "personal_os_memory"
         }));
     }
 
@@ -259,10 +262,38 @@ impl AgentCoordinator {
         task_id: &str,
         session: &SessionState,
         user_text: &str,
-        mut extra_blocks: Vec<ContextBlock>,
+        extra_blocks: Vec<ContextBlock>,
         budget: TaskBudget,
     ) -> anyhow::Result<AgentRunResult> {
-        let privacy = PrivacySessionPolicy::from_session(false, Some(&session.session_id));
+        let privacy = self
+            .core()
+            .map(|c| c.task_privacy_policy(task_id))
+            .unwrap_or_else(|| {
+                PrivacySessionPolicy::from_session(false, Some(&session.session_id))
+            });
+        let exec_ctx = ExecutionContext::new(
+            session.session_id.clone(),
+            task_id.to_string(),
+            None,
+            privacy,
+            vec![Taint::User],
+            DataClass::Public,
+            budget,
+        );
+        self.run_l2_with_privacy(&exec_ctx, session, user_text, extra_blocks)
+            .await
+    }
+
+    pub async fn run_l2_with_privacy(
+        &self,
+        exec_ctx: &ExecutionContext,
+        session: &SessionState,
+        user_text: &str,
+        mut extra_blocks: Vec<ContextBlock>,
+    ) -> anyhow::Result<AgentRunResult> {
+        let task_id = exec_ctx.task_id.as_str();
+        let privacy = exec_ctx.privacy;
+        let budget = exec_ctx.budget.clone();
 
         // 1. Offline / No-Cloud-Key Deterministic AIOS Fallbacks:
         //    a) Personal Memory Hub (`memory_hub` — mentioned files, XBEL frequent files, Ubuntu software profile)
@@ -272,17 +303,15 @@ impl AgentCoordinator {
             if let Some(core) = self.core() {
                 if privacy.allows_memory_read()
                     && let Some((answer_md, hits)) =
-                        crate::memory_hub::try_answer_memory_query_deterministically(
+                        crate::memory_hub::try_answer_memory_query_deterministically_with_policy(
                             &core,
                             user_text,
                             Some(session.session_id.as_str()),
+                            privacy,
                         )
                 {
                     let step = TaskStep {
-                        step_id: format!(
-                            "mem_{}",
-                            &uuid::Uuid::new_v4().simple().to_string()[..8]
-                        ),
+                        step_id: format!("mem_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
                         capability_id: "memory_hub.query".into(),
                         arguments_summary: json!({ "query": user_text }).to_string(),
                         status: ExecutionStatus::Exited,
@@ -338,10 +367,11 @@ impl AgentCoordinator {
             && privacy.allows_memory_read()
             && !extra_blocks.iter().any(|b| b.label == "personal_os_memory")
         {
-            let (mem_md, _hits) = crate::memory_hub::build_personal_memory_prompt(
+            let (mem_md, _hits) = crate::memory_hub::build_personal_memory_prompt_with_policy(
                 &core,
                 user_text,
                 Some(session.session_id.as_str()),
+                privacy,
             );
             if !mem_md.trim().is_empty() {
                 extra_blocks.push(ContextBlock {
@@ -363,14 +393,30 @@ impl AgentCoordinator {
             extra_blocks,
             privacy,
         );
-        let (taints, data_class) = compute_context_taints_and_class(&context_blocks);
+        let (mut taints, mut data_class) = compute_context_taints_and_class(&context_blocks);
+        for t in &exec_ctx.taints {
+            if !taints.contains(t) {
+                taints.push(*t);
+            }
+        }
+        if exec_ctx.data_class > data_class {
+            data_class = exec_ctx.data_class;
+        }
 
         let mut tools: Vec<ToolSpec> = descriptors
             .into_iter()
+            .filter(|d| {
+                privacy.allows_memory_write() || !crate::security_guard::is_memory_write_tool(&d.id)
+            })
             .map(descriptor_to_tool_spec)
             .collect();
         for spec in self.broker.aios_tool_specs() {
             if !privacy.allows_memory_read() && crate::memory_hub::is_memory_tool(&spec.name) {
+                continue;
+            }
+            if !privacy.allows_memory_write()
+                && crate::security_guard::is_memory_write_tool(&spec.name)
+            {
                 continue;
             }
             tools.push(spec);
@@ -399,15 +445,18 @@ impl AgentCoordinator {
 
         let script = self.paths.pi_adapter_script();
         let res = if self.preferred_runtime == "pi" && script.exists() {
-            match self.run_via_pi_worker(req.clone(), &taints).await {
+            match self.run_via_pi_worker(req.clone(), &taints, privacy).await {
                 Ok(r) => Ok(r),
                 Err(err) => {
-                    tracing::warn!("pi-adapter worker failed ({}), falling back to native Rust LLM loop", err);
-                    self.run_via_native_loop(req, &taints).await
+                    tracing::warn!(
+                        "pi-adapter worker failed ({}), falling back to native Rust LLM loop",
+                        err
+                    );
+                    self.run_via_native_loop(req, &taints, privacy).await
                 }
             }
         } else {
-            self.run_via_native_loop(req, &taints).await
+            self.run_via_native_loop(req, &taints, privacy).await
         };
 
         self.gateway.revoke_lease(&run_token);
@@ -419,6 +468,7 @@ impl AgentCoordinator {
         &self,
         req: RunRequest,
         taints: &[Taint],
+        privacy: PrivacySessionPolicy,
     ) -> anyhow::Result<AgentRunResult> {
         let script = self.paths.pi_adapter_script();
         let worker_dir = script
@@ -426,7 +476,10 @@ impl AgentCoordinator {
             .and_then(|p| p.parent())
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let scratch_dir = self.paths.runtime_dir.join(format!("worker_{}", req.run_id));
+        let scratch_dir = self
+            .paths
+            .runtime_dir
+            .join(format!("worker_{}", req.run_id));
         std::fs::create_dir_all(&scratch_dir)?;
 
         let gw_sock = self.paths.gateway_socket_path();
@@ -497,11 +550,50 @@ impl AgentCoordinator {
                         .map(|d| d.id.clone())
                         .unwrap_or_else(|| resolve_tool_name_to_cap(&tool_name, &self.broker));
 
+                    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
+                        &resolved_cap,
+                        &arguments,
+                        &req.session_id,
+                        privacy,
+                    ) {
+                        Ok(args) => args,
+                        Err(reason) => {
+                            steps.push(TaskStep {
+                                step_id: call_id.clone(),
+                                capability_id: resolved_cap,
+                                arguments_summary: arguments.to_string(),
+                                status: ExecutionStatus::Denied,
+                                verification: intentos_protocol::VerificationReport {
+                                    state: intentos_protocol::VerificationState::VerificationFailed,
+                                    method: "privacy_session_policy".into(),
+                                    checks: vec![],
+                                    details: Some(reason.clone()),
+                                },
+                                changeset_id: None,
+                                message: reason.clone(),
+                                data: json!({ "error": reason }),
+                                duration_ms: 0,
+                            });
+                            let reply = serde_json::to_string(&json!({
+                                "method": "tool_result",
+                                "params": {
+                                    "call_id": call_id,
+                                    "is_error": true,
+                                    "output": { "error": reason }
+                                }
+                            }))?;
+                            stdin.write_all(reply.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.flush().await?;
+                            continue;
+                        }
+                    };
+
                     let call = CapabilityCall {
                         request_id: call_id.clone(),
                         task_id: req.task_id.clone(),
                         capability_id: resolved_cap.clone(),
-                        arguments: arguments.clone(),
+                        arguments: trusted_args,
                         origin: InvocationOrigin::L2AgentPlan,
                         taints: taints.to_vec(),
                     };
@@ -587,6 +679,7 @@ impl AgentCoordinator {
         &self,
         req: RunRequest,
         taints: &[Taint],
+        privacy: PrivacySessionPolicy,
     ) -> anyhow::Result<AgentRunResult> {
         let sys_text = req
             .context_blocks
@@ -608,12 +701,8 @@ impl AgentCoordinator {
             let descriptors = self.broker.descriptors();
             let compiler =
                 crate::intent_engine::PatternCompiler::compile_from_descriptors(&descriptors);
-            let ranked = crate::intent_engine::rank_capabilities(
-                &req.input.content,
-                &compiler,
-                None,
-                14,
-            );
+            let ranked =
+                crate::intent_engine::rank_capabilities(&req.input.content, &compiler, None, 14);
             let mut chosen_names: Vec<String> = ranked
                 .into_iter()
                 .map(|r| r.capability_id.replace('.', "_"))
@@ -715,10 +804,7 @@ impl AgentCoordinator {
                         .unwrap_or("call_0")
                         .to_string();
                     let fn_obj = tc.get("function").unwrap_or(&Value::Null);
-                    let fn_name = fn_obj
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let fn_name = fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let raw_args = fn_obj
                         .get("arguments")
                         .and_then(|v| v.as_str())
@@ -727,11 +813,43 @@ impl AgentCoordinator {
                         serde_json::from_str(raw_args).unwrap_or_else(|_| json!({}));
 
                     let resolved_cap = resolve_tool_name_to_cap(fn_name, &self.broker);
+                    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
+                        &resolved_cap,
+                        &parsed_args,
+                        &req.session_id,
+                        privacy,
+                    ) {
+                        Ok(args) => args,
+                        Err(reason) => {
+                            steps.push(TaskStep {
+                                step_id: call_id.clone(),
+                                capability_id: resolved_cap,
+                                arguments_summary: parsed_args.to_string(),
+                                status: ExecutionStatus::Denied,
+                                verification: intentos_protocol::VerificationReport {
+                                    state: intentos_protocol::VerificationState::VerificationFailed,
+                                    method: "privacy_session_policy".into(),
+                                    checks: vec![],
+                                    details: Some(reason.clone()),
+                                },
+                                changeset_id: None,
+                                message: reason.clone(),
+                                data: json!({ "error": reason }),
+                                duration_ms: 0,
+                            });
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": serde_json::to_string(&json!({"error": reason}))?
+                            }));
+                            continue;
+                        }
+                    };
                     let call = CapabilityCall {
                         request_id: call_id.clone(),
                         task_id: req.task_id.clone(),
                         capability_id: resolved_cap.clone(),
-                        arguments: parsed_args.clone(),
+                        arguments: trusted_args,
                         origin: InvocationOrigin::L2AgentPlan,
                         taints: taints.to_vec(),
                     };
@@ -825,7 +943,8 @@ impl AgentCoordinator {
 }
 
 fn resolve_tool_name_to_cap(tool_name: &str, broker: &CapabilityBroker) -> String {
-    if crate::memory_hub::is_memory_tool(tool_name) || crate::app_adapter::is_adapter_tool(tool_name)
+    if crate::memory_hub::is_memory_tool(tool_name)
+        || crate::app_adapter::is_adapter_tool(tool_name)
     {
         return tool_name.trim().replace('.', "_");
     }
@@ -858,7 +977,9 @@ fn match_command_handoff(query: &str) -> Option<(&'static str, &'static str)> {
             "可按 CPU 占用率倒序列出前 10 个进程",
         ));
     }
-    if (q.contains("怎么") || q.contains("如何")) && (q.contains("目录大小") || q.contains("谁占得最多")) {
+    if (q.contains("怎么") || q.contains("如何"))
+        && (q.contains("目录大小") || q.contains("谁占得最多"))
+    {
         return Some((
             "du -sh * | sort -hr | head -n 15",
             "可统计当前目录下各子项体积并从大到小排序",
@@ -891,7 +1012,9 @@ fn match_command_handoff(query: &str) -> Option<(&'static str, &'static str)> {
             "将当前工作区未提交修改压入 Git Stash（git-guide 技能建议）",
         ));
     }
-    if q.contains("日志") && (lc.contains("systemd") || lc.contains("journal") || q.contains("报错")) {
+    if q.contains("日志")
+        && (lc.contains("systemd") || lc.contains("journal") || q.contains("报错"))
+    {
         return Some((
             "journalctl -p err -n 50 --no-pager",
             "查看最近 50 条系统错误级别日志（linux-diagnose 技能建议）",
@@ -903,7 +1026,8 @@ fn match_command_handoff(query: &str) -> Option<(&'static str, &'static str)> {
             "查找最近 7 天内修改过的文件（linux-diagnose 技能建议）",
         ));
     }
-    if (q.contains("怎么") || q.contains("如何")) && (q.contains("连通性") || q.contains("延迟")) {
+    if (q.contains("怎么") || q.contains("如何")) && (q.contains("连通性") || q.contains("延迟"))
+    {
         return Some((
             "ping -c 4 1.1.1.1",
             "测试网络连通性与往返延迟（linux-diagnose 技能建议）",

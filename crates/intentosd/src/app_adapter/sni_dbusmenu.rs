@@ -332,11 +332,7 @@ fn split_top_level_gvariant_items(body: &str) -> Vec<&str> {
             '}' => depth_brace = depth_brace.saturating_sub(1),
             '<' => depth_angle += 1,
             '>' if depth_angle > 0 => depth_angle -= 1,
-            ',' if depth_paren == 0
-                && depth_brack == 0
-                && depth_brace == 0
-                && depth_angle == 0 =>
-            {
+            ',' if depth_paren == 0 && depth_brack == 0 && depth_brace == 0 && depth_angle == 0 => {
                 let piece = body[seg_start..idx].trim();
                 if !piece.is_empty() {
                     parts.push(piece);
@@ -646,7 +642,11 @@ pub fn is_sensitive_tray_menu_label(label: &str) -> bool {
     sensitive_keywords.iter().any(|kw| lc.contains(kw))
 }
 
-async fn run_clean_gdbus(gdbus_bin: &Path, args: &[&str], timeout_ms: u64) -> Option<(bool, String, String)> {
+async fn run_clean_gdbus(
+    gdbus_bin: &Path,
+    args: &[&str],
+    timeout_ms: u64,
+) -> Option<(bool, String, String)> {
     let mut cmd = Command::new(gdbus_bin);
     apply_clean_desktop_env(&mut cmd);
     cmd.kill_on_drop(true)
@@ -921,10 +921,7 @@ pub fn tray_app_to_now_playing(app: &LiveTrayApp) -> MprisNowPlaying {
         app.status.clone()
     };
 
-    let identity = app
-        .comm
-        .clone()
-        .unwrap_or_else(|| app.id.clone());
+    let identity = app.comm.clone().unwrap_or_else(|| app.id.clone());
 
     let title_opt = (!app.title.trim().is_empty()).then(|| app.title.trim().to_string());
 
@@ -1056,7 +1053,10 @@ pub fn match_tray_app_for_hint<'a>(
         return None;
     }
     // Direct D-Bus service name match
-    if let Some(exact_svc) = apps.iter().find(|a| a.service.eq_ignore_ascii_case(&raw_lc)) {
+    if let Some(exact_svc) = apps
+        .iter()
+        .find(|a| a.service.eq_ignore_ascii_case(&raw_lc))
+    {
         return Some(exact_svc);
     }
 
@@ -1140,7 +1140,12 @@ pub fn match_menu_item_for_action<'a>(
         // 2. Safe prefix/contains match for window show (e.g. `Open Antigravity` or `启动 WPS 云盘`, avoiding `打开网页版`)
         if matches!(
             act_lc.as_str(),
-            "show_window" | "focus_window" | "activate" | "raise_window" | "显示主窗口" | "聚焦窗口"
+            "show_window"
+                | "focus_window"
+                | "activate"
+                | "raise_window"
+                | "显示主窗口"
+                | "聚焦窗口"
         ) && let Some(found) = items.iter().find(|m| {
             let l = m.label.trim();
             let ll = l.to_ascii_lowercase();
@@ -1247,7 +1252,10 @@ async fn send_dbusmenu_click(gdbus_bin: &Path, svc: &str, menu_path: &str, item_
         return false;
     };
     let refs: Vec<&str> = event_argv.iter().map(String::as_str).collect();
-    matches!(run_clean_gdbus(gdbus_bin, &refs, 1800).await, Some((true, _, _)))
+    matches!(
+        run_clean_gdbus(gdbus_bin, &refs, 1800).await,
+        Some((true, _, _))
+    )
 }
 
 /// Activate / raise a tray-resident application (`SodaM`, `QQ`, `微信`, `FlClash`, `WPS`) by:
@@ -1686,12 +1694,11 @@ mod tests {
 
     #[test]
     fn sanitize_ld_library_path_strips_conda_and_preserves_system_paths() {
+        assert_eq!(sanitize_ld_library_path("/home/alice/miniconda3/lib"), None);
         assert_eq!(
-            sanitize_ld_library_path("/home/alice/miniconda3/lib"),
-            None
-        );
-        assert_eq!(
-            sanitize_ld_library_path("/home/alice/miniconda3/lib:/usr/local/lib:/opt/anaconda3/lib"),
+            sanitize_ld_library_path(
+                "/home/alice/miniconda3/lib:/usr/local/lib:/opt/anaconda3/lib"
+            ),
             Some("/usr/local/lib".to_string())
         );
         assert_eq!(sanitize_ld_library_path(""), None);

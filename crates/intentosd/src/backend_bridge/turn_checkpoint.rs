@@ -1271,9 +1271,10 @@ pub enum TurnRegistrationOutcome {
     PreCancelled,
 }
 
+#[cfg(test)]
 pub(crate) enum TurnStartOutcome {
     Started(Arc<ActiveTurnHandle>),
-    IdempotentReplay(Value),
+    IdempotentReplay(#[allow(dead_code)] Value),
     PreCancelled,
 }
 
@@ -1413,8 +1414,8 @@ impl TurnRegistry {
             if let Some(reason) = comp_entry.identity.conflict_reason(&identity) {
                 return TurnRegistrationOutcome::Conflict { reason };
             }
-            if identity.privacy.allows_memory_write()
-                && comp_entry.identity.privacy.allows_memory_write()
+            if identity.privacy.allows_replay_cache()
+                && comp_entry.identity.privacy.allows_replay_cache()
             {
                 return TurnRegistrationOutcome::IdempotentReplay(comp_entry.result.clone());
             }
@@ -1487,11 +1488,11 @@ impl TurnRegistry {
 
         handle.set_finished_and_notify(next_state, result.clone());
 
-        if handle.identity.privacy.allows_memory_write() {
+        if handle.identity.privacy.allows_replay_cache() {
             self.push_completed_tombstone(&handle.turn_id, now);
         }
 
-        if cache_for_replay && handle.identity.privacy.allows_memory_write() {
+        if cache_for_replay && handle.identity.privacy.allows_replay_cache() {
             self.completed
                 .retain(|c| c.identity.turn_id != handle.turn_id);
             while self.completed.len() >= MAX_COMPLETED_TURN_CACHE {
@@ -1595,6 +1596,7 @@ pub fn turn_lifecycle_state(turn_id: &str) -> Option<TurnLifecycleState> {
         .lifecycle_state(turn_id, Instant::now())
 }
 
+#[cfg(test)]
 pub(crate) fn begin_turn(turn_id: &str, session_id: Option<&str>) -> TurnStartOutcome {
     let privacy = PrivacySessionPolicy::from_session(false, session_id);
     let identity = TurnIdentity {
@@ -1623,17 +1625,11 @@ pub(crate) fn begin_turn(turn_id: &str, session_id: Option<&str>) -> TurnStartOu
     }
 }
 
+#[cfg(test)]
 pub(crate) fn complete_turn(turn_id: &str, result: Value, cache_for_replay: bool) {
     let mut reg = turn_registry().lock().unwrap();
     if let Some(handle) = reg.active.get(turn_id).map(|e| e.handle.clone()) {
         reg.complete_turn_at(&handle, result, cache_for_replay, Instant::now());
-    }
-}
-
-pub(crate) fn remove_active_turn(turn_id: &str) {
-    let mut reg = turn_registry().lock().unwrap();
-    if let Some(handle) = reg.active.get(turn_id).map(|e| e.handle.clone()) {
-        reg.abort_turn(&handle);
     }
 }
 
@@ -2319,12 +2315,22 @@ pub fn verify_checkpoint_policy_scope(
     Ok(())
 }
 
-fn canonical_args_without_injected_session(cap_id: &str, v: &Value) -> String {
-    if crate::memory_hub::is_memory_tool(cap_id)
-        && let Some(obj) = v.as_object()
-    {
+fn canonical_args_without_injected_session(_cap_id: &str, v: &Value) -> String {
+    if let Some(obj) = v.as_object() {
         let mut copy = obj.clone();
-        copy.remove("session_id");
+        for key in [
+            "session_id",
+            "privacy_policy",
+            "incognito",
+            "step_id",
+            "_step_id",
+            "__step_id",
+            "attempt_id",
+            "_attempt_id",
+            "idempotency_key",
+        ] {
+            copy.remove(key);
+        }
         return canonicalize_tool_args_value(&Value::Object(copy));
     }
     canonicalize_tool_args_value(v)

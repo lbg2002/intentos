@@ -13,14 +13,16 @@ use crate::policy::PolicyEngine;
 use crate::resource::ResourceEngine;
 use crate::router::{IntentRouter, RoutedIntent};
 use crate::runtime::{AgentCoordinator, SessionBuffer, SessionState};
-use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard, UnifiedTaskStateMachine};
+use crate::security_guard::{
+    ExecutionContext, PrivacySessionPolicy, SensitiveDataGuard, UnifiedTaskStateMachine,
+};
 use crate::settings::SystemSettingsEngine;
 use chrono::Utc;
 use intentos_fsops::SafeFsEngine;
 use intentos_protocol::{
     CandidateResponse, CapabilityCall, ChangeSet, ContextBlock, DaemonStatus, DataClass,
-    ExecutionStatus, IntentRequest, InvocationOrigin, PROTOCOL_VERSION, RouteLayer, Task,
-    TaskBudget, TaskStatus, TaskStep, TaskTrigger, Taint, UiRpcRequest, UiRpcResponse,
+    ExecutionStatus, IntentRequest, InvocationOrigin, PROTOCOL_VERSION, RouteLayer, Taint, Task,
+    TaskBudget, TaskStatus, TaskStep, TaskTrigger, UiRpcRequest, UiRpcResponse,
 };
 use intentos_sandbox::probe_sandbox;
 use serde::{Deserialize, Serialize};
@@ -64,6 +66,7 @@ pub struct IntentOsCore {
     pub sessions: Arc<SessionBuffer>,
     pub agent: Arc<AgentCoordinator>,
     incognito_tasks: Mutex<HashMap<String, Task>>,
+    task_privacy_policies: Mutex<HashMap<String, PrivacySessionPolicy>>,
     passthrough_cwd: Mutex<PathBuf>,
     started_at: Instant,
 }
@@ -122,8 +125,11 @@ impl IntentOsCore {
         let _ = resources.refresh_all();
 
         let settings = Arc::new(
-            SystemSettingsEngine::new(state_db.clone(), app_config.allow_simulated_hardware_fallback)
-                .with_resources(resources.clone(), fs_engine.clone()),
+            SystemSettingsEngine::new(
+                state_db.clone(),
+                app_config.allow_simulated_hardware_fallback,
+            )
+            .with_resources(resources.clone(), fs_engine.clone()),
         );
         let policy = Arc::new(PolicyEngine::new(fs_engine.clone()));
         let broker = Arc::new(CapabilityBroker::load(
@@ -173,6 +179,7 @@ impl IntentOsCore {
             sessions,
             agent,
             incognito_tasks: Mutex::new(HashMap::new()),
+            task_privacy_policies: Mutex::new(HashMap::new()),
             passthrough_cwd: Mutex::new(init_cwd),
             started_at: Instant::now(),
         });
@@ -200,7 +207,7 @@ impl IntentOsCore {
                                 cmd.trim(),
                                 intent_req.cwd.as_deref(),
                                 false,
-                                !intent_req.incognito,
+                                intent_req.effective_privacy().allows_habit_learning(),
                             )
                             .await?;
                         return Ok(json!({
@@ -250,9 +257,7 @@ impl IntentOsCore {
                     Ok(serde_json::to_value(self.state_db.list_memory_entries()?)?)
                 }
                 UiRpcRequest::UpsertMemory { subject, value } => {
-                    let mem_id = self
-                        .state_db
-                        .save_explicit_memory(&subject, &value, None)?;
+                    let mem_id = self.state_db.save_explicit_memory(&subject, &value, None)?;
                     Ok(json!({ "id": mem_id, "subject": subject, "value": value }))
                 }
                 UiRpcRequest::DeleteMemory { id } => {
@@ -399,23 +404,57 @@ impl IntentOsCore {
         }
     }
 
-    pub(crate) fn is_incognito_task(&self, task_id: &str) -> bool {
-        task_id.starts_with("incog_") || self.incognito_tasks.lock().unwrap().contains_key(task_id)
+    pub(crate) fn register_task_privacy_policy(&self, task_id: &str, policy: PrivacySessionPolicy) {
+        self.task_privacy_policies
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string(), policy);
     }
 
-    pub(crate) fn persist_or_ephemeral(&self, task: &Task, incognito: bool) -> anyhow::Result<()> {
-        let privacy = PrivacySessionPolicy::from_incognito(incognito);
+    pub(crate) fn task_privacy_policy(&self, task_id: &str) -> PrivacySessionPolicy {
+        if let Some(p) = self
+            .task_privacy_policies
+            .lock()
+            .unwrap()
+            .get(task_id)
+            .copied()
+        {
+            return p;
+        }
+        if self.incognito_tasks.lock().unwrap().contains_key(task_id)
+            && !task_id.starts_with("ephemeral_ro_")
+        {
+            return PrivacySessionPolicy::StrictIsolated;
+        }
+        PrivacySessionPolicy::from_task_id(task_id)
+    }
+
+    pub(crate) fn persist_or_ephemeral_with_privacy(
+        &self,
+        task: &Task,
+        privacy: PrivacySessionPolicy,
+    ) -> anyhow::Result<()> {
+        self.register_task_privacy_policy(&task.id, privacy);
         if !privacy.allows_task_persistence() {
             if task.status == TaskStatus::AwaitingApproval {
-                self.incognito_tasks
-                    .lock()
-                    .unwrap()
-                    .insert(task.id.clone(), SensitiveDataGuard::sanitize_task_for_storage(task));
+                self.incognito_tasks.lock().unwrap().insert(
+                    task.id.clone(),
+                    SensitiveDataGuard::sanitize_task_for_storage(task),
+                );
             }
             Ok(())
         } else {
             self.state_db.upsert_task(task)
         }
+    }
+
+    pub(crate) fn persist_or_ephemeral(&self, task: &Task, incognito: bool) -> anyhow::Result<()> {
+        let privacy = if incognito {
+            PrivacySessionPolicy::StrictIsolated
+        } else {
+            self.task_privacy_policy(&task.id)
+        };
+        self.persist_or_ephemeral_with_privacy(task, privacy)
     }
 
     /// Submit an Intent (Note: public/untrusted callers NEVER trigger `$` passthrough here! §19.2).
@@ -436,7 +475,7 @@ impl IntentOsCore {
         injected_context: Vec<ContextBlock>,
         record_in_memory_hub: bool,
     ) -> anyhow::Result<Task> {
-        let privacy = PrivacySessionPolicy::from_incognito(req.incognito);
+        let privacy = req.effective_privacy();
         let original_user_text = req.text.clone();
         let is_passthrough_attempt = original_user_text.trim().starts_with('$');
 
@@ -468,7 +507,7 @@ impl IntentOsCore {
                     })
                 })
                 .collect();
-            let _ = crate::memory_hub::record_conversation_turn(
+            let _ = crate::memory_hub::record_conversation_turn_with_policy(
                 self,
                 &crate::memory_hub::RecordTurnInput {
                     session_id: task.session_id.clone(),
@@ -479,6 +518,7 @@ impl IntentOsCore {
                     trace_dots: Vec::new(),
                     incognito: !privacy.allows_memory_write(),
                 },
+                privacy,
             );
         }
 
@@ -490,36 +530,75 @@ impl IntentOsCore {
         req: IntentRequest,
         mut injected_context: Vec<ContextBlock>,
     ) -> anyhow::Result<Task> {
-        let incognito = req.incognito;
-        let privacy = PrivacySessionPolicy::from_incognito(incognito);
+        let privacy = req.effective_privacy();
+        let incognito = privacy == PrivacySessionPolicy::StrictIsolated;
         if !privacy.allows_memory_read() {
             injected_context.retain(|b| {
-                b.taint != Taint::Memory
-                    && b.label != "memories"
-                    && b.label != "personal_os_memory"
+                b.taint != Taint::Memory && b.label != "memories" && b.label != "personal_os_memory"
             });
         }
-        let session = if !privacy.allows_memory_write() {
-            SessionState {
-                session_id: format!(
-                    "incog_{}",
-                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+        let session = match privacy {
+            PrivacySessionPolicy::StrictIsolated => SessionState {
+                session_id: ExecutionContext::fallback_session_id(
+                    PrivacySessionPolicy::StrictIsolated,
                 ),
                 messages: Vec::new(),
                 last_resource_path: None,
                 updated_at: Utc::now(),
+            },
+            PrivacySessionPolicy::EphemeralReadOnly => {
+                let target_sid = req
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.starts_with("incog_"))
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        ExecutionContext::fallback_session_id(
+                            PrivacySessionPolicy::EphemeralReadOnly,
+                        )
+                    });
+                if let Some(existing) = self.sessions.peek(&target_sid) {
+                    existing
+                } else {
+                    let hydrated_turns = crate::memory_hub::hydrate_session_qa_turns_with_policy(
+                        self,
+                        None,
+                        &target_sid,
+                        PrivacySessionPolicy::EphemeralReadOnly,
+                    );
+                    let mut hydrated_msgs = Vec::with_capacity(hydrated_turns.len() * 2);
+                    for t in hydrated_turns
+                        .into_iter()
+                        .rev()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        hydrated_msgs.push(intentos_protocol::ChatMessage {
+                            role: "user".into(),
+                            content: t.user_question,
+                        });
+                        hydrated_msgs.push(intentos_protocol::ChatMessage {
+                            role: "assistant".into(),
+                            content: t.clean_assistant_answer,
+                        });
+                    }
+                    SessionState {
+                        session_id: target_sid,
+                        messages: hydrated_msgs,
+                        last_resource_path: None,
+                        updated_at: Utc::now(),
+                    }
+                }
             }
-        } else {
-            self.sessions.get_or_create(req.session_id.as_deref())
+            PrivacySessionPolicy::Standard => {
+                self.sessions.get_or_create(req.session_id.as_deref())
+            }
         };
-        let task_id = if incognito {
-            format!(
-                "incog_task_{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..10]
-            )
-        } else {
-            format!("task_{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
-        };
+        let task_id = ExecutionContext::new_task_id(privacy);
+        self.register_task_privacy_policy(&task_id, privacy);
         let now = Utc::now();
 
         let mut taints = vec![Taint::User];
@@ -570,7 +649,8 @@ impl IntentOsCore {
                 req.text
                     .replace("把它", &format!("把 {}", last_p))
                     .replace("将它", &format!("把 {}", last_p))
-            } else if req.text.contains("它所在文件夹") || req.text.contains("它所在目录") {
+            } else if req.text.contains("它所在文件夹") || req.text.contains("它所在目录")
+            {
                 format!("打开 {} 所在文件夹", last_p)
             } else if req.text == "打开它" {
                 format!("打开 {}", last_p)
@@ -647,7 +727,7 @@ impl IntentOsCore {
                     &resolved_text,
                     taints.clone(),
                     data_class,
-                    incognito,
+                    privacy,
                     now,
                 )
                 .await?
@@ -660,7 +740,8 @@ impl IntentOsCore {
                 reason: "AIOS 个人记忆、文档章节大纲定位或软件指令转译查询升级至 L2 智能体".into(),
             }
         } else if privacy.allows_memory_read() {
-            self.router.route_text(&resolved_text, effective_force_agent)
+            self.router
+                .route_text(&resolved_text, effective_force_agent)
         } else {
             IntentRouter::new(self.resources.clone())
                 .route_text(&resolved_text, effective_force_agent)
@@ -721,8 +802,8 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: Utc::now(),
                 };
-                self.persist_or_ephemeral(&task, incognito)?;
-                if !incognito {
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+                if privacy.allows_memory_write() {
                     self.sessions
                         .append_turn(&session.session_id, &resolved_text, &msg, None);
                 }
@@ -730,7 +811,10 @@ impl IntentOsCore {
             }
             RoutedIntent::SaveExplicitMemory { subject, value } => {
                 if !privacy.allows_memory_write() {
-                    let msg = "当前处于隐私会话（Incognito）模式：不保存任何持久化记忆或历史记录".to_string();
+                    let msg = format!(
+                        "当前处于隐私会话（{}）模式：不保存任何持久化记忆或历史记录",
+                        privacy.as_str()
+                    );
                     let clean_goal = SensitiveDataGuard::redact_text(&resolved_text).0;
                     return Ok(Task {
                         id: task_id,
@@ -825,6 +909,34 @@ impl IntentOsCore {
                 }
             }
             RoutedIntent::SaveCurrentScene { name } => {
+                if !privacy.allows_memory_write() {
+                    let msg = format!(
+                        "当前处于隐私会话（{}）模式：不保存持久化场景快照",
+                        privacy.as_str()
+                    );
+                    let task = Task {
+                        id: task_id,
+                        goal: resolved_text.clone(),
+                        session_id: Some(session.session_id.clone()),
+                        project_id: None,
+                        trigger: TaskTrigger::User,
+                        route: RouteLayer::L0,
+                        status: TaskStatus::Failed,
+                        steps: Vec::new(),
+                        changeset_ids: Vec::new(),
+                        pending_approval: None,
+                        candidates_for_disambiguation: Vec::new(),
+                        assistant_message: Some(msg.clone()),
+                        result_summary: Some(msg),
+                        handoff_command: None,
+                        taint: taints,
+                        data_class,
+                        budget: TaskBudget::default(),
+                        created_at: now,
+                        updated_at: Utc::now(),
+                    };
+                    return Ok(task);
+                }
                 let (status, msg) = match self.settings.snapshot_current_scene(&name) {
                     Ok(m) => (TaskStatus::Completed, m),
                     Err(e) => (TaskStatus::Failed, e.to_string()),
@@ -850,8 +962,8 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: Utc::now(),
                 };
-                self.persist_or_ephemeral(&task, incognito)?;
-                if !incognito {
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+                if privacy.allows_memory_write() {
                     self.sessions
                         .append_turn(&session.session_id, &resolved_text, &msg, None);
                 }
@@ -1039,12 +1151,12 @@ impl IntentOsCore {
                                         s.confidence >= 0.85 && !s.depends_on_previous_output
                                     })
                                 {
-                                    let rep = crate::intent_engine::execute_compound(
+                                    let rep = crate::intent_engine::execute_compound_with_policy(
                                         self,
                                         &resolved_text,
                                         Some(compound.steps),
                                         Some(&session.session_id),
-                                        incognito,
+                                        privacy,
                                         &compiler,
                                     )
                                     .await?;
@@ -1075,9 +1187,7 @@ impl IntentOsCore {
                                         updated_at: Utc::now(),
                                     };
                                     UnifiedTaskStateMachine::transition_task(
-                                        &mut task,
-                                        status,
-                                        None,
+                                        &mut task, status, None,
                                     )?;
                                     self.persist_or_ephemeral(&task, incognito)?;
                                     return Ok(task);
@@ -1186,15 +1296,16 @@ impl IntentOsCore {
                                             return Ok(task);
                                         }
 
-                                        let rep = crate::intent_engine::execute_compound(
-                                            self,
-                                            &resolved_text,
-                                            Some(compound.steps),
-                                            Some(&session.session_id),
-                                            incognito,
-                                            &compiler,
-                                        )
-                                        .await?;
+                                        let rep =
+                                            crate::intent_engine::execute_compound_with_policy(
+                                                self,
+                                                &resolved_text,
+                                                Some(compound.steps),
+                                                Some(&session.session_id),
+                                                privacy,
+                                                &compiler,
+                                            )
+                                            .await?;
 
                                         let (target_status, full_msg) = if rep.completed_steps > 0 {
                                             (
@@ -1286,7 +1397,7 @@ impl IntentOsCore {
                                                     &resolved_text,
                                                     taints.clone(),
                                                     data_class,
-                                                    incognito,
+                                                    privacy,
                                                     now,
                                                     false,
                                                 )
@@ -1322,11 +1433,13 @@ impl IntentOsCore {
                         .iter()
                         .any(|b| b.label == "personal_os_memory")
                 {
-                    let (mem_md, _hits) = crate::memory_hub::build_personal_memory_prompt(
-                        self,
-                        &resolved_text,
-                        Some(session.session_id.as_str()),
-                    );
+                    let (mem_md, _hits) =
+                        crate::memory_hub::build_personal_memory_prompt_with_policy(
+                            self,
+                            &resolved_text,
+                            Some(session.session_id.as_str()),
+                            privacy,
+                        );
                     if !mem_md.trim().is_empty() {
                         if !taints.contains(&Taint::Memory) {
                             taints.push(Taint::Memory);
@@ -1349,6 +1462,15 @@ impl IntentOsCore {
                     max_runtime_seconds: self.brain_config.runtime_limits.max_runtime_seconds,
                     max_cost: None,
                 };
+                let exec_ctx = ExecutionContext::new(
+                    session.session_id.clone(),
+                    task_id.clone(),
+                    None,
+                    privacy,
+                    taints.clone(),
+                    data_class,
+                    budget.clone(),
+                );
                 let mut task = Task {
                     id: task_id.clone(),
                     goal: resolved_text.clone(),
@@ -1371,11 +1493,11 @@ impl IntentOsCore {
                     updated_at: now,
                 };
                 UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Running, None)?;
-                self.persist_or_ephemeral(&task, incognito)?;
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
 
                 match self
                     .agent
-                    .run_l2(&task_id, &session, &resolved_text, injected_context, budget)
+                    .run_l2_with_privacy(&exec_ctx, &session, &resolved_text, injected_context)
                     .await
                 {
                     Ok(run_out) => {
@@ -1391,10 +1513,8 @@ impl IntentOsCore {
                             task.assistant_message = Some(pa.summary.clone());
                             task.pending_approval = Some(pa);
                         } else {
-                            let enriched_msg = enrich_l2_chapter_open_message(
-                                &run_out.final_message,
-                                &task.steps,
-                            );
+                            let enriched_msg =
+                                enrich_l2_chapter_open_message(&run_out.final_message, &task.steps);
                             UnifiedTaskStateMachine::transition_task(
                                 &mut task,
                                 TaskStatus::Completed,
@@ -1411,7 +1531,7 @@ impl IntentOsCore {
                                 );
                             }
                         }
-                        self.persist_or_ephemeral(&task, incognito)?;
+                        self.persist_or_ephemeral_with_privacy(&task, privacy)?;
                         Ok(task)
                     }
                     Err(err) => {
@@ -1424,7 +1544,7 @@ impl IntentOsCore {
                                 &resolved_text,
                                 taints,
                                 data_class,
-                                incognito,
+                                privacy,
                                 now,
                             )
                             .await?
@@ -1437,7 +1557,7 @@ impl IntentOsCore {
                             TaskStatus::Failed,
                             Some(&err_msg),
                         )?;
-                        self.persist_or_ephemeral(&task, incognito)?;
+                        self.persist_or_ephemeral_with_privacy(&task, privacy)?;
                         Ok(task)
                     }
                 }
@@ -1544,14 +1664,24 @@ impl IntentOsCore {
                     duration_ms: res.duration_ms,
                 });
                 task.updated_at = Utc::now();
-                self.persist_or_ephemeral(&task, incognito)?;
-                if PrivacySessionPolicy::from_incognito(incognito).allows_memory_write() {
+                let task_privacy = if incognito {
+                    PrivacySessionPolicy::StrictIsolated
+                } else {
+                    self.task_privacy_policy(&task.id)
+                };
+                self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
+                if task_privacy.allows_memory_write() {
                     self.sessions
                         .append_turn(session_id, goal, &res.message, last_res);
                 }
                 Ok(task)
             }
             BrokerDispatchOutcome::RequiresApproval(pa) => {
+                let task_privacy = if incognito {
+                    PrivacySessionPolicy::StrictIsolated
+                } else {
+                    self.task_privacy_policy(&task.id)
+                };
                 UnifiedTaskStateMachine::transition_task(
                     &mut task,
                     TaskStatus::AwaitingApproval,
@@ -1560,15 +1690,20 @@ impl IntentOsCore {
                 task.assistant_message = Some(pa.summary.clone());
                 task.pending_approval = Some(pa);
                 task.updated_at = Utc::now();
-                self.persist_or_ephemeral(&task, incognito)?;
+                self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
                 Ok(task)
             }
             BrokerDispatchOutcome::Denied { reason } => {
+                let task_privacy = if incognito {
+                    PrivacySessionPolicy::StrictIsolated
+                } else {
+                    self.task_privacy_policy(&task.id)
+                };
                 UnifiedTaskStateMachine::transition_task(&mut task, TaskStatus::Failed, None)?;
                 task.assistant_message = Some(format!("策略拒绝：{}", reason));
                 task.result_summary = Some(reason);
                 task.updated_at = Utc::now();
-                self.persist_or_ephemeral(&task, incognito)?;
+                self.persist_or_ephemeral_with_privacy(&task, task_privacy)?;
                 Ok(task)
             }
         }
@@ -1609,13 +1744,15 @@ impl IntentOsCore {
             .policy
             .verify_and_consume(approval_id, nonce, digest)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let mut really_incognito = pa.task_id.starts_with("incog_");
+        let mut task_privacy = self.task_privacy_policy(&pa.task_id);
         let mut persist_task = false;
         let mut task = if let Some(t) = self.incognito_tasks.lock().unwrap().remove(&pa.task_id) {
-            really_incognito = true;
+            if task_privacy == PrivacySessionPolicy::Standard {
+                task_privacy = PrivacySessionPolicy::StrictIsolated;
+            }
             t
         } else if let Some(t) = self.state_db.get_task(&pa.task_id)? {
-            persist_task = true;
+            persist_task = task_privacy.allows_task_persistence();
             t
         } else {
             // Support approvals created in Quick-Chat turns (`qc_...` / `incog_...`) or direct broker calls
@@ -1705,13 +1842,15 @@ impl IntentOsCore {
                 .or(discovered_first_file)
         };
 
-        if !really_incognito
+        if task_privacy.allows_memory_write()
             && let (Some(sid), Some(rp)) = (task.session_id.as_deref(), last_res.as_ref())
         {
             self.sessions.set_last_resource_path(sid, rp.clone());
         }
 
-        if !really_incognito && let Some(ref csid) = res.changeset_id {
+        if task_privacy.allows_task_persistence()
+            && let Some(ref csid) = res.changeset_id
+        {
             task.changeset_ids.push(csid.clone());
         }
         let target_status = if matches!(
@@ -1736,7 +1875,7 @@ impl IntentOsCore {
             arguments_summary: pa.arguments.to_string(),
             status: res.status,
             verification: res.verification,
-            changeset_id: if really_incognito {
+            changeset_id: if !task_privacy.allows_task_persistence() {
                 None
             } else {
                 res.changeset_id
@@ -1756,9 +1895,9 @@ impl IntentOsCore {
         });
         task.steps.push(step);
         task.updated_at = Utc::now();
-        if persist_task && !really_incognito {
+        if persist_task && task_privacy.allows_task_persistence() {
             self.state_db.upsert_task(&task)?;
-            if record_standalone_turn {
+            if record_standalone_turn && task_privacy.allows_memory_write() {
                 if let Some(ref sid) = task.session_id {
                     self.sessions.append_turn(
                         sid,
@@ -1767,7 +1906,7 @@ impl IntentOsCore {
                         last_res,
                     );
                 }
-                let _ = crate::memory_hub::record_conversation_turn(
+                let _ = crate::memory_hub::record_conversation_turn_with_policy(
                     self,
                     &crate::memory_hub::RecordTurnInput {
                         session_id: task.session_id.clone(),
@@ -1776,8 +1915,9 @@ impl IntentOsCore {
                         thinking: None,
                         tool_steps: vec![step_json],
                         trace_dots: Vec::new(),
-                        incognito: false,
+                        incognito: !task_privacy.allows_memory_write(),
                     },
+                    task_privacy,
                 );
             }
         }
@@ -1841,14 +1981,16 @@ impl IntentOsCore {
             .policy
             .deny_and_remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("未找到挂起的审批: {}", approval_id))?;
-        let mut is_incognito = pa.task_id.starts_with("incog_");
+        let mut persist_denied = self
+            .task_privacy_policy(&pa.task_id)
+            .allows_task_persistence();
         let mut task = if let Some(t) = self.incognito_tasks.lock().unwrap().remove(&pa.task_id) {
-            is_incognito = true;
+            persist_denied = false;
             t
         } else if let Some(t) = self.state_db.get_task(&pa.task_id)? {
             t
         } else {
-            is_incognito = true;
+            persist_denied = false;
             let now = Utc::now();
             Task {
                 id: pa.task_id.clone(),
@@ -1880,7 +2022,7 @@ impl IntentOsCore {
             task.updated_at = Utc::now();
         }
         task.assistant_message = Some("用户拒绝了该操作，未产生修改".into());
-        if !is_incognito {
+        if persist_denied {
             self.state_db.upsert_task(&task)?;
         }
         Ok(task)
@@ -2170,6 +2312,7 @@ impl IntentOsCore {
             }
         }
         self.incognito_tasks.lock().unwrap().clear();
+        self.task_privacy_policies.lock().unwrap().clear();
         Ok(())
     }
 
@@ -2181,11 +2324,9 @@ impl IntentOsCore {
         resolved_text: &str,
         mut taints: Vec<Taint>,
         mut data_class: DataClass,
-        incognito: bool,
+        privacy: PrivacySessionPolicy,
         now: chrono::DateTime<Utc>,
     ) -> anyhow::Result<Option<Task>> {
-        let privacy = PrivacySessionPolicy::from_incognito(incognito);
-
         if privacy.allows_memory_read()
             && is_smart_document_chapter_query(resolved_text)
             && let Some(doc_task) = self
@@ -2195,7 +2336,7 @@ impl IntentOsCore {
                     resolved_text,
                     taints.clone(),
                     data_class,
-                    incognito,
+                    privacy,
                     now,
                     true,
                 )
@@ -2206,10 +2347,11 @@ impl IntentOsCore {
 
         if privacy.allows_memory_read()
             && let Some((answer_md, hits)) =
-                crate::memory_hub::try_answer_memory_query_deterministically(
+                crate::memory_hub::try_answer_memory_query_deterministically_with_policy(
                     self,
                     resolved_text,
                     Some(session.session_id.as_str()),
+                    privacy,
                 )
         {
             if !taints.contains(&Taint::Memory) {
@@ -2255,7 +2397,7 @@ impl IntentOsCore {
                 created_at: now,
                 updated_at: Utc::now(),
             };
-            self.persist_or_ephemeral(&task, incognito)?;
+            self.persist_or_ephemeral_with_privacy(&task, privacy)?;
             if privacy.allows_memory_write() {
                 self.sessions
                     .append_turn(&session.session_id, resolved_text, &answer_md, None);
@@ -2287,8 +2429,8 @@ impl IntentOsCore {
                 created_at: now,
                 updated_at: Utc::now(),
             };
-            self.persist_or_ephemeral(&task, incognito)?;
-            if !incognito {
+            self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+            if privacy.allows_memory_write() {
                 self.sessions.append_turn(
                     &session.session_id,
                     resolved_text,
@@ -2310,11 +2452,11 @@ impl IntentOsCore {
         resolved_text: &str,
         mut taints: Vec<Taint>,
         mut data_class: DataClass,
-        incognito: bool,
+        privacy: PrivacySessionPolicy,
         now: chrono::DateTime<Utc>,
         require_chapter: bool,
     ) -> anyhow::Result<Option<Task>> {
-        if !PrivacySessionPolicy::from_incognito(incognito).allows_memory_read() {
+        if !privacy.allows_memory_read() {
             return Ok(None);
         }
         let chap_num_opt = crate::memory_hub::extract_chapter_number_hint(resolved_text);
@@ -2323,12 +2465,15 @@ impl IntentOsCore {
         }
         let section_hint = chap_num_opt.map(|n| format!("第{}章", n));
         let inspect_t0 = Instant::now();
-        let inspected =
-            match crate::memory_hub::inspect_document(self, resolved_text, section_hint.as_deref())
-            {
-                Ok(val) => val,
-                Err(_) => return Ok(None),
-            };
+        let inspected = match crate::memory_hub::inspect_document_with_sync(
+            self,
+            resolved_text,
+            section_hint.as_deref(),
+            privacy.allows_memory_write(),
+        ) {
+            Ok(val) => val,
+            Err(_) => return Ok(None),
+        };
         if !inspected
             .get("found")
             .and_then(|v| v.as_bool())
@@ -2379,7 +2524,10 @@ impl IntentOsCore {
             None => json!({ "query": resolved_text }),
         };
         let inspect_step = TaskStep {
-            step_id: format!("mem_doc_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            step_id: format!(
+                "mem_doc_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ),
             capability_id: "memory_inspect_document".into(),
             arguments_summary: inspect_args.to_string(),
             status: ExecutionStatus::Exited,
@@ -2479,8 +2627,8 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: Utc::now(),
                 };
-                self.persist_or_ephemeral(&task, incognito)?;
-                if !incognito {
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
+                if privacy.allows_memory_write() {
                     self.sessions.append_turn(
                         &session.session_id,
                         resolved_text,
@@ -2512,7 +2660,7 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: Utc::now(),
                 };
-                self.persist_or_ephemeral(&task, incognito)?;
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
                 Ok(Some(task))
             }
             BrokerDispatchOutcome::Denied { reason } => {
@@ -2538,7 +2686,7 @@ impl IntentOsCore {
                     created_at: now,
                     updated_at: Utc::now(),
                 };
-                self.persist_or_ephemeral(&task, incognito)?;
+                self.persist_or_ephemeral_with_privacy(&task, privacy)?;
                 Ok(Some(task))
             }
         }
@@ -2610,7 +2758,11 @@ fn enrich_l2_chapter_open_message(final_message: &str, steps: &[TaskStep]) -> St
         return final_message.to_string();
     }
     if excerpt.trim().is_empty() {
-        format!("{}\n\n📑 **定位章节**：**{}**", final_message.trim(), heading)
+        format!(
+            "{}\n\n📑 **定位章节**：**{}**",
+            final_message.trim(),
+            heading
+        )
     } else {
         format!(
             "{}\n\n📑 **定位章节**：**{}**\n> {}",
@@ -2653,7 +2805,8 @@ fn is_explicit_personal_memory_or_adapter_query(text: &str) -> bool {
         || q.contains("查看")
         || q.contains("列出");
 
-    let asks_mentioned = crate::memory_hub::is_conversational_entity_reference(q) && asks_what_or_list;
+    let asks_mentioned =
+        crate::memory_hub::is_conversational_entity_reference(q) && asks_what_or_list;
     let asks_frequent_files = (q.contains("长期")
         || q.contains("常用")
         || q.contains("高频")
@@ -2697,14 +2850,34 @@ fn resolve_conversational_memory_entity(
         return None;
     }
     let question_words = [
-        "有哪些", "有什么", "是什么", "哪些文件", "列表", "清单", "汇总", "统计",
+        "有哪些",
+        "有什么",
+        "是什么",
+        "哪些文件",
+        "列表",
+        "清单",
+        "汇总",
+        "统计",
     ];
     if question_words.iter().any(|w| q.contains(w)) {
         return None;
     }
     let action_verbs = [
-        "打开", "查看", "定位", "把", "将", "重命名", "改名", "复制", "拷贝", "移动", "移到",
-        "删除", "移入回收站", "压缩", "解压",
+        "打开",
+        "查看",
+        "定位",
+        "把",
+        "将",
+        "重命名",
+        "改名",
+        "复制",
+        "拷贝",
+        "移动",
+        "移到",
+        "删除",
+        "移入回收站",
+        "压缩",
+        "解压",
     ];
     if !action_verbs.iter().any(|v| q.contains(v)) {
         return None;
@@ -2772,7 +2945,8 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
     text: &str,
 ) -> Option<crate::runtime::AgentRunResult> {
     let q = text.trim();
-    let asks_music_via_adapter = (q.contains("转译层") && (q.contains("音乐") || q.contains("播放")))
+    let asks_music_via_adapter = (q.contains("转译层")
+        && (q.contains("音乐") || q.contains("播放")))
         || q.contains("正在播放什么")
         || q.contains("当前正在播放")
         || q.contains("当前播放什么")
@@ -2891,12 +3065,12 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
                     .get("title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("未知曲目");
-                let artist = p
-                    .get("artist")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let artist = p.get("artist").and_then(|v| v.as_str()).unwrap_or("");
                 if artist.is_empty() {
-                    md.push_str(&format!("- **{}** [{}]：正在播放《{}》\n", name, status, title));
+                    md.push_str(&format!(
+                        "- **{}** [{}]：正在播放《{}》\n",
+                        name, status, title
+                    ));
                 } else {
                     md.push_str(&format!(
                         "- **{}** [{}]：《{}》 — {}\n",
@@ -2952,10 +3126,9 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
         });
     }
 
-    let list_res =
-        crate::app_adapter::execute_adapter_tool(core, "app_adapter_list", &json!({}))
-            .await
-            .ok()?;
+    let list_res = crate::app_adapter::execute_adapter_tool(core, "app_adapter_list", &json!({}))
+        .await
+        .ok()?;
     let dur = t0.elapsed().as_millis() as u64;
     let adapters = list_res
         .get("adapters")
@@ -2971,7 +3144,10 @@ pub(crate) async fn try_execute_deterministic_adapter_intent(
             .get("display_name")
             .and_then(|v| v.as_str())
             .unwrap_or("App");
-        let cat = a.get("category").and_then(|v| v.as_str()).unwrap_or("general");
+        let cat = a
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general");
         let chans = a
             .get("channels")
             .and_then(|v| v.as_array())

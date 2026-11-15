@@ -340,8 +340,8 @@ pub fn classify_capability_idempotency(
     let cap = capability_id.trim();
 
     if effect == Effect::Observe
-        || cap.starts_with("memory_")
-        || cap.starts_with("memory.")
+        || ((cap.starts_with("memory_") || cap.starts_with("memory."))
+            && !crate::security_guard::is_memory_write_tool(cap))
         || matches!(
             cap,
             "app_adapter_inspect_app"
@@ -440,6 +440,9 @@ pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> 
 }
 
 pub fn resolve_capability_effect(core: &IntentOsCore, canonical_tool: &str) -> Effect {
+    if crate::security_guard::is_memory_write_tool(canonical_tool) {
+        return Effect::Setting;
+    }
     if crate::memory_hub::is_memory_tool(canonical_tool) {
         return Effect::Observe;
     }
@@ -663,18 +666,90 @@ pub async fn dispatch_broker_call_transactional(
         session_id,
         privacy,
     );
-    let effective_privacy =
-        if call.task_id.starts_with("incog_") || session_id.starts_with("incog_") {
+    let effective_privacy = if call.task_id.starts_with("incog_")
+        || session_id.starts_with("incog_")
+    {
+        PrivacySessionPolicy::StrictIsolated
+    } else if call.task_id.starts_with("ephemeral_ro_") || session_id.starts_with("ephemeral_ro_") {
+        if effect_ledger.privacy() == PrivacySessionPolicy::StrictIsolated {
             PrivacySessionPolicy::StrictIsolated
         } else {
-            effect_ledger.privacy()
-        };
+            PrivacySessionPolicy::EphemeralReadOnly
+        }
+    } else {
+        effect_ledger.privacy()
+    };
 
     let canonical_tool = resolve_tool_name_to_capability(&call.capability_id, core);
     let sanitized_input_args = strip_untrusted_step_meta_fields(&call.arguments);
-    let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
+    let trusted_args = match crate::security_guard::enforce_trusted_tool_context(
+        &canonical_tool,
+        &sanitized_input_args,
+        session_id,
+        effective_privacy,
+    ) {
+        Ok(args) => args,
+        Err(reason) => {
+            let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
+            let effect = resolve_capability_effect(core, &canonical_tool);
+            let policy =
+                classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
+            let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+                "attempt_1".to_string()
+            } else {
+                step_ctx.attempt_id.trim().to_string()
+            };
+            let step_id = step_ctx
+                .trusted_step_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| effect_ledger.next_step_id());
+            let pre_epoch = effect_ledger.state_epoch();
+            let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+                policy,
+                &step_id,
+                &attempt_id,
+                &canonical_tool,
+                &canonical_args,
+                pre_epoch,
+            );
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id: step_id.clone(),
+                    idempotency_key: pre_idem_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state: false,
+                    succeeded: false,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    cached_output: json!({ "error": reason, "was_denied": true }),
+                },
+                StepExecutionMeta {
+                    step_id,
+                    call_id: step_ctx.call_id,
+                    attempt_id,
+                    policy,
+                    pre_state_epoch: pre_epoch,
+                    post_state_epoch: pre_epoch,
+                    exec_state: StepExecState::Denied,
+                    is_error: true,
+                    was_denied: true,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                },
+            );
+            return Ok(BrokerDispatchOutcome::Denied { reason });
+        }
+    };
+    let canonical_args = canonicalize_json_for_dedup(&trusted_args);
     let effect = resolve_capability_effect(core, &canonical_tool);
-    let policy = classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
+    let policy = classify_capability_idempotency(&canonical_tool, effect, &trusted_args);
+    let mut trusted_call = call.clone();
+    trusted_call.capability_id = canonical_tool.clone();
+    trusted_call.arguments = trusted_args;
+    let call = &trusted_call;
     let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
         "attempt_1".to_string()
     } else {
@@ -1112,8 +1187,82 @@ where
     let is_mem = crate::memory_hub::is_memory_tool(&canonical_tool);
     let is_adap = crate::app_adapter::is_adapter_tool(&canonical_tool);
 
-    // Strip untrusted model-supplied step identity fields before policy/dedup/dispatch
-    let sanitized_input_args = strip_untrusted_step_meta_fields(parsed_args);
+    // Strip untrusted model-supplied step identity fields and enforce trusted session/privacy (`H05`)
+    let raw_sanitized_args = strip_untrusted_step_meta_fields(parsed_args);
+    let effective_args = match crate::security_guard::enforce_trusted_tool_context(
+        &canonical_tool,
+        &raw_sanitized_args,
+        &session.session_id,
+        effective_privacy,
+    ) {
+        Ok(args) => args,
+        Err(reason) => {
+            let canonical_args = canonicalize_json_for_dedup(&raw_sanitized_args);
+            let effect = resolve_capability_effect(core, &canonical_tool);
+            let policy =
+                classify_capability_idempotency(&canonical_tool, effect, &raw_sanitized_args);
+            let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
+                "attempt_1".to_string()
+            } else {
+                step_ctx.attempt_id.trim().to_string()
+            };
+            let step_id = step_ctx
+                .trusted_step_id
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| effect_ledger.next_step_id());
+            let pre_epoch = effect_ledger.state_epoch();
+            let pre_idem_key = effect_ledger.compute_step_idempotency_key(
+                policy,
+                &step_id,
+                &attempt_id,
+                &canonical_tool,
+                &canonical_args,
+                pre_epoch,
+            );
+            let err_val = json!({
+                "error": reason,
+                "was_denied": true,
+                "privacy_policy": effective_privacy.as_str(),
+            });
+            effect_ledger
+                .trace_dots
+                .push(TraceDot::tool_err(&canonical_tool, reason.clone(), 0));
+            effect_ledger.record_step_with_meta(
+                StepExecutionRecord {
+                    step_id: step_id.clone(),
+                    idempotency_key: pre_idem_key,
+                    capability_id: canonical_tool,
+                    canonical_args_json: canonical_args,
+                    effect,
+                    mutated_state: false,
+                    succeeded: false,
+                    changeset_id: None,
+                    verification_status: "Denied".to_string(),
+                    cached_output: err_val.clone(),
+                },
+                StepExecutionMeta {
+                    step_id,
+                    call_id: step_ctx.call_id,
+                    attempt_id,
+                    policy,
+                    pre_state_epoch: pre_epoch,
+                    post_state_epoch: pre_epoch,
+                    exec_state: StepExecState::Denied,
+                    is_error: true,
+                    was_denied: true,
+                    verification_status: "Denied".to_string(),
+                    recovery_hint: None,
+                },
+            );
+            return Ok(QuickChatToolExecOutcome::ToolMessage {
+                content: serde_json::to_string(&err_val)?,
+                is_error: true,
+                duplicate_blocked: false,
+            });
+        }
+    };
+    let sanitized_input_args = effective_args.clone();
     let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
     let effect = resolve_capability_effect(core, &canonical_tool);
     let policy = classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
@@ -1236,16 +1385,6 @@ where
                 duplicate_blocked: true,
             });
         }
-    }
-
-    let mut effective_args = sanitized_input_args.clone();
-    if is_mem
-        && !incognito
-        && effective_privacy.allows_memory_read()
-        && let Some(obj) = effective_args.as_object_mut()
-    {
-        obj.entry("session_id".to_string())
-            .or_insert_with(|| json!(session.session_id));
     }
 
     let is_untainted_reversible_setting = !is_mem
@@ -2433,15 +2572,27 @@ pub fn synthesize_rich_approved_step_markdown(user_text: &str, steps: &[TaskStep
     lines.join("\n")
 }
 
-/// Build context blocks while strictly isolating `StateDb` explicit memories when `incognito == true`.
+/// Build context blocks while strictly isolating `StateDb` explicit memories when `!privacy.allows_memory_read()`.
 pub fn prepare_turn_context_blocks(
     core: &IntentOsCore,
     extra_blocks: &[ContextBlock],
     incognito: bool,
 ) -> (Vec<ContextBlock>, Vec<Taint>, DataClass) {
+    prepare_turn_context_blocks_with_policy(
+        core,
+        extra_blocks,
+        PrivacySessionPolicy::from_incognito(incognito),
+    )
+}
+
+pub fn prepare_turn_context_blocks_with_policy(
+    core: &IntentOsCore,
+    extra_blocks: &[ContextBlock],
+    privacy: PrivacySessionPolicy,
+) -> (Vec<ContextBlock>, Vec<Taint>, DataClass) {
     let (mut blocks, _, _) = build_context_blocks(&core.state_db, extra_blocks.to_vec());
-    if incognito {
-        // Strictly remove `StateDb` explicit preferences (`user_memories`) in incognito sessions!
+    if !privacy.allows_memory_read() {
+        // Strictly remove `StateDb` explicit preferences (`user_memories`) when `!allows_memory_read()`!
         blocks.retain(|b| b.id != "user_memories");
     }
 
@@ -2464,8 +2615,22 @@ pub fn prepare_system_prompt_and_context(
     extra_blocks: &[ContextBlock],
     incognito: bool,
 ) -> (String, Vec<Taint>, DataClass) {
+    prepare_system_prompt_and_context_with_policy(
+        core,
+        active,
+        extra_blocks,
+        PrivacySessionPolicy::from_incognito(incognito),
+    )
+}
+
+pub fn prepare_system_prompt_and_context_with_policy(
+    core: &IntentOsCore,
+    active: &ActiveBackendSelection,
+    extra_blocks: &[ContextBlock],
+    privacy: PrivacySessionPolicy,
+) -> (String, Vec<Taint>, DataClass) {
     let (mut context_blocks, taints, data_class) =
-        prepare_turn_context_blocks(core, extra_blocks, incognito);
+        prepare_turn_context_blocks_with_policy(core, extra_blocks, privacy);
 
     let effort_hint = match active.reasoning_effort.as_str() {
         "fast" => "思考强度：快（fast）—— 请直接切入重点，简洁高效回答。",

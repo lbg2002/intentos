@@ -83,10 +83,7 @@ fn normalize_speech_language(raw: &str) -> anyhow::Result<String> {
         "auto" => Ok("auto".to_string()),
         "en" | "en-us" => Ok("en".to_string()),
         "ja" | "ko" | "yue" => Ok(clean),
-        other => anyhow::bail!(
-            "不支持的语音识别语言 '{}'（支持 zh / auto / en）",
-            other
-        ),
+        other => anyhow::bail!("不支持的语音识别语言 '{}'（支持 zh / auto / en）", other),
     }
 }
 
@@ -461,20 +458,12 @@ mod tests {
             "model with space",
             "",
         ] {
-            let dl_err = handle_module_rpc(
-                &core,
-                "download_model",
-                json!({ "model_id": evil }),
-            )
-            .await;
+            let dl_err =
+                handle_module_rpc(&core, "download_model", json!({ "model_id": evil })).await;
             assert!(dl_err.is_err(), "download_model must reject '{}'", evil);
 
-            let del_err = handle_module_rpc(
-                &core,
-                "delete_model",
-                json!({ "model_id": evil }),
-            )
-            .await;
+            let del_err =
+                handle_module_rpc(&core, "delete_model", json!({ "model_id": evil })).await;
             assert!(del_err.is_err(), "delete_model must reject '{}'", evil);
         }
     }
@@ -575,7 +564,10 @@ mod tests {
         assert!(model_dir.join("model.int8.onnx").is_file());
         assert!(model_dir.join("tokens.txt").is_file());
         assert!(model_dir.join("manifest.json").is_file());
-        assert_eq!(load_speech_config(&core).active_model_id, "sensevoice-small-int8");
+        assert_eq!(
+            load_speech_config(&core).active_model_id,
+            "sensevoice-small-int8"
+        );
 
         // Delete model & verify cleanup
         let del = handle_module_rpc(
@@ -705,7 +697,9 @@ mod tests {
         // 4. Valid speech-amplitude WAV with 0xFFFFFFFF streamed RIFF size is repaired & accepted
         let tone_wav = tmp.path().join("tone.wav");
         let tone_samples: Vec<i16> = (0..8000)
-            .map(|i| ((i as f64 * 2.0 * std::f64::consts::PI * 440.0 / 16000.0).sin() * 9000.0) as i16)
+            .map(|i| {
+                ((i as f64 * 2.0 * std::f64::consts::PI * 440.0 / 16000.0).sin() * 9000.0) as i16
+            })
             .collect();
         let mut raw_wav = build_pcm16_wav_bytes(&tone_samples, 16000);
         raw_wav[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -759,17 +753,18 @@ mod tests {
                         return;
                     }
 
-                    let body: Vec<u8> = if req.starts_with("GET /onnx/encoder_model_quantized.onnx ") {
-                        vec![0x11u8; 4096]
-                    } else if req.starts_with("GET /onnx/decoder_model_quantized.onnx ") {
-                        vec![0x22u8; 4096]
-                    } else if req.starts_with("GET /tokenizer.json ") {
-                        br#"{"model":{"vocab":{}},"added_tokens":[]}"#.to_vec()
-                    } else if req.starts_with("GET /config.json ") {
-                        br#"{"num_mel_bins":80}"#.to_vec()
-                    } else {
-                        b"missing".to_vec()
-                    };
+                    let body: Vec<u8> =
+                        if req.starts_with("GET /onnx/encoder_model_quantized.onnx ") {
+                            vec![0x11u8; 4096]
+                        } else if req.starts_with("GET /onnx/decoder_model_quantized.onnx ") {
+                            vec![0x22u8; 4096]
+                        } else if req.starts_with("GET /tokenizer.json ") {
+                            br#"{"model":{"vocab":{}},"added_tokens":[]}"#.to_vec()
+                        } else if req.starts_with("GET /config.json ") {
+                            br#"{"num_mel_bins":80}"#.to_vec()
+                        } else {
+                            b"missing".to_vec()
+                        };
 
                     let status = if body == b"missing" {
                         "HTTP/1.1 404 Not Found"
@@ -801,7 +796,9 @@ mod tests {
 
         let speech_wav = tmp.path().join("sample_voice.wav");
         let tone_samples: Vec<i16> = (0..8000)
-            .map(|i| ((i as f64 * 2.0 * std::f64::consts::PI * 300.0 / 16000.0).sin() * 10000.0) as i16)
+            .map(|i| {
+                ((i as f64 * 2.0 * std::f64::consts::PI * 300.0 / 16000.0).sin() * 10000.0) as i16
+            })
             .collect();
         std::fs::write(&speech_wav, build_pcm16_wav_bytes(&tone_samples, 16000)).unwrap();
 

@@ -11,7 +11,7 @@
 //! - `PublicDbusService` non-privileged D-Bus boundary (`org.intentos.Core1`).
 
 use intentos_protocol::{
-    CapabilityCall, ExecutionStatus, IntentRequest, InvocationOrigin, RouteLayer, TaskStatus, Taint,
+    CapabilityCall, ExecutionStatus, IntentRequest, InvocationOrigin, RouteLayer, Taint, TaskStatus,
 };
 use intentosd::broker::BrokerDispatchOutcome;
 use intentosd::config::{AppConfig, BrainConfig, XdgPaths};
@@ -84,6 +84,7 @@ async fn v0_1_loads_87_capabilities_and_routes_colloquial_l1() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -109,6 +110,7 @@ async fn v0_1_explicit_file_association_memory_and_deletion_tombstone() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -127,6 +129,7 @@ async fn v0_1_explicit_file_association_memory_and_deletion_tombstone() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -145,6 +148,7 @@ async fn v0_1_explicit_file_association_memory_and_deletion_tombstone() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -171,6 +175,7 @@ async fn v0_1_explicit_file_association_memory_and_deletion_tombstone() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -194,6 +199,7 @@ async fn v0_1_custom_scene_save_apply_and_single_changeset_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -209,6 +215,7 @@ async fn v0_1_custom_scene_save_apply_and_single_changeset_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -226,6 +233,7 @@ async fn v0_1_custom_scene_save_apply_and_single_changeset_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -245,6 +253,7 @@ async fn v0_1_custom_scene_save_apply_and_single_changeset_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -284,6 +293,7 @@ async fn v0_1_custom_scene_save_apply_and_single_changeset_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -310,6 +320,7 @@ async fn v0_1_incognito_privacy_session_and_offline_command_handoff() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: true,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -327,6 +338,7 @@ async fn v0_1_incognito_privacy_session_and_offline_command_handoff() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: true,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -334,7 +346,10 @@ async fn v0_1_incognito_privacy_session_and_offline_command_handoff() {
         .unwrap();
     assert_eq!(incog_query.status, TaskStatus::Completed);
     assert_eq!(core.state_db.list_tasks(100).unwrap().len(), initial_tasks);
-    assert_eq!(core.state_db.list_memory_entries().unwrap().len(), initial_mems);
+    assert_eq!(
+        core.state_db.list_memory_entries().unwrap().len(),
+        initial_mems
+    );
 
     // 2. Developer how-to query returns structured `handoff_command` without auto-execution (§8.8, A16)
     let handoff = core
@@ -347,15 +362,21 @@ async fn v0_1_incognito_privacy_session_and_offline_command_handoff() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
         .await
         .unwrap();
     assert_eq!(handoff.route, RouteLayer::L2);
-    let cmd = handoff.handoff_command.expect("should populate handoff_command");
+    let cmd = handoff
+        .handoff_command
+        .expect("should populate handoff_command");
     assert!(cmd.starts_with("$ git reset --soft HEAD~1"));
-    assert!(handoff.steps.is_empty(), "must NEVER auto-execute shell command");
+    assert!(
+        handoff.steps.is_empty(),
+        "must NEVER auto-execute shell command"
+    );
 
     // 3. Public non-privileged D-Bus service rejects `$ ` passthrough (§15.2)
     let dbus = PublicDbusService::new(core.clone());
@@ -378,6 +399,7 @@ async fn v0_1_archive_create_extract_and_font_whitelist() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -399,6 +421,7 @@ async fn v0_1_archive_create_extract_and_font_whitelist() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -418,6 +441,7 @@ async fn v0_1_archive_create_extract_and_font_whitelist() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -435,11 +459,15 @@ async fn v0_1_archive_create_extract_and_font_whitelist() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
         .await
         .unwrap();
     assert_eq!(bad_font.status, TaskStatus::Failed);
-    assert_eq!(bad_font.steps[0].status, ExecutionStatus::VerificationFailed);
+    assert_eq!(
+        bad_font.steps[0].status,
+        ExecutionStatus::VerificationFailed
+    );
 }

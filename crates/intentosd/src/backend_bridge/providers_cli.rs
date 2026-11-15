@@ -15,7 +15,7 @@
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
     build_quick_chat_openai_tools, execute_quick_chat_tool_call, finalize_completed_turn_outcome,
-    prepare_system_prompt_and_context, synthesize_rich_approved_step_markdown,
+    prepare_system_prompt_and_context_with_policy, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, DiscoveredBackend, DiscoveryOptions, build_search_dirs,
@@ -1497,8 +1497,17 @@ pub async fn run_cli_backend_turn_with_policy(
         BackendExecutionMode::ExternalChatOnly
     };
 
-    let (sys_text, taints, data_class) =
-        prepare_system_prompt_and_context(core, active, extra_blocks, incognito);
+    let effective_privacy = if incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+    let (sys_text, taints, data_class) = prepare_system_prompt_and_context_with_policy(
+        core,
+        active,
+        extra_blocks,
+        effective_privacy,
+    );
 
     let mut base_sections: Vec<String> = vec![sys_text.clone()];
     if effective_allow_broker_tools {
@@ -1548,7 +1557,7 @@ pub async fn run_cli_backend_turn_with_policy(
             turn_handle,
             round_idx + 1,
             &full_prompt,
-            incognito,
+            !effective_privacy.allows_memory_write(),
         )
         .await?;
 
@@ -1865,7 +1874,7 @@ pub async fn continue_resumed_cli_turn(
             resume_handle,
             cp.rounds_used + r_offset + 1,
             &full_prompt,
-            cp.incognito,
+            cp.incognito || !cp.effect_ledger.privacy().allows_memory_write(),
         )
         .await
         else {

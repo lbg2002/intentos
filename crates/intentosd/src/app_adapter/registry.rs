@@ -163,7 +163,10 @@ impl AdapterRegistry {
     pub fn builtin_only() -> Self {
         let mut profiles = builtin_adapter_profiles();
         for profile in &mut profiles {
-            if !profile.channels.contains(&AdaptationChannel::ProcessLifecycle) {
+            if !profile
+                .channels
+                .contains(&AdaptationChannel::ProcessLifecycle)
+            {
                 profile.channels.push(AdaptationChannel::ProcessLifecycle);
             }
             if !profile.supported_actions.iter().any(|a| a.action == "quit") {
@@ -182,7 +185,10 @@ impl AdapterRegistry {
         let mut order: Vec<String> = Vec::new();
 
         for mut profile in builtin_adapter_profiles() {
-            if !profile.channels.contains(&AdaptationChannel::ProcessLifecycle) {
+            if !profile
+                .channels
+                .contains(&AdaptationChannel::ProcessLifecycle)
+            {
                 profile.channels.push(AdaptationChannel::ProcessLifecycle);
             }
             if !profile.supported_actions.iter().any(|a| a.action == "quit") {
@@ -563,9 +569,9 @@ fn load_custom_manifest_file(
 pub fn normalize_intent_action(raw: &str) -> String {
     let s = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     match s.as_str() {
-        "quit" | "close" | "exit" | "quit_app" | "close_app" | "graceful_close"
-        | "force_close" | "关闭" | "退出" | "关掉" | "优雅关闭" | "强制关闭" | "结束进程"
-        | "关闭应用" | "关闭软件" | "退出应用" | "退出软件" => "quit".into(),
+        "quit" | "close" | "exit" | "quit_app" | "close_app" | "graceful_close" | "force_close"
+        | "关闭" | "退出" | "关掉" | "优雅关闭" | "强制关闭" | "结束进程" | "关闭应用"
+        | "关闭软件" | "退出应用" | "退出软件" => "quit".into(),
         "play" | "resume" | "播放" | "继续播放" | "开始播放" => "play".into(),
         "pause" | "暂停" | "暂停播放" => "pause".into(),
         "play_pause" | "playpause" | "toggle" | "toggle_play" | "播放暂停" | "切换播放" => {
@@ -577,14 +583,21 @@ pub fn normalize_intent_action(raw: &str) -> String {
         "get_now_playing" | "now_playing" | "current_track" | "status" | "当前播放"
         | "正在播放" | "什么歌" => "get_now_playing".into(),
         "set_volume" | "volume" | "音量" | "调节音量" | "调音量" => "set_volume".into(),
-        "reveal_file" | "show_items" | "select_file" | "highlight_file" | "定位文件"
-        | "在文件夹中显示" | "打开所在文件夹" => "reveal_file".into(),
+        "reveal_file"
+        | "show_items"
+        | "select_file"
+        | "highlight_file"
+        | "定位文件"
+        | "在文件夹中显示"
+        | "打开所在文件夹" => "reveal_file".into(),
         "open_folder" | "show_folders" | "打开目录" | "打开文件夹" => "open_folder".into(),
         "activate" | "dbus_activate" | "唤起" | "激活应用" => "activate".into(),
         "open_file_at_line" | "goto_line" | "open_file" | "打开代码行" | "跳转到行" => {
             "open_file_at_line".into()
         }
-        "open_workspace" | "open_project" | "打开项目" | "打开工作区" => "open_workspace".into(),
+        "open_workspace" | "open_project" | "打开项目" | "打开工作区" => {
+            "open_workspace".into()
+        }
         "new_private_window" | "incognito" | "private_window" | "无痕窗口" | "新建无痕窗口"
         | "隐私窗口" => "new_private_window".into(),
         "new_window" | "新建窗口" => "new_window".into(),
@@ -600,11 +613,15 @@ pub fn normalize_intent_action(raw: &str) -> String {
             "convert_to_pdf".into()
         }
         "convert_document" | "文档转换" => "convert_document".into(),
-        "convert_image" | "transcode_image" | "图片转换" | "转换图片格式" => "convert_image".into(),
+        "convert_image" | "transcode_image" | "图片转换" | "转换图片格式" => {
+            "convert_image".into()
+        }
         "extract_text_preview" | "pdf_to_text" | "read_pdf_text" | "提取文本" | "提取pdf文本" => {
             "extract_text_preview".into()
         }
-        "transcode_media" | "extract_audio" | "媒体转码" | "提取音频" => "transcode_media".into(),
+        "transcode_media" | "extract_audio" | "媒体转码" | "提取音频" => {
+            "transcode_media".into()
+        }
         "list_windows" | "enumerate_windows" | "列出窗口" => "list_windows".into(),
         "focus_window" | "raise_window" | "activate_window" | "show_window" | "聚焦窗口"
         | "切换窗口" | "显示主窗口" | "打开主窗口" => "focus_window".into(),
@@ -658,7 +675,9 @@ pub fn normalize_intent_action(raw: &str) -> String {
         "open_download_folder" | "打开下载目录" | "打开网盘下载目录" => {
             "open_download_folder".into()
         }
-        "wake_dashboard" | "打开代理面板" | "唤醒代理主界面" => "wake_dashboard".into(),
+        "wake_dashboard" | "打开代理面板" | "唤醒代理主界面" => {
+            "wake_dashboard".into()
+        }
         "probe_proxy_status" | "proxy_status" | "探测代理状态" | "代理状态" | "查询代理" => {
             "probe_proxy_status".into()
         }
@@ -694,8 +713,14 @@ pub fn normalize_intent_action(raw: &str) -> String {
         "deactivate_chinese" | "disable_chinese" | "切换英文输入法" | "关闭中文输入" => {
             "deactivate_chinese".into()
         }
-        "open_fcitx_config" | "输入法设置" | "打开输入法配置" => "open_fcitx_config".into(),
-        "query_gpu_telemetry" | "gpu_status" | "nvidia_smi" | "显卡状态" | "gpu状态"
+        "open_fcitx_config" | "输入法设置" | "打开输入法配置" => {
+            "open_fcitx_config".into()
+        }
+        "query_gpu_telemetry"
+        | "gpu_status"
+        | "nvidia_smi"
+        | "显卡状态"
+        | "gpu状态"
         | "查询显存温度" => "query_gpu_telemetry".into(),
         "open_nvidia_settings" | "打开显卡设置" | "nvidia控制面板" => {
             "open_nvidia_settings".into()
@@ -741,7 +766,12 @@ fn synthesize_action_for_profile(
     }
     let requires_approval = matches!(
         canonical_action,
-        "click_control" | "trigger_shortcut" | "type_text" | "start_vm" | "savestate_vm" | "connect_peer"
+        "click_control"
+            | "trigger_shortcut"
+            | "type_text"
+            | "start_vm"
+            | "savestate_vm"
+            | "connect_peer"
     );
     let channel = match canonical_action {
         "click_tray_menu" => AdaptationChannel::SniDbusMenu,
@@ -761,7 +791,10 @@ fn synthesize_action_for_profile(
         {
             AdaptationChannel::DbusFreedesktop
         }
-        "convert_to_pdf" | "convert_document" | "convert_image" | "extract_text_preview"
+        "convert_to_pdf"
+        | "convert_document"
+        | "convert_image"
+        | "extract_text_preview"
         | "transcode_media" => AdaptationChannel::HeadlessCli,
         "new_window" | "new_private_window" => AdaptationChannel::DesktopAction,
         "open_uri" | "open_file_at_line" | "open_note" | "new_note" | "search_notes"
@@ -903,20 +936,32 @@ fn score_profile_against_query(prof: &AppAdapterProfile, q_lc: &str) -> f64 {
     if prof.supported_actions.iter().any(|a| {
         a.action.to_ascii_lowercase().contains(q_lc)
             || a.summary.to_ascii_lowercase().contains(q_lc)
-            || a.aliases.iter().any(|al| al.to_ascii_lowercase().contains(q_lc))
+            || a.aliases
+                .iter()
+                .any(|al| al.to_ascii_lowercase().contains(q_lc))
     }) {
         return 50.0;
     }
     0.0
 }
 
-fn guess_category_from_hint_or_action(hint_lc: &str, canonical_action: &str) -> Option<&'static str> {
+fn guess_category_from_hint_or_action(
+    hint_lc: &str,
+    canonical_action: &str,
+) -> Option<&'static str> {
     if matches!(
         hint_lc,
         "music" | "player" | "media" | "audio" | "音乐" | "播放器" | "听歌"
     ) || matches!(
         canonical_action,
-        "play" | "pause" | "play_pause" | "next" | "previous" | "stop" | "get_now_playing" | "set_volume"
+        "play"
+            | "pause"
+            | "play_pause"
+            | "next"
+            | "previous"
+            | "stop"
+            | "get_now_playing"
+            | "set_volume"
     ) {
         return Some("media");
     }
@@ -927,8 +972,7 @@ fn guess_category_from_hint_or_action(hint_lc: &str, canonical_action: &str) -> 
     {
         return Some("file_manager");
     }
-    if matches!(hint_lc, "browser" | "web" | "浏览器")
-        || canonical_action == "new_private_window"
+    if matches!(hint_lc, "browser" | "web" | "浏览器") || canonical_action == "new_private_window"
     {
         return Some("browser");
     }
@@ -937,16 +981,14 @@ fn guess_category_from_hint_or_action(hint_lc: &str, canonical_action: &str) -> 
     {
         return Some("office");
     }
-    if matches!(hint_lc, "pdf" | "reader" | "阅读器")
-        || canonical_action == "extract_text_preview"
+    if matches!(hint_lc, "pdf" | "reader" | "阅读器") || canonical_action == "extract_text_preview"
     {
         return Some("document_viewer");
     }
     if matches!(hint_lc, "image" | "photo" | "图片") || canonical_action == "convert_image" {
         return Some("graphics");
     }
-    if matches!(hint_lc, "mail" | "email" | "邮箱" | "邮件")
-        || canonical_action == "compose_email"
+    if matches!(hint_lc, "mail" | "email" | "邮箱" | "邮件") || canonical_action == "compose_email"
     {
         return Some("communication");
     }
@@ -1054,7 +1096,11 @@ fn file_manager_standard_actions() -> Vec<SemanticAppAction> {
     vec![
         SemanticAppAction {
             action: "reveal_file".into(),
-            aliases: vec!["定位文件".into(), "在文件夹中显示".into(), "show_items".into()],
+            aliases: vec![
+                "定位文件".into(),
+                "在文件夹中显示".into(),
+                "show_items".into(),
+            ],
             channel: AdaptationChannel::DbusFreedesktop,
             summary: "打开 GUI 文件管理器并高亮选中目标文件 (FileManager1.ShowItems)".into(),
             target_template: Some("org.freedesktop.FileManager1.ShowItems".into()),
@@ -1118,7 +1164,10 @@ fn ide_standard_actions(scheme: &str, cli_bin: &str) -> Vec<SemanticAppAction> {
             action: "diff_files".into(),
             aliases: vec!["对比文件".into(), "文件差异对比".into()],
             channel: AdaptationChannel::CliWrapper,
-            summary: format!("通过受控非 Shell 参数 `{} --diff <left> <right>` 打开可视化对比", cli_bin),
+            summary: format!(
+                "通过受控非 Shell 参数 `{} --diff <left> <right>` 打开可视化对比",
+                cli_bin
+            ),
             target_template: Some(format!("{} --diff", cli_bin)),
             requires_approval: false,
             reversible: false,
@@ -1132,7 +1181,8 @@ fn browser_standard_actions() -> Vec<SemanticAppAction> {
             action: "new_private_window".into(),
             aliases: vec!["新建无痕窗口".into(), "无痕模式".into(), "incognito".into()],
             channel: AdaptationChannel::DesktopAction,
-            summary: "调用 .desktop [Desktop Action new-private-window] 打开隐私/无痕浏览窗口".into(),
+            summary: "调用 .desktop [Desktop Action new-private-window] 打开隐私/无痕浏览窗口"
+                .into(),
             target_template: Some("new-private-window".into()),
             requires_approval: false,
             reversible: false,
@@ -1150,7 +1200,8 @@ fn browser_standard_actions() -> Vec<SemanticAppAction> {
             action: "open_uri".into(),
             aliases: vec!["打开网址".into(), "open_url".into()],
             channel: AdaptationChannel::UriScheme,
-            summary: "安全校验协议后打开 HTTP/HTTPS 页面（拦截 javascript:/data:/vbscript:）".into(),
+            summary: "安全校验协议后打开 HTTP/HTTPS 页面（拦截 javascript:/data:/vbscript:）"
+                .into(),
             target_template: Some("{url}".into()),
             requires_approval: false,
             reversible: false,

@@ -27,10 +27,10 @@ pub use dynamic_profiler::{
 pub use gui_bridge::{DesktopWindowInfo, GuiApprovalScope};
 pub use headless_bridge::HeadlessCommandPlan;
 pub use local_scanner::{
-    CategoryScanSummary, CompanionCliTool, DeepScanCatalog, LocalScanOptions,
-    ScannedDesktopAction, ScannedSoftwareEntry, SoftwareCategoryMeta, SynthesizedActionSpec,
-    all_software_categories, categories_match, classify_software_category, clear_deep_scan_cache,
-    deep_scan_local_software, execute_desktop_action_by_id, normalize_software_category,
+    CategoryScanSummary, CompanionCliTool, DeepScanCatalog, LocalScanOptions, ScannedDesktopAction,
+    ScannedSoftwareEntry, SoftwareCategoryMeta, SynthesizedActionSpec, all_software_categories,
+    categories_match, classify_software_category, clear_deep_scan_cache, deep_scan_local_software,
+    execute_desktop_action_by_id, normalize_software_category,
 };
 pub use mpris_dbus::{MprisDiscoveryReport, MprisNowPlaying};
 pub use registry::{AdaptationChannel, AdapterRegistry, AppAdapterProfile, SemanticAppAction};
@@ -275,7 +275,8 @@ pub async fn translate_and_execute(
     approved: bool,
 ) -> anyhow::Result<AdapterExecutionOutcome> {
     let registry = AdapterRegistry::load(Some(&core.paths.config_dir));
-    let (profile, semantic_action) = registry.resolve_adapter_and_action(app_hint, raw_intent_action);
+    let (profile, semantic_action) =
+        registry.resolve_adapter_and_action(app_hint, raw_intent_action);
     let canonical_action = semantic_action.action.clone();
 
     // Record frecency boost for adapted app usage
@@ -302,28 +303,16 @@ pub async fn translate_and_execute(
             )
             .await?;
         build_outcome_from_parts(
-            &profile,
-            &act_key,
-            ok,
-            req_app,
-            scope,
-            chan,
-            cmd,
-            summary,
-            data,
-            simulated,
-            ver,
-            None,
+            &profile, &act_key, ok, req_app, scope, chan, cmd, summary, data, simulated, ver, None,
         )
     } else if canonical_action == "quit" {
         // 2. Real multi-stage verified process close (`close_application_verified`)
-        let target_query = if !app_hint.trim().is_empty()
-            && !app_hint.trim().eq_ignore_ascii_case("auto")
-        {
-            app_hint.trim()
-        } else {
-            profile.name.as_str()
-        };
+        let target_query =
+            if !app_hint.trim().is_empty() && !app_hint.trim().eq_ignore_ascii_case("auto") {
+                app_hint.trim()
+            } else {
+                profile.name.as_str()
+            };
         let close_res =
             dynamic_profiler::close_application_verified(core, target_query, approved).await?;
         let ok = close_res
@@ -583,7 +572,11 @@ pub async fn translate_and_execute(
             "ui"
         },
         decision_str,
-        if outcome.ok { "ok" } else { "blocked_or_failed" },
+        if outcome.ok {
+            "ok"
+        } else {
+            "blocked_or_failed"
+        },
         params,
         Some(&outcome.summary),
     );
@@ -643,7 +636,10 @@ async fn execute_sni_tray_menu_outcome(
             true,
             Some(scope),
             AdaptationChannel::SniDbusMenu,
-            format!("sni_dbusmenu::invoke_tray_menu_action({}, {})", profile.id, requested_label),
+            format!(
+                "sni_dbusmenu::invoke_tray_menu_action({}, {})",
+                profile.id, requested_label
+            ),
             desc,
             json!({ "menu_label": requested_label, "requires_approval": true }),
             false,
@@ -665,7 +661,10 @@ async fn execute_sni_tray_menu_outcome(
             false,
             None,
             AdaptationChannel::SniDbusMenu,
-            format!("sni_dbusmenu::invoke_tray_menu_action({}, {})", profile.id, requested_label),
+            format!(
+                "sni_dbusmenu::invoke_tray_menu_action({}, {})",
+                profile.id, requested_label
+            ),
             format!(
                 "已构建「{}」系统托盘菜单动作 `{}` 转译指令（dry_run / 无头预演）",
                 profile.name, requested_label
@@ -736,7 +735,10 @@ async fn execute_sni_tray_menu_outcome(
         false,
         None,
         AdaptationChannel::SniDbusMenu,
-        format!("sni_dbusmenu::invoke_tray_menu_action({}, {})", profile.id, requested_label),
+        format!(
+            "sni_dbusmenu::invoke_tray_menu_action({}, {})",
+            profile.id, requested_label
+        ),
         fail_summary,
         fail_data,
         false,
@@ -928,11 +930,7 @@ fn execute_cli_wrapper_action(
                 .or_else(|| params.get("page"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("wifi");
-            if panel.is_empty()
-                || !panel
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
-            {
+            if panel.is_empty() || !panel.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
                 anyhow::bail!("安全拦截：非法的系统设置子面板名称 `{}`", panel);
             }
             vec![panel.to_string()]
@@ -1161,17 +1159,12 @@ pub async fn handle_module_rpc(
             let reg = AdapterRegistry::load(Some(&core.paths.config_dir));
             let mut opts: local_scanner::LocalScanOptions =
                 serde_json::from_value(payload.clone()).unwrap_or_default();
-            if action == "get_categorized_catalog"
-                && payload.get("force_refresh").is_none()
-            {
+            if action == "get_categorized_catalog" && payload.get("force_refresh").is_none() {
                 opts.force_refresh = false;
             }
-            let catalog = local_scanner::deep_scan_local_software(
-                Some(&core.paths.config_dir),
-                &reg,
-                &opts,
-            )
-            .await;
+            let catalog =
+                local_scanner::deep_scan_local_software(Some(&core.paths.config_dir), &reg, &opts)
+                    .await;
             Ok(serde_json::to_value(catalog)?)
         }
         "execute_desktop_action" => {
@@ -1216,17 +1209,16 @@ pub async fn handle_module_rpc(
                 .unwrap_or_default();
 
             let reg = AdapterRegistry::load(Some(&core.paths.config_dir));
-            let is_explicit_desktop_sec = matches!(
-                action_id,
-                "" | "launch" | "launch_app" | "open_app"
-            ) || action_id.starts_with("desktop_action:")
-                || local_scanner::find_scanned_app(core, &reg, desktop_id)
-                    .await
-                    .is_some_and(|s| {
-                        s.desktop_actions
-                            .iter()
-                            .any(|da| da.action_id.eq_ignore_ascii_case(action_id))
-                    });
+            let is_explicit_desktop_sec =
+                matches!(action_id, "" | "launch" | "launch_app" | "open_app")
+                    || action_id.starts_with("desktop_action:")
+                    || local_scanner::find_scanned_app(core, &reg, desktop_id)
+                        .await
+                        .is_some_and(|s| {
+                            s.desktop_actions
+                                .iter()
+                                .any(|da| da.action_id.eq_ignore_ascii_case(action_id))
+                        });
 
             let outcome = if is_explicit_desktop_sec || !extra_dirs.is_empty() {
                 local_scanner::execute_desktop_action_by_id(
@@ -1274,10 +1266,7 @@ pub async fn handle_module_rpc(
                 {
                     continue;
                 }
-                let bin = c
-                    .binary_name
-                    .clone()
-                    .unwrap_or_else(|| c.id.clone());
+                let bin = c.binary_name.clone().unwrap_or_else(|| c.id.clone());
                 apps.push(json!({
                     "id": c.id,
                     "name": c.name,
@@ -1311,10 +1300,7 @@ pub async fn handle_module_rpc(
                 {
                     continue;
                 }
-                let bin = sw
-                    .binary_name
-                    .clone()
-                    .unwrap_or_else(|| sw.id.clone());
+                let bin = sw.binary_name.clone().unwrap_or_else(|| sw.id.clone());
                 apps.push(json!({
                     "id": sw.id,
                     "name": prof.name,
@@ -1363,7 +1349,9 @@ pub async fn handle_module_rpc(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("app_adapter.close_app_verified: 缺少 `app_query`"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("app_adapter.close_app_verified: 缺少 `app_query`")
+                })?;
             let force_kill_approved = payload
                 .get("force_kill_approved")
                 .or_else(|| payload.get("approved"))
@@ -1381,7 +1369,9 @@ pub async fn handle_module_rpc(
                 .get("intent_action")
                 .or_else(|| payload.get("action"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("app_adapter.translate_and_execute: 缺少 `intent_action`"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("app_adapter.translate_and_execute: 缺少 `intent_action`")
+                })?;
             let params = payload
                 .get("params")
                 .or_else(|| payload.get("arguments"))
@@ -1437,8 +1427,8 @@ pub async fn handle_module_rpc(
                         .filter(|s| !s.is_empty())
                         .unwrap_or(t.id.as_str());
                     let (prof, _) = reg.resolve_adapter_and_action(probe_key, "focus_window");
-                    let known = prof.source != "dynamic_gui_fallback"
-                        && prof.id != "generic-gui-window";
+                    let known =
+                        prof.source != "dynamic_gui_fallback" && prof.id != "generic-gui-window";
                     let app_id = if known {
                         prof.id.clone()
                     } else {
@@ -1618,7 +1608,9 @@ target_template = "applink.feishu://client/chat/open?id={chat_id}"
         .unwrap();
 
         let ext_reg = AdapterRegistry::load(Some(&core.paths.config_dir));
-        let feishu = ext_reg.get_by_id("feishu-desktop").expect("loaded feishu.toml");
+        let feishu = ext_reg
+            .get_by_id("feishu-desktop")
+            .expect("loaded feishu.toml");
         assert_eq!(feishu.source, "user_custom:feishu.toml");
         let zotero = ext_reg.get_by_id("zotero").expect("loaded zotero.json");
         assert_eq!(zotero.source, "user_custom:zotero.json");
@@ -1681,15 +1673,10 @@ target_template = "applink.feishu://client/chat/open?id={chat_id}"
 
         // 4. Dry-run / headless fallback execution via `translate_and_execute`
         let (_tmp, core, work_dir) = setup_test_core();
-        let out = translate_and_execute(
-            &core,
-            "qqmusic",
-            "next",
-            &json!({ "dry_run": true }),
-            false,
-        )
-        .await
-        .unwrap();
+        let out =
+            translate_and_execute(&core, "qqmusic", "next", &json!({ "dry_run": true }), false)
+                .await
+                .unwrap();
         assert!(out.ok);
         assert!(out.simulated);
         assert_eq!(out.channel_used, "dbus_mpris");
@@ -1825,10 +1812,7 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
             .actions
             .get("new-private-window")
             .expect("incognito action parsed");
-        assert_eq!(
-            incog.localized_name.as_deref(),
-            Some("新建无痕式窗口")
-        );
+        assert_eq!(incog.localized_name.as_deref(), Some("新建无痕式窗口"));
 
         let (bin, args) =
             uri_desktop::tokenize_desktop_exec(&incog.exec, Some("https://example.com")).unwrap();
@@ -1856,10 +1840,7 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
         )
         .unwrap();
         assert_eq!(plan.executable_candidates[0], "libreoffice");
-        assert_eq!(
-            plan.args[..3],
-            ["--headless", "--convert-to", "pdf"]
-        );
+        assert_eq!(plan.args[..3], ["--headless", "--convert-to", "pdf"]);
         assert_eq!(plan.output_path, Some(work_dir.join("proposal.pdf")));
 
         // Path outside authorized directory MUST be rejected
@@ -2003,7 +1984,11 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let dummy_bin = bin_dir.join("sodam-tray-dummy");
-        std::fs::write(&dummy_bin, "#!/usr/bin/python3\nimport time\ntime.sleep(45)\n").unwrap();
+        std::fs::write(
+            &dummy_bin,
+            "#!/usr/bin/python3\nimport time\ntime.sleep(45)\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2193,7 +2178,11 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
         .unwrap();
         assert!(uri_out.ok);
         assert_eq!(uri_out.channel_used, "uri_scheme");
-        assert!(uri_out.translated_command.contains("betternotes://capture?text=AIOS%20Wave%203"));
+        assert!(
+            uri_out
+                .translated_command
+                .contains("betternotes://capture?text=AIOS%20Wave%203")
+        );
 
         let gated_out = translate_and_execute(&core, "bnotes", "export_vault", &json!({}), false)
             .await
@@ -2257,25 +2246,19 @@ Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/chrome.desktop /usr/bin/g
         clear_desktop_discovery_cache();
 
         // Pinyin query `"yunduansuji"` matches Chinese `Keywords=云端速记;`!
-        let by_pinyin = handle_module_rpc(
-            &core,
-            "inspect_live_app",
-            json!({ "app": "yunduansuji" }),
-        )
-        .await
-        .unwrap();
+        let by_pinyin =
+            handle_module_rpc(&core, "inspect_live_app", json!({ "app": "yunduansuji" }))
+                .await
+                .unwrap();
         assert_eq!(by_pinyin["found"], true);
         assert_eq!(by_pinyin["app_id"], "cloudmemo");
         assert_eq!(by_pinyin["desktop_id"], "cloudmemo.desktop");
 
         // Chinese query `"星云"` matches ASCII `Keywords=xingyun;`!
-        let by_chinese = execute_adapter_tool(
-            &core,
-            "app_adapter_inspect_app",
-            &json!({ "app": "星云" }),
-        )
-        .await
-        .unwrap();
+        let by_chinese =
+            execute_adapter_tool(&core, "app_adapter_inspect_app", &json!({ "app": "星云" }))
+                .await
+                .unwrap();
         assert_eq!(by_chinese["found"], true);
         assert_eq!(by_chinese["app_id"], "cloudmemo");
         for required_key in [

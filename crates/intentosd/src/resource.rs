@@ -215,7 +215,10 @@ impl ResourceEngine {
         if trimmed.is_empty()
             || trimmed.chars().any(|c| {
                 c.is_control()
-                    || matches!(c, ';' | '|' | '&' | '`' | '$' | '\\' | '\'' | '"' | '<' | '>')
+                    || matches!(
+                        c,
+                        ';' | '|' | '&' | '`' | '$' | '\\' | '\'' | '"' | '<' | '>'
+                    )
             })
         {
             let defaults: Vec<String> = all.into_iter().take(4).collect();
@@ -315,7 +318,10 @@ impl ResourceEngine {
         self.index_applications_with_extra_dirs(&[])
     }
 
-    pub fn index_applications_with_extra_dirs(&self, extra_dirs: &[PathBuf]) -> anyhow::Result<usize> {
+    pub fn index_applications_with_extra_dirs(
+        &self,
+        extra_dirs: &[PathBuf],
+    ) -> anyhow::Result<usize> {
         let mut discovered: HashMap<String, AppRecord> = HashMap::new();
         let alias_table = builtin_app_aliases();
 
@@ -333,7 +339,12 @@ impl ResourceEngine {
             if root.starts_with(&temp_root)
                 && let Some(base) = root.parent()
             {
-                for sub in ["applications", "mock_applications", "config/applications", "data/applications"] {
+                for sub in [
+                    "applications",
+                    "mock_applications",
+                    "config/applications",
+                    "data/applications",
+                ] {
                     let candidate = base.join(sub);
                     if !app_dirs.contains(&candidate) {
                         app_dirs.push(candidate);
@@ -641,7 +652,11 @@ impl ResourceEngine {
 
     /// Resolve an `AppRecord` to a concrete on-disk `.desktop` entry when running on a real desktop
     /// (e.g. upgrading a synthetic `"catalog"` seed like `code.desktop` to `/usr/share/applications/com.microsoft.VSCode.desktop`).
-    pub fn resolve_installed_desktop_app(&self, rec: &AppRecord, raw_hint: &str) -> Option<AppRecord> {
+    pub fn resolve_installed_desktop_app(
+        &self,
+        rec: &AppRecord,
+        raw_hint: &str,
+    ) -> Option<AppRecord> {
         if Path::new(&rec.source).is_file() {
             return Some(rec.clone());
         }
@@ -713,7 +728,10 @@ impl ResourceEngine {
         if let Some(ref dir_pref) = filter.directory_prefix {
             sql.push_str(" AND (parent_dir = ? OR parent_dir LIKE ?)");
             bind_vals.push(rusqlite::types::Value::Text(dir_pref.clone()));
-            bind_vals.push(rusqlite::types::Value::Text(format!("{}/%", dir_pref.trim_end_matches('/'))));
+            bind_vals.push(rusqlite::types::Value::Text(format!(
+                "{}/%",
+                dir_pref.trim_end_matches('/')
+            )));
         }
         if let Some(ref cat) = filter.category {
             sql.push_str(" AND category = ?");
@@ -748,9 +766,7 @@ impl ResourceEngine {
         }
         if let Some(ref q_str) = q {
             let like = format!("%{}%", q_str);
-            sql.push_str(
-                " AND (LOWER(name) LIKE ? OR pinyin_full LIKE ? OR pinyin_init LIKE ?)",
-            );
+            sql.push_str(" AND (LOWER(name) LIKE ? OR pinyin_full LIKE ? OR pinyin_init LIKE ?)");
             bind_vals.push(rusqlite::types::Value::Text(like.clone()));
             bind_vals.push(rusqlite::types::Value::Text(like.clone()));
             bind_vals.push(rusqlite::types::Value::Text(like));
@@ -763,30 +779,33 @@ impl ResourceEngine {
 
         let mut candidates = Vec::new();
         if let Ok(conn) = self.index_db.conn.lock()
-            && let Ok(mut stmt) = conn.prepare(&sql) {
-                let params_refs: Vec<&dyn rusqlite::ToSql> =
-                    bind_vals.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-                if let Ok(rows) = stmt.query_map(params_refs.as_slice(), |r| {
-                    Ok((
-                        FileRecord {
-                            path: r.get(0)?,
-                            name: r.get(1)?,
-                            stem: r.get(2)?,
-                            ext: r.get(3)?,
-                            category: r.get(4)?,
-                            parent_dir: r.get(5)?,
-                            size_bytes: r.get::<_, i64>(6)?.max(0) as u64,
-                            mtime_secs: r.get(7)?,
-                        },
-                        r.get::<_, String>(8)?,
-                        r.get::<_, String>(9)?,
-                    ))
-                }) {
-                    for item in rows.flatten() {
-                        candidates.push(item);
-                    }
+            && let Ok(mut stmt) = conn.prepare(&sql)
+        {
+            let params_refs: Vec<&dyn rusqlite::ToSql> = bind_vals
+                .iter()
+                .map(|v| v as &dyn rusqlite::ToSql)
+                .collect();
+            if let Ok(rows) = stmt.query_map(params_refs.as_slice(), |r| {
+                Ok((
+                    FileRecord {
+                        path: r.get(0)?,
+                        name: r.get(1)?,
+                        stem: r.get(2)?,
+                        ext: r.get(3)?,
+                        category: r.get(4)?,
+                        parent_dir: r.get(5)?,
+                        size_bytes: r.get::<_, i64>(6)?.max(0) as u64,
+                        mtime_secs: r.get(7)?,
+                    },
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                ))
+            }) {
+                for item in rows.flatten() {
+                    candidates.push(item);
                 }
             }
+        }
 
         let now = chrono::Utc::now().timestamp();
         let mut scored: Vec<(FileRecord, f64)> = candidates
@@ -836,7 +855,10 @@ impl ResourceEngine {
     }
 
     /// Resolve a site name, alias, localhost address, or explicit URL safely (§4.7).
-    pub fn resolve_web_target(&self, raw_target: &str) -> Result<Option<ResolvedWebTarget>, String> {
+    pub fn resolve_web_target(
+        &self,
+        raw_target: &str,
+    ) -> Result<Option<ResolvedWebTarget>, String> {
         let t = raw_target.trim();
         if t.is_empty() {
             return Ok(None);
@@ -844,9 +866,19 @@ impl ResourceEngine {
         let lower = t.to_ascii_lowercase();
 
         // Strictly reject dangerous schemes (§4.7, §19.2)
-        for bad_scheme in ["javascript:", "data:", "file:", "vbscript:", "about:", "chrome:"] {
+        for bad_scheme in [
+            "javascript:",
+            "data:",
+            "file:",
+            "vbscript:",
+            "about:",
+            "chrome:",
+        ] {
             if lower.starts_with(bad_scheme) {
-                return Err(format!("安全策略拒绝打开非 HTTP(S) 协议地址: {}", bad_scheme));
+                return Err(format!(
+                    "安全策略拒绝打开非 HTTP(S) 协议地址: {}",
+                    bad_scheme
+                ));
             }
         }
 
@@ -885,7 +917,11 @@ impl ResourceEngine {
             {
                 return Ok(Some(ResolvedWebTarget {
                     url: site.url.clone(),
-                    title: site.names.first().cloned().unwrap_or_else(|| site.id.clone()),
+                    title: site
+                        .names
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| site.id.clone()),
                     source: "site_registry".into(),
                 }));
             }
@@ -962,7 +998,10 @@ impl ResourceEngine {
 
         let candidates: &[(&[&str], &[&str])] = &[
             (&["下载", "downloads", "download"], &["Downloads", "下载"]),
-            (&["文档", "documents", "docs", "doc"], &["Documents", "文档"]),
+            (
+                &["文档", "documents", "docs", "doc"],
+                &["Documents", "文档"],
+            ),
             (&["桌面", "desktop"], &["Desktop", "桌面"]),
             (
                 &["代码", "code", "项目", "workspace", "intentos"],
@@ -978,9 +1017,9 @@ impl ResourceEngine {
                         && folder_names
                             .iter()
                             .any(|fnm| leaf.eq_ignore_ascii_case(fnm))
-                        {
-                            return Some(root.clone());
-                        }
+                    {
+                        return Some(root.clone());
+                    }
                 }
                 for folder in *folder_names {
                     let p = home.join(folder);
@@ -1079,7 +1118,10 @@ pub fn builtin_app_aliases() -> HashMap<&'static str, &'static str> {
         ("org.gnome.Terminal", "终端,命令行,terminal,term"),
         ("org.gnome.Console", "终端,命令行,kgx,term"),
         ("org.gnome.Calculator", "计算器,calc,calculator"),
-        ("wps-office-prometheus", "wps,WPS,WPS Office,WPS 文字,文档,word"),
+        (
+            "wps-office-prometheus",
+            "wps,WPS,WPS Office,WPS 文字,文档,word",
+        ),
         ("wps-office-wps", "WPS文字,WPS 文字,Word"),
         ("wps", "WPS,WPS文字,Word"),
         ("wps-office-wpp", "WPS演示,WPS 演示,PPT"),
@@ -1114,18 +1156,90 @@ pub fn builtin_app_aliases() -> HashMap<&'static str, &'static str> {
 
 fn standard_developer_app_catalog() -> Vec<AppRecord> {
     let items = [
-        ("code.desktop", "Visual Studio Code", "Code Editor", "code", "vsc,vscode,vs code,代码编辑器"),
-        ("firefox.desktop", "Firefox 浏览器", "Web Browser", "firefox", "ff,firefox,火狐,浏览器"),
-        ("org.gnome.TextEditor.desktop", "文本编辑器", "Text Editor", "gnome-text-editor", "editor,gedit,记事本"),
-        ("org.gnome.Terminal.desktop", "终端", "Terminal Emulator", "gnome-terminal", "terminal,term,命令行"),
-        ("org.gnome.Nautilus.desktop", "文件管理器", "Files", "nautilus", "files,文件夹"),
-        ("wps-office-prometheus.desktop", "WPS 文字", "Office Suite", "wps", "wps,WPS,WPS文字,office"),
-        ("libreoffice-writer.desktop", "LibreOffice Writer", "Office Suite", "libreoffice", "libreoffice,writer"),
-        ("org.kde.okular.desktop", "Okular", "Document Viewer", "okular", "okular,pdf阅读器,pdf"),
-        ("org.gnome.Evince.desktop", "文档查看器", "Document Viewer", "evince", "evince,文档查看器"),
-        ("org.gnome.Calculator.desktop", "计算器", "Calculator", "gnome-calculator", "calc,calculator,计算器"),
-        ("org.telegram.desktop.desktop", "Telegram", "Messenger", "telegram-desktop", "tg,telegram,电报"),
-        ("wechat.desktop", "微信", "Instant Messenger", "wechat", "wx,wechat,微信,weixin"),
+        (
+            "code.desktop",
+            "Visual Studio Code",
+            "Code Editor",
+            "code",
+            "vsc,vscode,vs code,代码编辑器",
+        ),
+        (
+            "firefox.desktop",
+            "Firefox 浏览器",
+            "Web Browser",
+            "firefox",
+            "ff,firefox,火狐,浏览器",
+        ),
+        (
+            "org.gnome.TextEditor.desktop",
+            "文本编辑器",
+            "Text Editor",
+            "gnome-text-editor",
+            "editor,gedit,记事本",
+        ),
+        (
+            "org.gnome.Terminal.desktop",
+            "终端",
+            "Terminal Emulator",
+            "gnome-terminal",
+            "terminal,term,命令行",
+        ),
+        (
+            "org.gnome.Nautilus.desktop",
+            "文件管理器",
+            "Files",
+            "nautilus",
+            "files,文件夹",
+        ),
+        (
+            "wps-office-prometheus.desktop",
+            "WPS 文字",
+            "Office Suite",
+            "wps",
+            "wps,WPS,WPS文字,office",
+        ),
+        (
+            "libreoffice-writer.desktop",
+            "LibreOffice Writer",
+            "Office Suite",
+            "libreoffice",
+            "libreoffice,writer",
+        ),
+        (
+            "org.kde.okular.desktop",
+            "Okular",
+            "Document Viewer",
+            "okular",
+            "okular,pdf阅读器,pdf",
+        ),
+        (
+            "org.gnome.Evince.desktop",
+            "文档查看器",
+            "Document Viewer",
+            "evince",
+            "evince,文档查看器",
+        ),
+        (
+            "org.gnome.Calculator.desktop",
+            "计算器",
+            "Calculator",
+            "gnome-calculator",
+            "calc,calculator,计算器",
+        ),
+        (
+            "org.telegram.desktop.desktop",
+            "Telegram",
+            "Messenger",
+            "telegram-desktop",
+            "tg,telegram,电报",
+        ),
+        (
+            "wechat.desktop",
+            "微信",
+            "Instant Messenger",
+            "wechat",
+            "wx,wechat,微信,weixin",
+        ),
     ];
     items
         .into_iter()
@@ -1231,10 +1345,7 @@ pub(crate) fn extract_exec_binary(exec_raw: &str) -> String {
             if next_tok.starts_with('-') || next_tok.starts_with('%') {
                 continue;
             }
-            if next_tok.contains('/')
-                || next_tok.ends_with(".py")
-                || next_tok.ends_with(".sh")
-            {
+            if next_tok.contains('/') || next_tok.ends_with(".py") || next_tok.ends_with(".sh") {
                 return next_tok.clone();
             }
             break;
@@ -1341,9 +1452,7 @@ fn score_app_record(
             || name_lc == core_str
             || name_lc == core_py
             || (!name_py_full.is_empty() && name_py_full == core_py)
-            || alias_lc_list
-                .iter()
-                .any(|a| a == core_str || a == core_py))
+            || alias_lc_list.iter().any(|a| a == core_str || a == core_py))
     {
         return 91.0;
     }
@@ -1421,7 +1530,10 @@ fn push_unique_token(list: &mut Vec<String>, candidate: &str) {
     if trimmed.is_empty() {
         return;
     }
-    if !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
+    if !list
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+    {
         list.push(trimmed.to_string());
     }
 }
@@ -1679,7 +1791,9 @@ mod tests {
             res.validate_or_suggest_font("jetbrains mono").unwrap(),
             "JetBrains Mono"
         );
-        let missing = res.validate_or_suggest_font("NonExistentMonoFont").unwrap_err();
+        let missing = res
+            .validate_or_suggest_font("NonExistentMonoFont")
+            .unwrap_err();
         assert!(!missing.is_empty());
         assert!(res.validate_or_suggest_font("Fira Code; rm -rf ~").is_err());
     }

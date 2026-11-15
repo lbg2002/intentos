@@ -7,13 +7,7 @@
 //! 4) `m1_test4_compound_splitter_never_silently_drops_unresolved_clauses`
 //! 5) `m1_test5_cognitive_l1_structured_goal_recognition_and_eval_fixes`
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use intentos_protocol::{IntentRequest, PROTOCOL_VERSION, RouteLayer, TaskStatus, UiRpcRequest};
 use intentosd::backend_bridge::{
     DiscoveryOptions, resume_approved_turn_with_options, send_quick_chat_turn_with_options,
@@ -193,7 +187,10 @@ async fn m1_test1_turn_engine_modularized_and_cli_broker_bridge_unifies_executio
         calls: Arc::new(AtomicUsize::new(0)),
     };
     let app = Router::new()
-        .route("/v1/chat/completions", post(mock_m1_http_broker_completions))
+        .route(
+            "/v1/chat/completions",
+            post(mock_m1_http_broker_completions),
+        )
         .with_state(http_state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_addr = listener.local_addr().unwrap();
@@ -233,13 +230,19 @@ async fn m1_test1_turn_engine_modularized_and_cli_broker_bridge_unifies_executio
     assert_eq!(http_res["status"], "completed");
     assert_eq!(http_res["execution_mode"], "managed_broker");
     assert_eq!(http_res["changeset_ids"].as_array().unwrap().len(), 1);
-    assert_eq!(http_res["effect_ledger"]["has_committed_side_effects"], true);
+    assert_eq!(
+        http_res["effect_ledger"]["has_committed_side_effects"],
+        true
+    );
     assert!(
         http_res["trace_dots"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["title"].as_str().unwrap_or("").contains("sound.volume.set")),
+            .any(|d| d["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("sound.volume.set")),
         "HTTP managed broker turn must produce real TraceDot for sound.volume.set"
     );
     let _ = core.undo(http_res["changeset_ids"][0].as_str());
@@ -304,13 +307,19 @@ esac
     assert_eq!(cli_bright["backend_used"], "codex");
     assert_eq!(cli_bright["execution_mode"], "cli_broker_bridged");
     assert_eq!(cli_bright["changeset_ids"].as_array().unwrap().len(), 1);
-    assert_eq!(cli_bright["effect_ledger"]["has_committed_side_effects"], true);
+    assert_eq!(
+        cli_bright["effect_ledger"]["has_committed_side_effects"],
+        true
+    );
     assert!(
         cli_bright["trace_dots"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["title"].as_str().unwrap_or("").contains("display.brightness.set")),
+            .any(|d| d["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("display.brightness.set")),
         "CLI broker bridge must emit real TraceDot for display.brightness.set"
     );
     let _ = core.undo(cli_bright["changeset_ids"][0].as_str());
@@ -423,7 +432,10 @@ async fn m1_test2_effect_ledger_prevents_duplicate_side_effect_on_backend_fallba
         rounds: Arc::new(AtomicUsize::new(0)),
     };
     let app = Router::new()
-        .route("/v1/chat/completions", post(mock_m1_round1_mutate_round2_502))
+        .route(
+            "/v1/chat/completions",
+            post(mock_m1_round1_mutate_round2_502),
+        )
         .with_state(srv_state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -634,6 +646,7 @@ async fn m1_test3_strict_incognito_memory_isolation_and_sensitive_data_guard() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: true,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -652,7 +665,9 @@ async fn m1_test3_strict_incognito_memory_isolation_and_sensitive_data_guard() {
     );
     for (idx, body) in outbound_payloads.iter().enumerate() {
         let parsed: Value = serde_json::from_str(body).expect("valid outbound LLM JSON");
-        let messages = parsed["messages"].as_array().expect("outbound messages array");
+        let messages = parsed["messages"]
+            .as_array()
+            .expect("outbound messages array");
         for msg in messages {
             let content = msg["content"].as_str().unwrap_or("");
             for forbidden in [
@@ -725,6 +740,7 @@ async fn m1_test3_strict_incognito_memory_isolation_and_sensitive_data_guard() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -859,6 +875,7 @@ async fn m1_test4_compound_splitter_never_silently_drops_unresolved_clauses() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -910,6 +927,7 @@ async fn m1_test4_compound_splitter_never_silently_drops_unresolved_clauses() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -921,8 +939,7 @@ async fn m1_test4_compound_splitter_never_silently_drops_unresolved_clauses() {
     let prompts = l2_state.captured_prompts.lock().unwrap().clone();
     assert!(!prompts.is_empty());
     assert!(
-        prompts[0].contains("sound.volume.set")
-            && prompts[0].contains("分析昨天实验日志报错原因"),
+        prompts[0].contains("sound.volume.set") && prompts[0].contains("分析昨天实验日志报错原因"),
         "Escalated L2 prompt must receive injected compound plan hint with both clauses! Prompt: {}",
         prompts[0]
     );
@@ -1010,7 +1027,10 @@ async fn m1_test5_cognitive_l1_structured_goal_recognition_and_eval_fixes() {
         RoutedIntent::ExecuteL0 { capability_id, .. } => {
             assert_eq!(capability_id, "network.ip");
         }
-        other => panic!("Expected ExecuteL0(network.ip) for '查一下内网地址', got {:?}", other),
+        other => panic!(
+            "Expected ExecuteL0(network.ip) for '查一下内网地址', got {:?}",
+            other
+        ),
     }
 
     // 5. `"开启省电续航"` -> `power.profile.set` (`power-saver`) cleanly on `L0`!

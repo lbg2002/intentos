@@ -742,7 +742,12 @@ pub fn builtin_domestic_app_aliases(
     } else if matches_any(&["wowtype", "wowtype-config", "语音输入"]) {
         vec!["WowType", "wowtype", "语音输入配置"]
     } else if matches_any(&["omni-mouse-studio", "鼠标智控", "多功能鼠标智控中心"]) {
-        vec!["Omni Mouse", "omni-mouse-studio", "多功能鼠标智控中心", "鼠标驱动"]
+        vec![
+            "Omni Mouse",
+            "omni-mouse-studio",
+            "多功能鼠标智控中心",
+            "鼠标驱动",
+        ]
     } else if matches_any(&["trae-cn", "trae"]) {
         vec!["Trae CN", "trae-cn", "trae"]
     } else if matches_any(&["antigravity-ide", "antigravity-app", "agy"]) {
@@ -928,10 +933,9 @@ pub fn desktop_software_to_adapter_profile(sw: &DiscoveredDesktopSoftware) -> Ap
         cli_executables,
         supported_actions,
         source: format!("desktop_auto:{}", sw.desktop_id),
-        notes: sw
-            .comment
-            .clone()
-            .unwrap_or_else(|| "基于 Freedesktop .desktop 自动特征推断生成的软件指令转译配置".to_string()),
+        notes: sw.comment.clone().unwrap_or_else(|| {
+            "基于 Freedesktop .desktop 自动特征推断生成的软件指令转译配置".to_string()
+        }),
     }
 }
 
@@ -1022,16 +1026,18 @@ pub fn custom_software_to_adapter_profile(custom: &CustomSoftwareProfile) -> App
         {
             push_unique_ci(&mut uri_schemes, scheme);
         }
-        let default_req_approval =
-            mapping.requires_approval || matches!(mapping.channel.as_str(), "shortcut" | "gui_atspi");
+        let default_req_approval = mapping.requires_approval
+            || matches!(mapping.channel.as_str(), "shortcut" | "gui_atspi");
         supported_actions.push(SemanticAppAction {
             action: act_name.clone(),
             aliases: mapping.aliases.clone(),
             channel: ch,
-            summary: mapping
-                .summary
-                .clone()
-                .unwrap_or_else(|| format!("自定义转译动作 `{}` -> `{}`", act_name, mapping.command_or_target)),
+            summary: mapping.summary.clone().unwrap_or_else(|| {
+                format!(
+                    "自定义转译动作 `{}` -> `{}`",
+                    act_name, mapping.command_or_target
+                )
+            }),
             target_template: Some(mapping.command_or_target.clone()),
             requires_approval: default_req_approval,
             reversible: false,
@@ -1053,11 +1059,7 @@ pub fn custom_software_to_adapter_profile(custom: &CustomSoftwareProfile) -> App
         push_unique_ci(&mut cli_executables, ep);
     }
 
-    let desktop_ids = custom
-        .desktop_id
-        .iter()
-        .cloned()
-        .collect::<Vec<String>>();
+    let desktop_ids = custom.desktop_id.iter().cloned().collect::<Vec<String>>();
 
     AppAdapterProfile {
         id: custom.id.clone(),
@@ -1550,7 +1552,9 @@ pub async fn execute_custom_action_mapping(
             } else {
                 rendered_label.trim()
             };
-            if let Some(tray_res) = sni_dbusmenu::invoke_tray_menu_action(&custom.name, label).await? {
+            if let Some(tray_res) =
+                sni_dbusmenu::invoke_tray_menu_action(&custom.name, label).await?
+            {
                 let summary = tray_res
                     .get("summary")
                     .and_then(|v| v.as_str())
@@ -1588,7 +1592,10 @@ pub async fn execute_custom_action_mapping(
                 None,
                 AdaptationChannel::SniDbusMenu,
                 format!("sni_dbusmenu({} -> {})", custom.name, label),
-                format!("当前未在系统托盘检测到「{}」或对应菜单项 `{}`", custom.name, label),
+                format!(
+                    "当前未在系统托盘检测到「{}」或对应菜单项 `{}`",
+                    custom.name, label
+                ),
                 json!({ "app": custom.name, "menu_label": label }),
                 false,
                 VerificationReport {
@@ -1636,7 +1643,10 @@ pub async fn execute_custom_action_mapping(
                 None,
                 AdaptationChannel::UriScheme,
                 format!("gio open {}", safe_uri),
-                format!("已通过自定义 URI 协议唤起「{}」(`{}`)", custom.name, safe_uri),
+                format!(
+                    "已通过自定义 URI 协议唤起「{}」(`{}`)",
+                    custom.name, safe_uri
+                ),
                 json!({ "uri": safe_uri, "simulated": simulated }),
                 simulated,
                 VerificationReport {
@@ -1727,7 +1737,10 @@ pub async fn execute_custom_action_mapping(
                 None,
                 AdaptationChannel::DbusFreedesktop,
                 rendered.clone(),
-                format!("已执行「{}」自定义 D-Bus 转译动作 `{}`", custom.name, action_key),
+                format!(
+                    "已执行「{}」自定义 D-Bus 转译动作 `{}`",
+                    custom.name, action_key
+                ),
                 json!({ "dbus_target": rendered, "simulated": simulated }),
                 simulated,
                 VerificationReport {
@@ -1759,7 +1772,10 @@ pub async fn execute_custom_action_mapping(
                 prog_base.as_str(),
                 "sh" | "bash" | "dash" | "zsh" | "sudo" | "su" | "pkexec" | "rm" | "dd" | "mkfs"
             ) {
-                anyhow::bail!("安全拦截：禁止在自定义软件转译中调用高危或 Shell 程序 `{}`", prog_base);
+                anyhow::bail!(
+                    "安全拦截：禁止在自定义软件转译中调用高危或 Shell 程序 `{}`",
+                    prog_base
+                );
             }
             for arg in &tokens[1..] {
                 if arg.starts_with('/') && core.fs_engine.is_forbidden(Path::new(arg)) {
@@ -1789,7 +1805,10 @@ pub async fn execute_custom_action_mapping(
                 None,
                 AdaptationChannel::CliWrapper,
                 tokens.join(" "),
-                format!("已执行「{}」自定义参数转译动作 `{}`", custom.name, action_key),
+                format!(
+                    "已执行「{}」自定义参数转译动作 `{}`",
+                    custom.name, action_key
+                ),
                 json!({ "argv": tokens, "simulated": simulated }),
                 simulated,
                 VerificationReport {
@@ -1863,8 +1882,14 @@ fn score_desktop_software_match(sw: &DiscoveredDesktopSoftware, tokens: &[String
         let mut token_best = 0.0_f64;
         if sw.id.eq_ignore_ascii_case(&tl)
             || sw.name.eq_ignore_ascii_case(&tl)
-            || sw.name_zh.as_deref().is_some_and(|z| z.eq_ignore_ascii_case(&tl))
-            || sw.binary_name.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&tl))
+            || sw
+                .name_zh
+                .as_deref()
+                .is_some_and(|z| z.eq_ignore_ascii_case(&tl))
+            || sw
+                .binary_name
+                .as_deref()
+                .is_some_and(|b| b.eq_ignore_ascii_case(&tl))
             || sw
                 .startup_wm_class
                 .as_deref()
@@ -1908,7 +1933,10 @@ fn score_desktop_software_match(sw: &DiscoveredDesktopSoftware, tokens: &[String
     best
 }
 
-async fn resolve_close_target(core: &IntentOsCore, app_query: &str) -> anyhow::Result<ResolvedCloseTarget> {
+async fn resolve_close_target(
+    core: &IntentOsCore,
+    app_query: &str,
+) -> anyhow::Result<ResolvedCloseTarget> {
     let tokens = normalize_app_search_tokens(app_query);
     if tokens.is_empty() {
         anyhow::bail!("请指定要关闭的应用名称");
@@ -1917,7 +1945,10 @@ async fn resolve_close_target(core: &IntentOsCore, app_query: &str) -> anyhow::R
     // Refuse if user directly names a protected system/IntentOS daemon
     for tok in &tokens {
         if PROTECTED_PROCESS_NAMES.contains(&tok.to_ascii_lowercase().as_str()) {
-            anyhow::bail!("安全保护：拒绝关闭系统核心或桌面会话守护进程 `{}`", app_query);
+            anyhow::bail!(
+                "安全保护：拒绝关闭系统核心或桌面会话守护进程 `{}`",
+                app_query
+            );
         }
     }
 
@@ -1986,7 +2017,9 @@ async fn resolve_close_target(core: &IntentOsCore, app_query: &str) -> anyhow::R
         if let Some(ref ep) = sw.exec_path {
             let ep_lc = ep.to_ascii_lowercase();
             if ep_lc.starts_with("/opt/")
-                && let Some(seg) = ep_lc.strip_prefix("/opt/").and_then(|r| r.split('/').next())
+                && let Some(seg) = ep_lc
+                    .strip_prefix("/opt/")
+                    .and_then(|r| r.split('/').next())
                 && !seg.is_empty()
             {
                 exec_path_segments.push(format!("/opt/{}/", seg));
@@ -2059,13 +2092,11 @@ async fn resolve_close_target(core: &IntentOsCore, app_query: &str) -> anyhow::R
             .strip_prefix("org.mpris.MediaPlayer2.")
             .unwrap_or(svc)
             .to_ascii_lowercase();
-        let matched_bus = mpris_hints
-            .iter()
-            .chain(binary_names.iter())
-            .any(|h| {
-                let hl = h.to_ascii_lowercase();
-                !hl.is_empty() && (suffix == hl || suffix.starts_with(&format!("{}.", hl)) || suffix.contains(&hl))
-            });
+        let matched_bus = mpris_hints.iter().chain(binary_names.iter()).any(|h| {
+            let hl = h.to_ascii_lowercase();
+            !hl.is_empty()
+                && (suffix == hl || suffix.starts_with(&format!("{}.", hl)) || suffix.contains(&hl))
+        });
         if matched_bus {
             push_unique_ci(&mut mpris_buses, svc);
         }
@@ -2227,7 +2258,10 @@ fn enumerate_matching_owned_pids(target: &ResolvedCloseTarget) -> anyhow::Result
             continue;
         }
         if PROTECTED_PROCESS_NAMES.contains(&exe_base.as_str())
-            && !target.binary_names.iter().any(|b| b == &comm || b == &script_arg_base)
+            && !target
+                .binary_names
+                .iter()
+                .any(|b| b == &comm || b == &script_arg_base)
         {
             continue;
         }
@@ -2245,7 +2279,11 @@ fn enumerate_matching_owned_pids(target: &ResolvedCloseTarget) -> anyhow::Result
                 break;
             }
             // Handle Linux 15-byte `TASK_COMM_LEN - 1` truncation on `/proc/<pid>/comm`
-            if bin.len() > 15 && comm.len() == 15 && bin.starts_with(&comm) && cmdline_joined_lc.contains(bin) {
+            if bin.len() > 15
+                && comm.len() == 15
+                && bin.starts_with(&comm)
+                && cmdline_joined_lc.contains(bin)
+            {
                 is_match = true;
                 break;
             }
@@ -2274,7 +2312,11 @@ fn enumerate_matching_owned_pids(target: &ResolvedCloseTarget) -> anyhow::Result
     Ok((matched_pids, my_uid))
 }
 
-fn collect_direct_helper_children(parent_pids: &[u32], my_uid: u32, include_even_if_sigign: bool) -> Vec<u32> {
+fn collect_direct_helper_children(
+    parent_pids: &[u32],
+    my_uid: u32,
+    include_even_if_sigign: bool,
+) -> Vec<u32> {
     let mut allowed_parents = HashSet::new();
     for &pp in parent_pids {
         if let Some(st) = read_proc_status_summary(pp) {
@@ -2409,7 +2451,9 @@ pub fn find_running_pids_for_profile_or_hint(
         if let Some(ref ep) = sw.exec_path {
             let ep_lc = ep.to_ascii_lowercase();
             if ep_lc.starts_with("/opt/")
-                && let Some(seg) = ep_lc.strip_prefix("/opt/").and_then(|r| r.split('/').next())
+                && let Some(seg) = ep_lc
+                    .strip_prefix("/opt/")
+                    .and_then(|r| r.split('/').next())
                 && !seg.is_empty()
             {
                 exec_path_segments.push(format!("/opt/{}/", seg));
@@ -2470,7 +2514,10 @@ pub async fn close_application_verified(
         stages_used.push("sni_dbusmenu_quit".to_string());
         for _ in 0..7 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if !initial_pids.is_empty() && initial_pids.iter().all(|&pid| !is_pid_alive_non_zombie(pid))
+            if !initial_pids.is_empty()
+                && initial_pids
+                    .iter()
+                    .all(|&pid| !is_pid_alive_non_zombie(pid))
             {
                 return Ok(json!({
                     "ok": true,
@@ -2787,13 +2834,7 @@ pub async fn inspect_live_app(core: &IntentOsCore, app_query: &str) -> anyhow::R
     let app_id = known_prof_opt
         .map(|p| p.id.clone())
         .or_else(|| matched_desktop.map(|d| d.id.clone()))
-        .or_else(|| {
-            matched_tray.map(|t| {
-                t.comm
-                    .clone()
-                    .unwrap_or_else(|| sanitize_slug(&t.id))
-            })
-        })
+        .or_else(|| matched_tray.map(|t| t.comm.clone().unwrap_or_else(|| sanitize_slug(&t.id))))
         .unwrap_or_else(|| sanitize_slug(query));
 
     let name = matched_desktop
@@ -2828,17 +2869,15 @@ pub async fn inspect_live_app(core: &IntentOsCore, app_query: &str) -> anyhow::R
         .map(|c| json!(c.actions))
         .unwrap_or_else(|| json!({}));
 
-    let atspi_controls = if is_running
-        && mpris_dbus::has_gui_session()
-        && mpris_dbus::has_dbus_session_address()
-    {
-        let hint_for_atspi = matched_desktop
-            .and_then(|d| d.binary_name.as_deref())
-            .unwrap_or(app_id.as_str());
-        gui_bridge::probe_atspi_controls_readonly(hint_for_atspi).await
-    } else {
-        Vec::new()
-    };
+    let atspi_controls =
+        if is_running && mpris_dbus::has_gui_session() && mpris_dbus::has_dbus_session_address() {
+            let hint_for_atspi = matched_desktop
+                .and_then(|d| d.binary_name.as_deref())
+                .unwrap_or(app_id.as_str());
+            gui_bridge::probe_atspi_controls_readonly(hint_for_atspi).await
+        } else {
+            Vec::new()
+        };
 
     let tray_bus_val = matched_tray.map(|t| {
         json!({
@@ -2878,8 +2917,7 @@ pub async fn inspect_live_app(core: &IntentOsCore, app_query: &str) -> anyhow::R
         }
     }
     if matched_mpris_bus.is_some()
-        || known_prof_opt
-            .is_some_and(|p| p.channels.contains(&AdaptationChannel::DbusMpris))
+        || known_prof_opt.is_some_and(|p| p.channels.contains(&AdaptationChannel::DbusMpris))
     {
         for act in ["get_now_playing", "play_pause", "next", "previous"] {
             push_sug(&mut suggested_actions, act.to_string());
@@ -2943,13 +2981,12 @@ pub async fn inspect_live_app(core: &IntentOsCore, app_query: &str) -> anyhow::R
             .take(6)
             .collect();
         let tray_note = if let Some(tray) = matched_tray {
-            let title_part = if !tray.title.trim().is_empty()
-                && !tray.title.eq_ignore_ascii_case(&name)
-            {
-                format!("，当前状态：{}", tray.title.trim())
-            } else {
-                String::new()
-            };
+            let title_part =
+                if !tray.title.trim().is_empty() && !tray.title.eq_ignore_ascii_case(&name) {
+                    format!("，当前状态：{}", tray.title.trim())
+                } else {
+                    String::new()
+                };
             if menu_labels.is_empty() {
                 format!("，已注册系统托盘 ({}{})", tray.service, title_part)
             } else {

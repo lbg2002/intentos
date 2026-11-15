@@ -23,9 +23,10 @@ pub mod session_rag;
 
 pub use context_compressor::{
     CompressedSessionHistory, CompressedTurnTierPreview, ContextCompressionStats,
-    ContextDecayConfig, HydratedQaTurn, build_compressed_session_history, compress_markdown_answer,
-    compress_qa_turns, compress_qa_turns_detailed, compute_retention_weight,
-    estimate_text_tokens, hydrate_session_qa_turns, load_context_decay_config,
+    ContextDecayConfig, HydratedQaTurn, build_compressed_session_history,
+    build_compressed_session_history_with_policy, compress_markdown_answer, compress_qa_turns,
+    compress_qa_turns_detailed, compute_retention_weight, estimate_text_tokens,
+    hydrate_session_qa_turns, hydrate_session_qa_turns_with_policy, load_context_decay_config,
     preview_session_compression, save_context_decay_config, update_context_decay_config_from_json,
 };
 pub use conversational_entities::{
@@ -54,8 +55,8 @@ pub use session_rag::{
     MAX_AUTO_MEMORY_CHARS, MAX_INSPECT_DOC_CHARS, MemoryOverviewCategory, MemoryRecallIntent,
     RecordTurnInput, RecordTurnOutcome, SessionDetail, build_memory_trace_dot,
     classify_memory_query_intent, create_session, delete_session, get_session_detail,
-    get_session_record, inspect_document, is_memory_tool, list_sessions, memory_tool_specs,
-    remove_synthetic_approval_echo, search_past_chats,
+    get_session_record, inspect_document, inspect_document_with_sync, is_memory_tool,
+    list_sessions, memory_tool_specs, remove_synthetic_approval_echo, search_past_chats,
 };
 
 use crate::core::IntentOsCore;
@@ -74,7 +75,16 @@ pub fn record_conversation_turn(
     input: &RecordTurnInput,
 ) -> anyhow::Result<RecordTurnOutcome> {
     let policy = PrivacySessionPolicy::from_session(input.incognito, input.session_id.as_deref());
-    if !policy.allows_memory_write() {
+    record_conversation_turn_with_policy(core, input, policy)
+}
+
+/// Three-state privacy-guarded conversation turn recorder (`H05`).
+pub fn record_conversation_turn_with_policy(
+    core: &IntentOsCore,
+    input: &RecordTurnInput,
+    policy: PrivacySessionPolicy,
+) -> anyhow::Result<RecordTurnOutcome> {
+    if !policy.allows_memory_write() || !policy.allows_habit_learning() {
         return Ok(RecordTurnOutcome {
             recorded: false,
             incognito: true,
@@ -117,10 +127,24 @@ pub fn build_personal_memory_prompt(
     session_id: Option<&str>,
 ) -> (String, Vec<Value>) {
     let policy = PrivacySessionPolicy::from_session(false, session_id);
+    build_personal_memory_prompt_with_policy(core, user_text, session_id, policy)
+}
+
+/// Three-state privacy-guarded `[Personal OS Memory]` RAG prompt builder (`H05`).
+/// - `StrictIsolated`: returns empty immediately with `0` DB reads/writes.
+/// - `EphemeralReadOnly`: reads existing `memory_hub.db` (if present) with `allow_sync = false` (`0` DB writes!).
+/// - `Standard`: full read + lazy sync.
+pub fn build_personal_memory_prompt_with_policy(
+    core: &IntentOsCore,
+    user_text: &str,
+    session_id: Option<&str>,
+    policy: PrivacySessionPolicy,
+) -> (String, Vec<Value>) {
     if !policy.allows_memory_read() {
         return (String::new(), Vec::new());
     }
-    session_rag::build_personal_memory_prompt(core, user_text, session_id)
+    let allow_sync = policy.allows_memory_write() && policy.allows_habit_learning();
+    session_rag::build_personal_memory_prompt_with_sync(core, user_text, session_id, allow_sync)
 }
 
 /// Privacy-guarded deterministic personal-memory responder for offline mode.
@@ -131,10 +155,36 @@ pub fn try_answer_memory_query_deterministically(
     session_id: Option<&str>,
 ) -> Option<(String, Vec<Value>)> {
     let policy = PrivacySessionPolicy::from_session(false, session_id);
+    try_answer_memory_query_deterministically_with_policy(core, user_text, session_id, policy)
+}
+
+/// Three-state privacy-guarded deterministic personal-memory responder (`H05`).
+pub fn try_answer_memory_query_deterministically_with_policy(
+    core: &IntentOsCore,
+    user_text: &str,
+    session_id: Option<&str>,
+    policy: PrivacySessionPolicy,
+) -> Option<(String, Vec<Value>)> {
     if !policy.allows_memory_read() {
         return None;
     }
-    session_rag::try_answer_memory_query_deterministically(core, user_text, session_id)
+    let allow_sync = policy.allows_memory_write() && policy.allows_habit_learning();
+    session_rag::try_answer_memory_query_deterministically_with_sync(
+        core, user_text, session_id, allow_sync,
+    )
+}
+
+fn parse_policy_from_json(payload: &Value) -> PrivacySessionPolicy {
+    let incog = payload
+        .get("incognito")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sid = payload.get("session_id").and_then(|v| v.as_str());
+    let explicit = payload
+        .get("privacy_policy")
+        .and_then(|v| v.as_str())
+        .and_then(PrivacySessionPolicy::parse_policy_str);
+    PrivacySessionPolicy::resolve(explicit, incog, sid)
 }
 
 /// Privacy-guarded `memory_*` LLM tool executor.
@@ -143,12 +193,24 @@ pub fn execute_memory_tool(
     tool_name: &str,
     args: &Value,
 ) -> anyhow::Result<Value> {
-    let incog = args
-        .get("incognito")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let sid = args.get("session_id").and_then(|v| v.as_str());
-    let policy = PrivacySessionPolicy::from_session(incog, sid);
+    let policy = parse_policy_from_json(args);
+    execute_memory_tool_with_policy(core, tool_name, args, policy)
+}
+
+/// Three-state privacy-guarded `memory_*` LLM tool executor (`H05`).
+pub fn execute_memory_tool_with_policy(
+    core: &IntentOsCore,
+    tool_name: &str,
+    args: &Value,
+    policy: PrivacySessionPolicy,
+) -> anyhow::Result<Value> {
+    if crate::security_guard::is_memory_write_tool(tool_name) && !policy.allows_memory_write() {
+        anyhow::bail!(
+            "隐私策略拦截 ({}): 当前会话禁止写入或修改个人记忆工具 `{}`",
+            policy.as_str(),
+            tool_name
+        );
+    }
     if !policy.allows_memory_read() {
         return Ok(json!({
             "ok": true,
@@ -157,9 +219,12 @@ pub fn execute_memory_tool(
             "count": 0,
             "items": [],
             "hits": [],
+            "files": [],
+            "apps": [],
         }));
     }
-    session_rag::execute_memory_tool(core, tool_name, args)
+    let allow_sync = policy.allows_memory_write() && policy.allows_habit_learning();
+    session_rag::execute_memory_tool_with_sync(core, tool_name, args, allow_sync)
 }
 
 /// Unified `UiRpcRequest::ModuleRpc { domain: "memory_hub", action, payload }` dispatcher.
@@ -214,10 +279,7 @@ pub async fn handle_module_rpc(
                 ensure_document_outlines_synced(core, &db);
             }
 
-            let limit = payload
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(20) as usize;
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
             let session_id = payload.get("session_id").and_then(|v| v.as_str());
 
             let mentioned_files = list_recent_mentions(&db, true, session_id, limit)?;
@@ -320,8 +382,9 @@ pub async fn handle_module_rpc(
                 .get("incognito")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let policy = parse_policy_from_json(&payload);
 
-            let out = record_conversation_turn(
+            let out = record_conversation_turn_with_policy(
                 core,
                 &RecordTurnInput {
                     session_id,
@@ -332,25 +395,37 @@ pub async fn handle_module_rpc(
                     trace_dots,
                     incognito,
                 },
+                policy,
             )?;
             Ok(serde_json::to_value(out)?)
         }
 
         "query_personal_memory" => {
-            let query = payload
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let kind = payload
                 .get("kind")
                 .and_then(|v| v.as_str())
                 .unwrap_or("all");
             let session_id = payload.get("session_id").and_then(|v| v.as_str());
-            let incognito = payload
-                .get("incognito")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !PrivacySessionPolicy::from_session(incognito, session_id).allows_memory_read() {
+            let policy = parse_policy_from_json(&payload);
+            if !policy.allows_memory_read() {
+                return Ok(json!({
+                    "query": query,
+                    "kind": kind,
+                    "hits": [],
+                    "mentioned_files": [],
+                    "frequent_files": [],
+                    "document_outlines": [],
+                    "software": [],
+                    "past_chats": [],
+                    "context_markdown": "",
+                    "answer_markdown": Value::Null,
+                    "trace_dot": Value::Null,
+                }));
+            }
+
+            let allow_sync = policy.allows_memory_write() && policy.allows_habit_learning();
+            if !allow_sync && !MemoryHubDb::path_for_core(core).exists() {
                 return Ok(json!({
                     "query": query,
                     "kind": kind,
@@ -367,11 +442,10 @@ pub async fn handle_module_rpc(
             }
 
             let db = MemoryHubDb::open_for_core(core)?;
-            ensure_lazy_synced(core, &db);
-            let limit = payload
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(12) as usize;
+            if allow_sync {
+                ensure_lazy_synced(core, &db);
+            }
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(12) as usize;
 
             let mut hits: Vec<Value> = Vec::new();
             let mut mentioned_files = Vec::new();
@@ -381,7 +455,9 @@ pub async fn handle_module_rpc(
             let mut past_chats = Vec::new();
 
             if matches!(kind, "all" | "document_outlines") && !query.trim().is_empty() {
-                ensure_document_outlines_synced(core, &db);
+                if allow_sync {
+                    ensure_document_outlines_synced(core, &db);
+                }
                 let section_hint = payload.get("section").and_then(|v| v.as_str());
                 let outlines = search_document_outlines(&db, query, section_hint, limit)?;
                 for o in outlines {
@@ -496,10 +572,7 @@ pub async fn handle_module_rpc(
 
         "list_sessions" => {
             let db = MemoryHubDb::open_for_core(core)?;
-            let limit = payload
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(30) as usize;
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
             let query = payload.get("query").and_then(|v| v.as_str());
             let sessions = list_sessions(&db, limit, query)?;
             Ok(json!({ "sessions": sessions }))
@@ -512,10 +585,7 @@ pub async fn handle_module_rpc(
                 .or_else(|| payload.get("id"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("get_session 缺少 session_id 参数"))?;
-            let limit = payload
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(200) as usize;
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
             match get_session_detail(&db, session_id, limit)? {
                 Some(detail) => Ok(serde_json::to_value(detail)?),
                 None => anyhow::bail!("未找到会话: {}", session_id),
@@ -552,7 +622,10 @@ pub async fn handle_module_rpc(
                 .or_else(|| payload.get("name"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("execute_tool 缺少 tool_name"))?;
-            let args = payload.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = payload
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             execute_memory_tool(core, name, &args)
         }
 
@@ -631,7 +704,8 @@ mod tests {
         let now_ep = chrono::DateTime::parse_from_rfc3339("2026-11-14T00:00:00Z")
             .unwrap()
             .timestamp();
-        let sc_top = compute_frecency_score(top.total_open_count, top.last_used_epoch, now_ep, true);
+        let sc_top =
+            compute_frecency_score(top.total_open_count, top.last_used_epoch, now_ep, true);
         let sc_sec = compute_frecency_score(
             second.total_open_count,
             second.last_used_epoch,
@@ -675,7 +749,10 @@ mod tests {
             &core,
             &RecordTurnInput {
                 session_id: Some("ses_alpha".into()),
-                user_text: format!("把 `{}` 里的端口改一下，然后打开 VSCode", cfg_path.display()),
+                user_text: format!(
+                    "把 `{}` 里的端口改一下，然后打开 VSCode",
+                    cfg_path.display()
+                ),
                 assistant_text: "已修改 gateway_config.toml 配置。".into(),
                 tool_steps: vec![json!({
                     "capability_id": "file.write",
@@ -706,8 +783,7 @@ mod tests {
             .map(|(e, _)| e.display_name.as_str())
             .collect();
         assert!(
-            top_doc_names.contains(&"2026研发周报.docx")
-                || top_doc_names.contains(&"《产品蓝图》")
+            top_doc_names.contains(&"2026研发周报.docx") || top_doc_names.contains(&"《产品蓝图》")
         );
 
         // Natural Query 3: "我之前说的那个文件" -> surfaces mentioned file entities cleanly
@@ -843,14 +919,19 @@ mod tests {
 
         let db = MemoryHubDb::open_for_core(&core).unwrap();
         assert!(list_sessions(&db, 10, None).unwrap().is_empty());
-        assert!(list_recent_mentions(&db, false, None, 10).unwrap().is_empty());
+        assert!(
+            list_recent_mentions(&db, false, None, 10)
+                .unwrap()
+                .is_empty()
+        );
 
         // 2. Non-incognito turn with API key scrubs secret before writing to SQLite
         record_conversation_turn(
             &core,
             &RecordTurnInput {
                 session_id: Some("ses_normal".into()),
-                user_text: "配置 /home/alice/app.toml，不要泄露 sk-abcdef1234567890SECRETKEY".into(),
+                user_text: "配置 /home/alice/app.toml，不要泄露 sk-abcdef1234567890SECRETKEY"
+                    .into(),
                 assistant_text: "已更新配置。".into(),
                 thinking: None,
                 tool_steps: vec![],
@@ -862,7 +943,11 @@ mod tests {
 
         let detail = get_session_detail(&db, "ses_normal", 20).unwrap().unwrap();
         assert_eq!(detail.messages.len(), 2);
-        assert!(!detail.messages[0].content.contains("sk-abcdef1234567890SECRETKEY"));
+        assert!(
+            !detail.messages[0]
+                .content
+                .contains("sk-abcdef1234567890SECRETKEY")
+        );
         assert!(detail.messages[0].content.contains("[REDACTED_SECRET]"));
 
         // 3. Incognito session (`incog_*`) MUST also perform ZERO reads from MemoryHub
@@ -904,7 +989,10 @@ mod tests {
         // Test build_personal_memory_prompt
         let (prompt, hits) =
             build_personal_memory_prompt(&core, "刚才改的文档是哪个？", Some("ses_rag_1"));
-        assert!(prompt.contains("[Personal OS Memory: 历史提及文件 / 长期高频文件 / 本机常用与已装软件]"));
+        assert!(
+            prompt
+                .contains("[Personal OS Memory: 历史提及文件 / 长期高频文件 / 本机常用与已装软件]")
+        );
         assert!(prompt.contains("architecture_v2.md"));
         assert!(!hits.is_empty());
 
@@ -956,7 +1044,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!dash["mentioned_files"].as_array().unwrap().is_empty());
-        assert!(dash["installed_apps_summary"]["total_installed"].as_u64().is_some());
+        assert!(
+            dash["installed_apps_summary"]["total_installed"]
+                .as_u64()
+                .is_some()
+        );
 
         let qpm = handle_module_rpc(
             &core,
@@ -965,38 +1057,35 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(qpm["context_markdown"].as_str().unwrap().contains("architecture_v2.md"));
+        assert!(
+            qpm["context_markdown"]
+                .as_str()
+                .unwrap()
+                .contains("architecture_v2.md")
+        );
 
-        let created = handle_module_rpc(
-            &core,
-            "create_session",
-            json!({ "title": "测试新建会话" }),
-        )
-        .await
-        .unwrap();
-        let new_sid = created["session"]["session_id"].as_str().unwrap().to_string();
+        let created =
+            handle_module_rpc(&core, "create_session", json!({ "title": "测试新建会话" }))
+                .await
+                .unwrap();
+        let new_sid = created["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let listed = handle_module_rpc(&core, "list_sessions", json!({}))
             .await
             .unwrap();
         assert!(listed["sessions"].as_array().unwrap().len() >= 2);
 
-        let fetched = handle_module_rpc(
-            &core,
-            "get_session",
-            json!({ "session_id": "ses_rag_1" }),
-        )
-        .await
-        .unwrap();
+        let fetched = handle_module_rpc(&core, "get_session", json!({ "session_id": "ses_rag_1" }))
+            .await
+            .unwrap();
         assert_eq!(fetched["session"]["session_id"], "ses_rag_1");
 
-        let deleted = handle_module_rpc(
-            &core,
-            "delete_session",
-            json!({ "session_id": new_sid }),
-        )
-        .await
-        .unwrap();
+        let deleted = handle_module_rpc(&core, "delete_session", json!({ "session_id": new_sid }))
+            .await
+            .unwrap();
         assert_eq!(deleted["deleted"], true);
     }
 
@@ -1166,7 +1255,9 @@ mod tests {
             .expect("indexed paper_main.docx");
         assert!(
             rec.doc_title.contains("硕士学位论文")
-                && rec.doc_title.contains("基于轨道置信度区间的多脉冲交会优化研究"),
+                && rec
+                    .doc_title
+                    .contains("基于轨道置信度区间的多脉冲交会优化研究"),
             "unexpected doc_title: {}",
             rec.doc_title
         );
@@ -1463,6 +1554,11 @@ mod tests {
         let db = MemoryHubDb::open_for_core(&core).unwrap();
         let detail = get_session_detail(&db, sid, 200).unwrap().unwrap();
         assert_eq!(detail.messages.len(), 60);
-        assert!(!detail.messages.iter().any(|m| m.content.starts_with("确认执行：")));
+        assert!(
+            !detail
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("确认执行："))
+        );
     }
 }

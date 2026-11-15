@@ -111,8 +111,7 @@ pub fn create_session(
     )?;
     drop(conn);
 
-    get_session_record(db, &sid)?
-        .ok_or_else(|| anyhow::anyhow!("创建会话后读取失败: {}", sid))
+    get_session_record(db, &sid)?.ok_or_else(|| anyhow::anyhow!("创建会话后读取失败: {}", sid))
 }
 
 pub fn get_session_record(
@@ -265,7 +264,10 @@ pub fn record_conversation_turn(
         .map(String::from)
         .unwrap_or_else(|| format!("incog_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
 
-    if input.incognito || fallback_sid.starts_with("incog_") {
+    if input.incognito
+        || fallback_sid.starts_with("incog_")
+        || fallback_sid.starts_with("ephemeral_ro_")
+    {
         return Ok(RecordTurnOutcome {
             recorded: false,
             incognito: true,
@@ -347,7 +349,11 @@ pub fn record_conversation_turn(
         let mut conn = db.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
-        let msg_delta = if clean_asst.trim().is_empty() { 1i64 } else { 2i64 };
+        let msg_delta = if clean_asst.trim().is_empty() {
+            1i64
+        } else {
+            2i64
+        };
         tx.execute(
             "INSERT INTO chat_sessions (
                 session_id, title, summary, message_count, last_message_preview,
@@ -625,7 +631,10 @@ pub fn search_past_chats(
             continue;
         }
         let content_lc = content.to_ascii_lowercase();
-        let matched_count = tokens.iter().filter(|t| content_lc.contains(t.as_str())).count();
+        let matched_count = tokens
+            .iter()
+            .filter(|t| content_lc.contains(t.as_str()))
+            .count();
         let age_h = ((now_ep - ep).max(0) as f64) / 3600.0;
         let score = 60.0 + (matched_count as f64) * 20.0 + 15.0 / (1.0 + age_h / 24.0);
         candidates
@@ -647,7 +656,11 @@ pub fn search_past_chats(
     }
 
     let mut out: Vec<PastChatHit> = candidates.into_values().collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(cap);
     Ok(out)
 }
@@ -764,21 +777,97 @@ fn has_file_or_doc_signal(q: &str) -> bool {
     }
     let q_lc = q.to_ascii_lowercase();
     for ext in [
-        ".docx", ".doc", ".pdf", ".md", ".markdown", ".txt", ".xlsx", ".xls", ".csv", ".pptx",
-        ".ppt", ".tex", ".typ", ".toml", ".yaml", ".yml", ".json", ".rs", ".py", ".js", ".ts",
-        ".sh", ".zip", ".tar", ".gz", ".zst", ".deb", ".rpm", ".appimage", ".iso",
+        ".docx",
+        ".doc",
+        ".pdf",
+        ".md",
+        ".markdown",
+        ".txt",
+        ".xlsx",
+        ".xls",
+        ".csv",
+        ".pptx",
+        ".ppt",
+        ".tex",
+        ".typ",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".json",
+        ".rs",
+        ".py",
+        ".js",
+        ".ts",
+        ".sh",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".zst",
+        ".deb",
+        ".rpm",
+        ".appimage",
+        ".iso",
     ] {
         if q_lc.contains(ext) {
             return true;
         }
     }
     for noun in [
-        "文件", "文档", "目录", "文件夹", "路径", "论文", "报告", "周报", "月报", "年报", "季报",
-        "汇报", "总结", "方案", "毕业设计", "毕设", "简历", "合同", "协议", "表格", "预算", "账单",
-        "发票", "幻灯片", "课件", "讲义", "笔记", "大纲", "草稿", "手稿", "说明书", "手册",
-        "白皮书", "指南", "配置", "脚本", "代码", "源码", "仓库", "日志", "备份", "安装包",
-        "压缩包", "附件", "资料", "材料", "教材", "章节", "小节", "摘要", "引言", "绪论", "结论",
-        "参考文献", "附录",
+        "文件",
+        "文档",
+        "目录",
+        "文件夹",
+        "路径",
+        "论文",
+        "报告",
+        "周报",
+        "月报",
+        "年报",
+        "季报",
+        "汇报",
+        "总结",
+        "方案",
+        "毕业设计",
+        "毕设",
+        "简历",
+        "合同",
+        "协议",
+        "表格",
+        "预算",
+        "账单",
+        "发票",
+        "幻灯片",
+        "课件",
+        "讲义",
+        "笔记",
+        "大纲",
+        "草稿",
+        "手稿",
+        "说明书",
+        "手册",
+        "白皮书",
+        "指南",
+        "配置",
+        "脚本",
+        "代码",
+        "源码",
+        "仓库",
+        "日志",
+        "备份",
+        "安装包",
+        "压缩包",
+        "附件",
+        "资料",
+        "材料",
+        "教材",
+        "章节",
+        "小节",
+        "摘要",
+        "引言",
+        "绪论",
+        "结论",
+        "参考文献",
+        "附录",
     ] {
         if q.contains(noun) {
             return true;
@@ -794,10 +883,37 @@ fn is_pure_app_media_or_system_control(q: &str) -> bool {
     let q_lc = q.to_ascii_lowercase();
 
     for sys_kw in [
-        "音量", "亮度", "护眼模式", "夜间模式", "深色模式", "浅色模式", "暗色模式", "蓝牙",
-        "wifi", "wi-fi", "无线网", "截图", "截屏", "录屏", "锁屏", "关机", "休眠", "待机", "睡眠",
-        "壁纸", "勿扰模式", "飞行模式", "静音", "取消静音", "下一首", "上一首", "切歌", "暂停",
-        "继续播放", "单曲循环", "随机播放",
+        "音量",
+        "亮度",
+        "护眼模式",
+        "夜间模式",
+        "深色模式",
+        "浅色模式",
+        "暗色模式",
+        "蓝牙",
+        "wifi",
+        "wi-fi",
+        "无线网",
+        "截图",
+        "截屏",
+        "录屏",
+        "锁屏",
+        "关机",
+        "休眠",
+        "待机",
+        "睡眠",
+        "壁纸",
+        "勿扰模式",
+        "飞行模式",
+        "静音",
+        "取消静音",
+        "下一首",
+        "上一首",
+        "切歌",
+        "暂停",
+        "继续播放",
+        "单曲循环",
+        "随机播放",
     ] {
         if q_lc.contains(sys_kw) {
             return true;
@@ -812,8 +928,25 @@ fn is_pure_app_media_or_system_control(q: &str) -> bool {
         .trim();
 
     for verb in [
-        "打开", "启动", "运行", "关闭", "退出", "关掉", "杀掉", "结束", "重启", "切换到", "聚焦",
-        "最小化", "最大化", "全屏", "播放", "开启", "调高", "调低", "把",
+        "打开",
+        "启动",
+        "运行",
+        "关闭",
+        "退出",
+        "关掉",
+        "杀掉",
+        "结束",
+        "重启",
+        "切换到",
+        "聚焦",
+        "最小化",
+        "最大化",
+        "全屏",
+        "播放",
+        "开启",
+        "调高",
+        "调低",
+        "把",
     ] {
         if stripped.starts_with(verb) {
             return true;
@@ -825,8 +958,20 @@ fn is_pure_app_media_or_system_control(q: &str) -> bool {
 fn query_asks_for_package(q: &str) -> bool {
     let lc = q.to_ascii_lowercase();
     for kw in [
-        "安装包", "软件包", "包文件", ".deb", "deb包", ".rpm", "rpm包", "pkg.tar", ".zst",
-        "appimage", ".iso", "镜像", "package", "installer",
+        "安装包",
+        "软件包",
+        "包文件",
+        ".deb",
+        "deb包",
+        ".rpm",
+        "rpm包",
+        "pkg.tar",
+        ".zst",
+        "appimage",
+        ".iso",
+        "镜像",
+        "package",
+        "installer",
     ] {
         if lc.contains(kw) {
             return true;
@@ -841,29 +986,43 @@ pub fn build_personal_memory_prompt(
     query: &str,
     session_id: Option<&str>,
 ) -> (String, Vec<Value>) {
+    build_personal_memory_prompt_with_sync(core, query, session_id, true)
+}
+
+/// Build Personal OS Memory RAG block with explicit `allow_sync` control (`false` for `EphemeralReadOnly`
+/// so read-only queries NEVER create `memory_hub.db` or write lazy-sync/outline rows).
+pub fn build_personal_memory_prompt_with_sync(
+    core: &IntentOsCore,
+    query: &str,
+    session_id: Option<&str>,
+    allow_sync: bool,
+) -> (String, Vec<Value>) {
     let q_trim = query.trim();
     if q_trim.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    if !allow_sync && !MemoryHubDb::path_for_core(core).exists() {
         return (String::new(), Vec::new());
     }
 
     let Ok(db) = MemoryHubDb::open_for_core(core) else {
         return (String::new(), Vec::new());
     };
-    ensure_lazy_synced(core, &db);
+    if allow_sync {
+        ensure_lazy_synced(core, &db);
+    }
 
     let intent = classify_memory_query_intent(q_trim);
     let (raw_md, hits) = match intent {
-        MemoryRecallIntent::PureAppMediaSystemControl => {
-            build_pure_app_control_memory(&db, q_trim)
-        }
+        MemoryRecallIntent::PureAppMediaSystemControl => build_pure_app_control_memory(&db, q_trim),
         MemoryRecallIntent::ExplicitMemoryOverview(cat) => {
-            build_explicit_overview_memory(core, &db, q_trim, session_id, cat)
+            build_explicit_overview_memory(core, &db, q_trim, session_id, cat, allow_sync)
         }
         MemoryRecallIntent::ConversationalBackRef => {
-            build_conversational_backref_memory(core, &db, q_trim, session_id)
+            build_conversational_backref_memory(core, &db, q_trim, session_id, allow_sync)
         }
         MemoryRecallIntent::DocumentTopicLookup => {
-            build_document_topic_lookup_memory(core, &db, q_trim, session_id)
+            build_document_topic_lookup_memory(core, &db, q_trim, session_id, allow_sync)
         }
     };
 
@@ -926,9 +1085,33 @@ fn build_pure_app_control_memory(db: &MemoryHubDb, q_trim: &str) -> (String, Vec
 fn extract_app_candidate_from_control_query(q: &str) -> Option<(String, String)> {
     let q_lc = q.to_ascii_lowercase();
     for pure_sys in [
-        "音量", "亮度", "护眼", "夜间模式", "深色模式", "浅色模式", "暗色模式", "蓝牙", "wifi",
-        "wi-fi", "无线网", "截图", "截屏", "录屏", "锁屏", "关机", "休眠", "睡眠", "壁纸", "勿扰",
-        "飞行模式", "静音", "下一首", "上一首", "切歌", "单曲循环", "随机播放",
+        "音量",
+        "亮度",
+        "护眼",
+        "夜间模式",
+        "深色模式",
+        "浅色模式",
+        "暗色模式",
+        "蓝牙",
+        "wifi",
+        "wi-fi",
+        "无线网",
+        "截图",
+        "截屏",
+        "录屏",
+        "锁屏",
+        "关机",
+        "休眠",
+        "睡眠",
+        "壁纸",
+        "勿扰",
+        "飞行模式",
+        "静音",
+        "下一首",
+        "上一首",
+        "切歌",
+        "单曲循环",
+        "随机播放",
     ] {
         if q_lc.contains(pure_sys) {
             return None;
@@ -945,8 +1128,21 @@ fn extract_app_candidate_from_control_query(q: &str) -> Option<(String, String)>
 
     let mut matched_verb = false;
     for verb in [
-        "打开", "启动", "运行", "关闭", "退出", "关掉", "杀掉", "结束", "重启", "切换到", "聚焦",
-        "最小化", "最大化", "播放", "暂停",
+        "打开",
+        "启动",
+        "运行",
+        "关闭",
+        "退出",
+        "关掉",
+        "杀掉",
+        "结束",
+        "重启",
+        "切换到",
+        "聚焦",
+        "最小化",
+        "最大化",
+        "播放",
+        "暂停",
     ] {
         if let Some(after) = rest.strip_prefix(verb) {
             rest = after.trim();
@@ -959,16 +1155,33 @@ fn extract_app_candidate_from_control_query(q: &str) -> Option<(String, String)>
     }
 
     let raw_clean = rest
-        .trim_matches(|c: char| c.is_whitespace() || matches!(c, '。' | '！' | '!' | '？' | '?' | '吧'))
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '。' | '！' | '!' | '？' | '?' | '吧')
+        })
         .trim_end_matches("一下")
         .trim()
         .to_string();
-    if raw_clean.is_empty() || matches!(raw_clean.as_str(), "音乐" | "歌曲" | "视频" | "窗口" | "软件" | "应用") {
+    if raw_clean.is_empty()
+        || matches!(
+            raw_clean.as_str(),
+            "音乐" | "歌曲" | "视频" | "窗口" | "软件" | "应用"
+        )
+    {
         return None;
     }
 
     let mut core = raw_clean.as_str();
-    for suffix in ["音乐播放器", "播放器", "客户端", "浏览器", "编辑器", "音乐", "软件", "应用", "程序"] {
+    for suffix in [
+        "音乐播放器",
+        "播放器",
+        "客户端",
+        "浏览器",
+        "编辑器",
+        "音乐",
+        "软件",
+        "应用",
+        "程序",
+    ] {
         if let Some(stripped) = core.strip_suffix(suffix) {
             let st = stripped.trim();
             if st.chars().count() >= 2 {
@@ -985,8 +1198,7 @@ fn is_trivial_well_known_app(token: &str) -> bool {
     let lc = token.trim().to_ascii_lowercase();
     matches!(
         lc.as_str(),
-        "qq"
-            | "linuxqq"
+        "qq" | "linuxqq"
             | "腾讯qq"
             | "tim"
             | "微信"
@@ -1029,10 +1241,7 @@ fn has_direct_app_identity_match(
     if c_lc.len() < 2 {
         return false;
     }
-    let aid_stem = app
-        .app_id
-        .trim_end_matches(".desktop")
-        .to_ascii_lowercase();
+    let aid_stem = app.app_id.trim_end_matches(".desktop").to_ascii_lowercase();
     let name_lc = app.name.to_ascii_lowercase();
     let name_en_lc = app.name_en.to_ascii_lowercase();
     let exec_lc = app.executable.to_ascii_lowercase();
@@ -1053,6 +1262,7 @@ fn build_explicit_overview_memory(
     q_trim: &str,
     session_id: Option<&str>,
     category: MemoryOverviewCategory,
+    allow_sync: bool,
 ) -> (String, Vec<Value>) {
     let asks_pkg = query_asks_for_package(q_trim);
     let mut md = String::from(PERSONAL_MEMORY_HEADER);
@@ -1060,7 +1270,9 @@ fn build_explicit_overview_memory(
 
     match category {
         MemoryOverviewCategory::MentionedFiles => {
-            ensure_document_outlines_synced(core, db);
+            if allow_sync {
+                ensure_document_outlines_synced(core, db);
+            }
             let mut list = list_recent_mentions(db, true, session_id, 10).unwrap_or_default();
             if list.is_empty() {
                 list = list_recent_mentions(db, true, None, 10).unwrap_or_default();
@@ -1095,7 +1307,9 @@ fn build_explicit_overview_memory(
             }
         }
         MemoryOverviewCategory::FrequentFiles => {
-            ensure_document_outlines_synced(core, db);
+            if allow_sync {
+                ensure_document_outlines_synced(core, db);
+            }
             let mut files = query_frequent_files(db, None, None, 12).unwrap_or_default();
             files.retain(|f| asks_pkg || !is_installer_or_package_artifact(&f.path));
             if files.is_empty() {
@@ -1173,8 +1387,11 @@ fn build_conversational_backref_memory(
     db: &MemoryHubDb,
     q_trim: &str,
     session_id: Option<&str>,
+    allow_sync: bool,
 ) -> (String, Vec<Value>) {
-    ensure_document_outlines_synced(core, db);
+    if allow_sync {
+        ensure_document_outlines_synced(core, db);
+    }
     let asks_pkg = query_asks_for_package(q_trim);
 
     let mut ranked = recall_mentioned_entities(db, q_trim, None, session_id, 5).unwrap_or_default();
@@ -1296,8 +1513,11 @@ fn build_document_topic_lookup_memory(
     db: &MemoryHubDb,
     q_trim: &str,
     session_id: Option<&str>,
+    allow_sync: bool,
 ) -> (String, Vec<Value>) {
-    ensure_document_outlines_synced(core, db);
+    if allow_sync {
+        ensure_document_outlines_synced(core, db);
+    }
     let asks_pkg = query_asks_for_package(q_trim);
     let mut merged: HashMap<String, SemanticRecallCard> = HashMap::new();
 
@@ -1409,7 +1629,7 @@ fn build_document_topic_lookup_memory(
                 .ok()
                 .flatten()
                 .or_else(|| {
-                    if p.is_file() && !core.fs_engine.is_forbidden(p) {
+                    if allow_sync && p.is_file() && !core.fs_engine.is_forbidden(p) {
                         index_document_file(core, db, p).ok().flatten()
                     } else {
                         None
@@ -1429,7 +1649,9 @@ fn build_document_topic_lookup_memory(
     }
 
     let mut md = String::from(PERSONAL_MEMORY_HEADER);
-    md.push_str("（语义文档索引卡 Top 1-3；如需读取具体章节内容，请调用 `memory_inspect_document`）\n");
+    md.push_str(
+        "（语义文档索引卡 Top 1-3；如需读取具体章节内容，请调用 `memory_inspect_document`）\n",
+    );
     let mut hits = Vec::new();
 
     for card in qualified {
@@ -1498,14 +1720,37 @@ fn score_frequent_file_lexical(f: &LongTermFileHabit, query: &str, asks_pkg: boo
 
     let mut cleaned = query.to_string();
     for stop in [
-        "帮我看看", "帮我看一下", "帮我查看", "帮我打开", "打开我的", "查看我的", "看看我的",
-        "请打开", "请查看", "帮我看", "打开", "查看", "看看", "查找", "搜索", "我的", "那份",
-        "那个", "这份", "这个", "文件", "文档", "里的", "中的",
+        "帮我看看",
+        "帮我看一下",
+        "帮我查看",
+        "帮我打开",
+        "打开我的",
+        "查看我的",
+        "看看我的",
+        "请打开",
+        "请查看",
+        "帮我看",
+        "打开",
+        "查看",
+        "看看",
+        "查找",
+        "搜索",
+        "我的",
+        "那份",
+        "那个",
+        "这份",
+        "这个",
+        "文件",
+        "文档",
+        "里的",
+        "中的",
     ] {
         cleaned = cleaned.replace(stop, " ");
     }
     let tokens: Vec<&str> = cleaned
-        .split(|c: char| c.is_whitespace() || matches!(c, '，' | ',' | '。' | '？' | '?' | '！' | '《' | '》'))
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, '，' | ',' | '。' | '？' | '?' | '！' | '《' | '》')
+        })
         .map(str::trim)
         .filter(|t| t.chars().count() >= 2)
         .collect();
@@ -1717,18 +1962,38 @@ pub fn execute_memory_tool(
     tool_name: &str,
     args: &Value,
 ) -> anyhow::Result<Value> {
+    execute_memory_tool_with_sync(core, tool_name, args, true)
+}
+
+pub fn execute_memory_tool_with_sync(
+    core: &IntentOsCore,
+    tool_name: &str,
+    args: &Value,
+    allow_sync: bool,
+) -> anyhow::Result<Value> {
+    if !allow_sync && !MemoryHubDb::path_for_core(core).exists() {
+        return Ok(json!({
+            "ok": true,
+            "tool": normalize_tool_name(tool_name),
+            "found": false,
+            "count": 0,
+            "items": [],
+            "hits": [],
+            "files": [],
+            "apps": [],
+        }));
+    }
     let db = MemoryHubDb::open_for_core(core)?;
-    ensure_lazy_synced(core, &db);
+    if allow_sync {
+        ensure_lazy_synced(core, &db);
+    }
 
     match normalize_tool_name(tool_name).as_str() {
         "memory_recall_mentioned_files" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let kind = args.get("entity_kind").and_then(|v| v.as_str());
             let sid = args.get("session_id").and_then(|v| v.as_str());
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let ranked = recall_mentioned_entities(&db, query, kind, sid, limit)?;
             let items: Vec<Value> = ranked
                 .into_iter()
@@ -1749,10 +2014,7 @@ pub fn execute_memory_tool(
         "memory_get_frequent_files" => {
             let query = args.get("query").and_then(|v| v.as_str());
             let category = args.get("category").and_then(|v| v.as_str());
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(15) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
             let files = query_frequent_files(&db, query, category, limit)?;
             Ok(json!({
                 "ok": true,
@@ -1767,10 +2029,7 @@ pub fn execute_memory_tool(
                 .get("only_frequent")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(25) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(25) as usize;
             let apps = query_software_catalog(&db, query, only_frequent, limit)?;
             let summary = get_installed_apps_summary(&db)?;
             Ok(json!({
@@ -1784,10 +2043,7 @@ pub fn execute_memory_tool(
         "memory_search_past_chats" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let sid = args.get("session_id").and_then(|v| v.as_str());
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let hits = search_past_chats(&db, query, sid, limit)?;
             Ok(json!({
                 "ok": true,
@@ -1807,7 +2063,7 @@ pub fn execute_memory_tool(
                 .or_else(|| args.get("chapter"))
                 .or_else(|| args.get("section_hint"))
                 .and_then(|v| v.as_str());
-            inspect_document(core, query, section)
+            inspect_document_with_sync(core, query, section, allow_sync)
         }
         other => anyhow::bail!("未知的 memory_hub 工具: {}", other),
     }
@@ -1822,15 +2078,39 @@ pub fn inspect_document(
     query: &str,
     section: Option<&str>,
 ) -> anyhow::Result<Value> {
+    inspect_document_with_sync(core, query, section, true)
+}
+
+pub fn inspect_document_with_sync(
+    core: &IntentOsCore,
+    query: &str,
+    section: Option<&str>,
+    allow_sync: bool,
+) -> anyhow::Result<Value> {
+    if !allow_sync && !MemoryHubDb::path_for_core(core).exists() {
+        return Ok(json!({
+            "ok": true,
+            "tool": "memory_inspect_document",
+            "count": 0,
+            "found": false,
+            "path": Value::Null,
+            "doc_title": Value::Null,
+            "doc_summary": Value::Null,
+            "outline": [],
+            "matched_section": Value::Null,
+        }));
+    }
     let db = MemoryHubDb::open_for_core(core)?;
-    ensure_lazy_synced(core, &db);
-    ensure_document_outlines_synced(core, &db);
+    if allow_sync {
+        ensure_lazy_synced(core, &db);
+        ensure_document_outlines_synced(core, &db);
+    }
 
     let q_trim = query.trim();
     let sec_trim = section.map(str::trim).filter(|s| !s.is_empty());
 
     // If caller passed an explicit existing path on disk that hasn't been indexed yet, index it now
-    if q_trim.starts_with('/') {
+    if allow_sync && q_trim.starts_with('/') {
         let direct_path = Path::new(q_trim);
         if direct_path.is_file() && !core.fs_engine.is_forbidden(direct_path) {
             let _ = index_document_file(core, &db, direct_path);
@@ -1894,7 +2174,8 @@ pub fn inspect_document(
     let mut excerpt_cap = 820usize;
     let mut outline_cap = raw_outline.len();
     loop {
-        let mut outline_slice: Vec<String> = raw_outline.iter().take(outline_cap).cloned().collect();
+        let mut outline_slice: Vec<String> =
+            raw_outline.iter().take(outline_cap).cloned().collect();
         if let Some(ref mh) = matched_heading_opt {
             let mh_short = truncate_chars(mh, 48);
             if !outline_slice.iter().any(|x| x == &mh_short) {
@@ -1951,6 +2232,15 @@ pub fn try_answer_memory_query_deterministically(
     query: &str,
     session_id: Option<&str>,
 ) -> Option<(String, Vec<Value>)> {
+    try_answer_memory_query_deterministically_with_sync(core, query, session_id, true)
+}
+
+pub fn try_answer_memory_query_deterministically_with_sync(
+    core: &IntentOsCore,
+    query: &str,
+    session_id: Option<&str>,
+    allow_sync: bool,
+) -> Option<(String, Vec<Value>)> {
     let q = query.trim();
     if q.is_empty() {
         return None;
@@ -1962,7 +2252,8 @@ pub fn try_answer_memory_query_deterministically(
         || q.starts_with("复制")
         || q.starts_with("删除")
         || q.starts_with("重命名")
-        || (q.starts_with("把") && (q.contains("移") || q.contains("复制") || q.contains("删") || q.contains("改")));
+        || (q.starts_with("把")
+            && (q.contains("移") || q.contains("复制") || q.contains("删") || q.contains("改")));
     if is_imperative_mutation {
         return None;
     }
@@ -1978,7 +2269,11 @@ pub fn try_answer_memory_query_deterministically(
         || q.contains("列出");
 
     let asks_mentioned = is_conversational_entity_reference(q) && asks_what_or_list;
-    let asks_frequent_files = (q.contains("长期") || q.contains("常用") || q.contains("高频") || q.contains("经常打开") || q.contains("最近和长期"))
+    let asks_frequent_files = (q.contains("长期")
+        || q.contains("常用")
+        || q.contains("高频")
+        || q.contains("经常打开")
+        || q.contains("最近和长期"))
         && q.contains("文件")
         && asks_what_or_list;
     let asks_software = (q.contains("软件") || q.contains("应用") || q.contains("程序"))
@@ -1993,8 +2288,13 @@ pub fn try_answer_memory_query_deterministically(
         return None;
     }
 
+    if !allow_sync && !MemoryHubDb::path_for_core(core).exists() {
+        return None;
+    }
     let db = MemoryHubDb::open_for_core(core).ok()?;
-    ensure_lazy_synced(core, &db);
+    if allow_sync {
+        ensure_lazy_synced(core, &db);
+    }
     let mut hits = Vec::new();
     let mut sections = Vec::new();
 
@@ -2133,8 +2433,8 @@ pub fn try_answer_memory_query_deterministically(
 fn build_known_file_lookup(core: &IntentOsCore, db: &MemoryHubDb) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Ok(idx_conn) = core.index_db.conn.lock()
-        && let Ok(mut stmt) =
-            idx_conn.prepare("SELECT path, name, stem FROM files ORDER BY mtime_secs DESC LIMIT 1000")
+        && let Ok(mut stmt) = idx_conn
+            .prepare("SELECT path, name, stem FROM files ORDER BY mtime_secs DESC LIMIT 1000")
         && let Ok(rows) = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -2154,9 +2454,8 @@ fn build_known_file_lookup(core: &IntentOsCore, db: &MemoryHubDb) -> HashMap<Str
         && let Ok(mut stmt) = conn.prepare(
             "SELECT path, title FROM long_term_files ORDER BY frecency_score DESC LIMIT 500",
         )
-        && let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        && let Ok(rows) =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
     {
         for (path, title) in rows.flatten() {
             if let Some(stem) = Path::new(&title).file_stem().and_then(|s| s.to_str()) {
@@ -2171,9 +2470,8 @@ fn build_known_file_lookup(core: &IntentOsCore, db: &MemoryHubDb) -> HashMap<Str
         && let Ok(mut stmt) = conn.prepare(
             "SELECT path, doc_title FROM document_outlines ORDER BY mtime_epoch DESC LIMIT 300",
         )
-        && let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        && let Ok(rows) =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
     {
         for (path, doc_title) in rows.flatten() {
             let clean = doc_title.trim().to_ascii_lowercase();

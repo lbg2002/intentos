@@ -69,7 +69,8 @@ impl PatternCompiler {
 
         for desc in descriptors {
             let compiled_patterns = compile_descriptor_patterns(&desc.id, &desc.l0_patterns);
-            let colloquial_triggers = build_colloquial_triggers(&desc.id, &desc.aliases, &desc.summary);
+            let colloquial_triggers =
+                build_colloquial_triggers(&desc.id, &desc.aliases, &desc.summary);
 
             let mut pinyin_full_terms = Vec::new();
             let mut pinyin_init_terms = Vec::new();
@@ -135,12 +136,12 @@ impl PatternCompiler {
             return Vec::new();
         }
         let analysis = analyze_colloquial_input(trimmed);
-        let candidates_to_test = if analysis.normalized != trimmed && !analysis.normalized.is_empty()
-        {
-            vec![trimmed, analysis.normalized.as_str()]
-        } else {
-            vec![trimmed]
-        };
+        let candidates_to_test =
+            if analysis.normalized != trimmed && !analysis.normalized.is_empty() {
+                vec![trimmed, analysis.normalized.as_str()]
+            } else {
+                vec![trimmed]
+            };
 
         let mut matches = Vec::new();
         for entry in &self.entries {
@@ -190,7 +191,16 @@ pub fn analyze_colloquial_input(input: &str) -> ColloquialAnalysis {
 
     // Polite prefixes & filler words removal at boundaries
     for prefix in [
-        "请帮我", "帮我把", "帮我", "麻烦帮我", "麻烦", "给我", "请", "立刻", "马上", "现在",
+        "请帮我",
+        "帮我把",
+        "帮我",
+        "麻烦帮我",
+        "麻烦",
+        "给我",
+        "请",
+        "立刻",
+        "马上",
+        "现在",
     ] {
         if let Some(rest) = normalized.strip_prefix(prefix) {
             let r = rest.trim();
@@ -329,8 +339,24 @@ pub fn analyze_colloquial_input(input: &str) -> ColloquialAnalysis {
     }
 
     for v in [
-        "打开", "启动", "关闭", "退出", "查找", "找", "搜索", "搜", "移动", "复制", "重命名",
-        "删除", "解压", "打包", "设置", "设为", "切换", "查看",
+        "打开",
+        "启动",
+        "关闭",
+        "退出",
+        "查找",
+        "找",
+        "搜索",
+        "搜",
+        "移动",
+        "复制",
+        "重命名",
+        "删除",
+        "解压",
+        "打包",
+        "设置",
+        "设为",
+        "切换",
+        "查看",
     ] {
         if normalized.contains(v) {
             action_verbs.push(v.to_string());
@@ -570,17 +596,17 @@ fn build_colloquial_triggers(cap_id: &str, aliases: &[String], summary: &str) ->
         "disk.usage" => &["目录大小", "谁占空间最多", "占了多少空间"],
         "port.inspect" => &["端口谁在用", "查看端口占用", "监听端口"],
         "process.list" => &["占内存最多的进程", "最占内存的进程", "进程列表", "查看进程"],
-        "system.inspect" => &["系统状态", "系统负载", "电脑状态", "内存使用情况", "看看负载"],
+        "system.inspect" => &[
+            "系统状态",
+            "系统负载",
+            "电脑状态",
+            "内存使用情况",
+            "看看负载",
+        ],
         "screen.lock" => &["锁屏", "锁定屏幕", "立刻锁屏", "锁一下电脑"],
         "screenshot.take" => &["截图", "截屏", "全屏截图", "窗口截图", "区域截图"],
         "power.battery.status" => &["电池电量", "还有多少电", "查看电量", "电量多少"],
-        "power.profile.set" => &[
-            "省电模式",
-            "性能模式",
-            "平衡模式",
-            "满血性能",
-            "省电续航",
-        ],
+        "power.profile.set" => &["省电模式", "性能模式", "平衡模式", "满血性能", "省电续航"],
         "settings.open_panel" => &[
             "蓝牙设置在哪",
             "显示设置在哪",

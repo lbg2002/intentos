@@ -84,9 +84,7 @@ enum Commands {
         digest: String,
     },
     /// 拒绝待审批单
-    Deny {
-        approval_id: String,
-    },
+    Deny { approval_id: String },
     /// 查看最近的任务列表与状态
     Tasks {
         #[arg(short, long, default_value_t = 15)]
@@ -151,12 +149,8 @@ enum MemoryCommands {
 }
 
 pub enum ClientHandle {
-    Socket {
-        sock_path: PathBuf,
-    },
-    Embedded {
-        core: Arc<IntentOsCore>,
-    },
+    Socket { sock_path: PathBuf },
+    Embedded { core: Arc<IntentOsCore> },
 }
 
 impl ClientHandle {
@@ -332,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
                     .ok()
                     .map(|p| p.to_string_lossy().to_string()),
                 incognito,
+                privacy_policy: None,
             };
             let val = client.call(UiRpcRequest::SubmitIntent(req)).await?;
             if cli.json {
@@ -607,7 +602,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&val)?);
             } else {
                 let st: DaemonStatus = serde_json::from_value(val)?;
-                println!("IntentOS 状态 (v{}, 协议 v{})", st.version, st.protocol_version);
+                println!(
+                    "IntentOS 状态 (v{}, 协议 v{})",
+                    st.version, st.protocol_version
+                );
                 println!("  PID / 运行时长 : {} / {}s", st.pid, st.uptime_seconds);
                 println!(
                     "  资源索引规模   : {} 应用 | {} 文件 | {} 常用站点",

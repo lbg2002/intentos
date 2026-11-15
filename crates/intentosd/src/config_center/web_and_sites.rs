@@ -10,17 +10,15 @@ use crate::config_center::schema::FullDomainsConfig;
 use chrono::Utc;
 use serde_json::{Value, json};
 
-pub const ALLOWED_BROWSERS: [&str; 5] = [
-    "default",
-    "firefox",
-    "google-chrome",
-    "chromium",
-    "brave",
-];
+pub const ALLOWED_BROWSERS: [&str; 5] =
+    ["default", "firefox", "google-chrome", "chromium", "brave"];
 
 /// Strictly validate that a URL uses `http://` or `https://` and reject dangerous schemes
 /// (`javascript:`, `file:`, `data:`, `vbscript:`, `about:`, `blob:`) per §4.7 & §5.
-pub fn validate_safe_http_url(raw_url: &str, require_query_placeholder: bool) -> anyhow::Result<String> {
+pub fn validate_safe_http_url(
+    raw_url: &str,
+    require_query_placeholder: bool,
+) -> anyhow::Result<String> {
     let trimmed = raw_url.trim();
     if trimmed.is_empty() {
         anyhow::bail!("URL 不能为空");
@@ -337,7 +335,10 @@ pub fn scrub_secrets(val: &Value) -> Value {
 }
 
 /// Export a complete secret-free configuration bundle (`export_config_bundle`, M-08, §5.6).
-pub fn export_config_bundle(cfg: &FullDomainsConfig, allow_sim_fallback: bool) -> anyhow::Result<Value> {
+pub fn export_config_bundle(
+    cfg: &FullDomainsConfig,
+    allow_sim_fallback: bool,
+) -> anyhow::Result<Value> {
     let mut sanitized = cfg.clone();
     sanitized.enforce_invariants();
     for prov in &mut sanitized.brain.providers {
@@ -364,10 +365,7 @@ pub fn export_config_bundle(cfg: &FullDomainsConfig, allow_sim_fallback: bool) -
 }
 
 /// Validate and import a configuration bundle (`import_config_bundle`, M-08).
-pub fn import_config_bundle(
-    cfg: &mut FullDomainsConfig,
-    payload: &Value,
-) -> anyhow::Result<Value> {
+pub fn import_config_bundle(cfg: &mut FullDomainsConfig, payload: &Value) -> anyhow::Result<Value> {
     let bundle = payload.get("bundle").unwrap_or(payload);
     let domains_json = bundle.get("domains").unwrap_or(bundle);
     let clean_json = scrub_secrets(domains_json);

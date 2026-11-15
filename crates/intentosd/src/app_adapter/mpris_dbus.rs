@@ -211,8 +211,10 @@ pub fn normalize_mpris_volume(params: &Value) -> anyhow::Result<f64> {
         .or_else(|| params.get("percent"))
         .or_else(|| params.get("value"))
         .and_then(|v| {
-            v.as_f64()
-                .or_else(|| v.as_str().and_then(|s| s.trim_end_matches('%').trim().parse::<f64>().ok()))
+            v.as_f64().or_else(|| {
+                v.as_str()
+                    .and_then(|s| s.trim_end_matches('%').trim().parse::<f64>().ok())
+            })
         })
         .ok_or_else(|| anyhow::anyhow!("调节播放器音量缺少参数 `volume` (0~100 或 0.0~1.0)"))?;
 
@@ -686,8 +688,14 @@ pub async fn execute_mpris_action(
     // 1. Specific MPRIS2 service match
     if is_specific_match
         && !force_dry_run
-        && let Some(res) =
-            run_live_mpris_call(profile, &bus_name, canonical_action, &argv, translated_command.clone()).await
+        && let Some(res) = run_live_mpris_call(
+            profile,
+            &bus_name,
+            canonical_action,
+            &argv,
+            translated_command.clone(),
+        )
+        .await
     {
         return Ok(res);
     }
@@ -772,8 +780,14 @@ pub async fn execute_mpris_action(
     if is_generic_live_fallback
         && profile.id == "qqmusic"
         && !force_dry_run
-        && let Some(res) =
-            run_live_mpris_call(profile, &bus_name, canonical_action, &argv, translated_command.clone()).await
+        && let Some(res) = run_live_mpris_call(
+            profile,
+            &bus_name,
+            canonical_action,
+            &argv,
+            translated_command.clone(),
+        )
+        .await
     {
         return Ok(res);
     }
@@ -843,7 +857,9 @@ pub async fn execute_mpris_action(
             state: VerificationState::VerificationFailed,
             method: "mpris2_or_sni_discovery".into(),
             checks: vec![],
-            details: Some("no active org.mpris.MediaPlayer2 or SNI tray media service found".into()),
+            details: Some(
+                "no active org.mpris.MediaPlayer2 or SNI tray media service found".into(),
+            ),
         },
     })
 }
@@ -892,7 +908,9 @@ pub async fn execute_freedesktop_action(
                         .first()
                         .map(|d| d.trim_end_matches(".desktop"))
                 })
-                .ok_or_else(|| anyhow::anyhow!("应用 {} 未声明可激活的 D-Bus 名称", profile.name))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("应用 {} 未声明可激活的 D-Bus 名称", profile.name)
+                })?;
             let opt_path = params.get("path").and_then(|v| v.as_str()).map(Path::new);
             if let Some(p) = opt_path
                 && core.fs_engine.is_forbidden(p)
@@ -955,7 +973,10 @@ pub async fn execute_freedesktop_action(
         verification: VerificationReport {
             state: VerificationState::RequestedUnverified,
             method: "simulated_headless_dbus".into(),
-            checks: vec!["path_not_forbidden".into(), "freedesktop_argv_constructed".into()],
+            checks: vec![
+                "path_not_forbidden".into(),
+                "freedesktop_argv_constructed".into(),
+            ],
             details: Some("无活跃 GUI D-Bus 桌面环境，已完成安全仿真".into()),
         },
     })

@@ -289,7 +289,9 @@ pub fn builtin_forbidden_rules() -> Vec<ForbiddenPathRule> {
         },
         ForbiddenPathRule {
             id: "intentos_internal".into(),
-            pattern: "~/.config/intentos/**, ~/.local/share/intentos/**, ${XDG_RUNTIME_DIR}/intentos/**".into(),
+            pattern:
+                "~/.config/intentos/**, ~/.local/share/intentos/**, ${XDG_RUNTIME_DIR}/intentos/**"
+                    .into(),
             description: "IntentOS 核心配置、状态库、备份区与私有网关通道".into(),
             locked: true,
         },

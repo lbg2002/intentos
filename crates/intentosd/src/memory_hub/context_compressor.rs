@@ -17,6 +17,7 @@
 use crate::core::IntentOsCore;
 use crate::memory_hub::schema_and_db::MemoryHubDb;
 use crate::runtime::SessionState;
+use crate::security_guard::PrivacySessionPolicy;
 use chrono::Utc;
 use regex::Regex;
 use rusqlite::params;
@@ -454,7 +455,9 @@ fn extract_paths_and_titles(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for m in path_re.find_iter(text) {
-        let p = m.as_str().trim_end_matches(['.', ',', '，', '。', ')', '）', '`', '"', '\'']);
+        let p = m
+            .as_str()
+            .trim_end_matches(['.', ',', '，', '。', ')', '）', '`', '"', '\'']);
         if p.len() > 2 && seen.insert(p.to_string()) {
             out.push(p.to_string());
         }
@@ -475,10 +478,7 @@ fn extract_answer_digest(answer: &str, max_chars: usize) -> String {
         .map(str::trim)
         .filter(|l| !l.is_empty() && *l != "[代码块已折叠]")
         .collect();
-    let conclusion = lines
-        .first()
-        .copied()
-        .unwrap_or_else(|| cleaned.trim());
+    let conclusion = lines.first().copied().unwrap_or_else(|| cleaned.trim());
     let entities = extract_paths_and_titles(&cleaned);
     let base = compact_single_line(conclusion);
     if entities.is_empty() || base.contains(&entities[0]) {
@@ -490,7 +490,10 @@ fn extract_answer_digest(answer: &str, max_chars: usize) -> String {
     }
 }
 
-fn build_ancient_rollup_anchor(ancient_turns: &[&HydratedQaTurn], max_chars: usize) -> Option<String> {
+fn build_ancient_rollup_anchor(
+    ancient_turns: &[&HydratedQaTurn],
+    max_chars: usize,
+) -> Option<String> {
     if ancient_turns.is_empty() || max_chars < 40 {
         return None;
     }
@@ -516,7 +519,9 @@ fn build_ancient_rollup_anchor(ancient_turns: &[&HydratedQaTurn], max_chars: usi
                 entities_set.insert(clean_e.to_string());
             }
         }
-        for e in extract_paths_and_titles(&format!("{} {}", t.user_question, t.clean_assistant_answer)) {
+        for e in
+            extract_paths_and_titles(&format!("{} {}", t.user_question, t.clean_assistant_answer))
+        {
             if entities_set.len() < 8 {
                 entities_set.insert(e);
             }
@@ -579,8 +584,10 @@ pub fn compress_qa_turns_detailed(
         } else {
             estimate_text_tokens(&t.clean_assistant_answer)
         };
-        raw_estimated_tokens +=
-            estimate_text_tokens(&t.user_question) + raw_asst_tokens + 8 + t.dropped_overhead_tokens;
+        raw_estimated_tokens += estimate_text_tokens(&t.user_question)
+            + raw_asst_tokens
+            + 8
+            + t.dropped_overhead_tokens;
     }
 
     if total_turns == 0 {
@@ -680,7 +687,9 @@ pub fn compress_qa_turns_detailed(
     } else {
         0
     };
-    let pairs_token_cap = cfg.max_context_tokens.saturating_sub(reserved_anchor_tokens);
+    let pairs_token_cap = cfg
+        .max_context_tokens
+        .saturating_sub(reserved_anchor_tokens);
 
     let mut kept_newest_first: Vec<(String, String)> = Vec::new();
     let mut ancient_indices_newest_first: Vec<usize> = Vec::new();
@@ -870,7 +879,11 @@ pub fn compress_qa_turns(
     turns: &[HydratedQaTurn],
     cfg: &ContextDecayConfig,
     now_epoch: i64,
-) -> (Vec<(String, String)>, Option<String>, ContextCompressionStats) {
+) -> (
+    Vec<(String, String)>,
+    Option<String>,
+    ContextCompressionStats,
+) {
     let (pairs, anchor, stats, _) = compress_qa_turns_detailed(turns, cfg, now_epoch);
     (pairs, anchor, stats)
 }
@@ -885,9 +898,29 @@ pub fn hydrate_session_qa_turns(
     session_id: &str,
     incognito: bool,
 ) -> Vec<HydratedQaTurn> {
-    let mut db_turns: Vec<HydratedQaTurn> = Vec::new();
+    let policy = PrivacySessionPolicy::from_session(incognito, Some(session_id));
+    hydrate_session_qa_turns_with_policy(core, session, session_id, policy)
+}
 
-    if !incognito
+/// Three-state privacy-aware hydration (`H05`):
+/// - `StrictIsolated`: returns empty immediately (`0` DB opens, `0` session buffer reads).
+/// - `EphemeralReadOnly`: reads existing `memory_hub.db` (if present on disk, never creating it!)
+///   and existing in-memory `SessionBuffer` (`peek`, never mutating it!).
+/// - `Standard`: full persistent + in-memory hydration.
+pub fn hydrate_session_qa_turns_with_policy(
+    core: &IntentOsCore,
+    session: Option<&SessionState>,
+    session_id: &str,
+    policy: PrivacySessionPolicy,
+) -> Vec<HydratedQaTurn> {
+    if !policy.allows_memory_read() {
+        return Vec::new();
+    }
+
+    let mut db_turns: Vec<HydratedQaTurn> = Vec::new();
+    let can_open_db = policy.allows_memory_write() || MemoryHubDb::path_for_core(core).exists();
+
+    if can_open_db
         && !session_id.trim().is_empty()
         && !session_id.starts_with("incog_")
         && let Ok(db) = MemoryHubDb::open_for_core(core)
@@ -932,7 +965,8 @@ pub fn hydrate_session_qa_turns(
                     "assistant" => {
                         let clean_a = strip_thinking_blocks(&content);
                         let raw_a_chars = content.chars().count() + think_len;
-                        if let Some((u_q, u_ep, mut u_ents, u_tools, u_over)) = pending_user.take() {
+                        if let Some((u_q, u_ep, mut u_ents, u_tools, u_over)) = pending_user.take()
+                        {
                             for e in ents {
                                 if !u_ents.contains(&e) {
                                     u_ents.push(e);
@@ -971,9 +1005,13 @@ pub fn hydrate_session_qa_turns(
     let owned_fallback;
     let sess_ref = if let Some(s) = session {
         Some(s)
-    } else if !incognito && !session_id.trim().is_empty() {
-        owned_fallback = core.sessions.get_or_create(Some(session_id));
-        Some(&owned_fallback)
+    } else if !session_id.trim().is_empty() {
+        if policy.allows_memory_write() {
+            owned_fallback = Some(core.sessions.get_or_create(Some(session_id)));
+        } else {
+            owned_fallback = core.sessions.peek(session_id);
+        }
+        owned_fallback.as_ref()
     } else {
         None
     };
@@ -1040,15 +1078,29 @@ pub fn build_compressed_session_history(
     session: &SessionState,
     incognito: bool,
 ) -> CompressedSessionHistory {
-    let cfg = if !incognito
-        && let Ok(db) = MemoryHubDb::open_for_core(core)
-    {
+    let policy = PrivacySessionPolicy::from_session(incognito, Some(&session.session_id));
+    build_compressed_session_history_with_policy(core, session, policy)
+}
+
+/// Three-state privacy-aware compressed session history builder (`H05`).
+pub fn build_compressed_session_history_with_policy(
+    core: &IntentOsCore,
+    session: &SessionState,
+    policy: PrivacySessionPolicy,
+) -> CompressedSessionHistory {
+    if !policy.allows_memory_read() {
+        return CompressedSessionHistory::default();
+    }
+
+    let can_open_db = policy.allows_memory_write() || MemoryHubDb::path_for_core(core).exists();
+    let cfg = if can_open_db && let Ok(db) = MemoryHubDb::open_for_core(core) {
         load_context_decay_config(&db)
     } else {
         ContextDecayConfig::default()
     };
 
-    let hydrated = hydrate_session_qa_turns(core, Some(session), &session.session_id, incognito);
+    let hydrated =
+        hydrate_session_qa_turns_with_policy(core, Some(session), &session.session_id, policy);
     let now_epoch = Utc::now().timestamp();
     let (turns, ancient_summary_anchor, stats, tiers) =
         compress_qa_turns_detailed(&hydrated, &cfg, now_epoch);
@@ -1154,8 +1206,16 @@ mod tests {
         let w12 = compute_retention_weight(12, Some(120.0), &cfg);
         assert_eq!(w0, 1.0);
         assert_eq!(w2, 1.0);
-        assert!((0.28..1.0).contains(&w3), "d=3 should be Zone 1, got {}", w3);
-        assert!((0.08..0.28).contains(&w5), "d=5 should be Zone 2, got {}", w5);
+        assert!(
+            (0.28..1.0).contains(&w3),
+            "d=3 should be Zone 1, got {}",
+            w3
+        );
+        assert!(
+            (0.08..0.28).contains(&w5),
+            "d=5 should be Zone 2, got {}",
+            w5
+        );
         assert!(w12 < 0.08, "d=12 should be Zone 3, got {}", w12);
 
         // Verify 220-turn marathon session never exceeds `max_context_tokens`, strips `<think>`, and folds code
@@ -1191,8 +1251,7 @@ mod tests {
             });
         }
 
-        let (pairs, anchor, stats, tiers) =
-            compress_qa_turns_detailed(&turns, &tight_cfg, now);
+        let (pairs, anchor, stats, tiers) = compress_qa_turns_detailed(&turns, &tight_cfg, now);
 
         assert_eq!(stats.raw_qa_turns, 220);
         assert_eq!(stats.dropped_tool_records, 440);

@@ -180,7 +180,10 @@ pub fn is_confirm_each_effect(effect: Effect) -> bool {
 }
 
 /// Create and activate a task `GrantEnvelope` (§10.3).
-pub fn create_grant_envelope(core: &IntentOsCore, payload: &Value) -> anyhow::Result<EnvelopeRecord> {
+pub fn create_grant_envelope(
+    core: &IntentOsCore,
+    payload: &Value,
+) -> anyhow::Result<EnvelopeRecord> {
     let task_id = payload
         .get("task_id")
         .and_then(|v| v.as_str())
@@ -325,7 +328,9 @@ pub fn check_within_envelope(
     // 1. Check untrusted taint escalation (§10.4): untrusted context cannot silently bypass approval for writes/egress
     if call.taints.iter().any(|t| t.is_untrusted()) && call_effect >= Effect::WriteReversible {
         return EnvelopeCheckOutcome::OutOfBounds {
-            reason: "上下文包含不可信来源 (untrusted taint)，写操作需独立预览审批，不能直接沿用包络".to_string(),
+            reason:
+                "上下文包含不可信来源 (untrusted taint)，写操作需独立预览审批，不能直接沿用包络"
+                    .to_string(),
             violation_kind: "untrusted_taint".to_string(),
         };
     }
@@ -396,7 +401,8 @@ pub fn check_within_envelope(
         // 4. Check network permission
         if requires_network && !rec.envelope.network {
             return EnvelopeCheckOutcome::OutOfBounds {
-                reason: "该步骤需要访问网络，但当前授权包络禁止网络访问 (network=false)".to_string(),
+                reason: "该步骤需要访问网络，但当前授权包络禁止网络访问 (network=false)"
+                    .to_string(),
                 violation_kind: "network_not_allowed".to_string(),
             };
         }
@@ -439,7 +445,10 @@ pub fn check_within_envelope(
         }
 
         rec.used_operations += op_count;
-        let remaining = rec.envelope.max_operations.saturating_sub(rec.used_operations);
+        let remaining = rec
+            .envelope
+            .max_operations
+            .saturating_sub(rec.used_operations);
         EnvelopeCheckOutcome::Allowed {
             envelope_id: rec.envelope.envelope_id.clone(),
             used_operations: rec.used_operations,
@@ -492,7 +501,14 @@ pub fn record_approval_decision(
 ) -> Option<RuleProposal> {
     let norm_scope = normalize_scope_path(resource_scope);
     with_store(core, |store| {
-        record_approval_in_store(store, capability_id, &norm_scope, effect, approved, decision_ms)
+        record_approval_in_store(
+            store,
+            capability_id,
+            &norm_scope,
+            effect,
+            approved,
+            decision_ms,
+        )
     })
 }
 
@@ -568,9 +584,7 @@ fn record_approval_in_store(
             status: "pending".to_string(),
             created_at: Utc::now(),
         };
-        store
-            .rule_proposals
-            .insert(proposal_id, proposal.clone());
+        store.rule_proposals.insert(proposal_id, proposal.clone());
         return Some(proposal);
     }
 
@@ -578,7 +592,10 @@ fn record_approval_in_store(
 }
 
 /// Confirm a pending `RuleProposal` and convert it into an active long-term `TrustedRule` (§10.3).
-pub fn confirm_rule_proposal(core: &IntentOsCore, proposal_id: &str) -> anyhow::Result<TrustedRule> {
+pub fn confirm_rule_proposal(
+    core: &IntentOsCore,
+    proposal_id: &str,
+) -> anyhow::Result<TrustedRule> {
     let rule = with_store(core, |store| -> anyhow::Result<TrustedRule> {
         let prop = store
             .rule_proposals
@@ -798,17 +815,20 @@ pub fn grant_session_scope(
         let norm = normalize_scope_path(trimmed_val);
         let target_path = Path::new(&norm);
         if core.fs_engine.is_forbidden(target_path) {
-            anyhow::bail!("禁止将受保护敏感路径 (forbidden) 纳入会话放行范围: {}", norm);
+            anyhow::bail!(
+                "禁止将受保护敏感路径 (forbidden) 纳入会话放行范围: {}",
+                norm
+            );
         }
         let scope_root = core
             .fs_engine
             .approve_path_scope(target_path)
             .map_err(|e| anyhow::anyhow!("目录会话授权失败: {}", e))?;
         let scope_str = scope_root.to_string_lossy().to_string();
-        let grant_val = core
-            .broker
-            .policy()
-            .add_session_grant("directory", &scope_str, ttl_minutes);
+        let grant_val =
+            core.broker
+                .policy()
+                .add_session_grant("directory", &scope_str, ttl_minutes);
         (grant_val, Some(scope_str))
     } else {
         let grant_val = core

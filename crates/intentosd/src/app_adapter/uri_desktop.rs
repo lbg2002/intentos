@@ -136,7 +136,10 @@ pub struct UriDesktopDispatchResult {
 }
 
 /// Strictly validate a URI against dangerous schemes (`javascript:`, `data:`, `vbscript:`, etc.) and control bytes.
-pub fn validate_uri_safety(raw_uri: &str, extra_allowed_schemes: &[String]) -> anyhow::Result<String> {
+pub fn validate_uri_safety(
+    raw_uri: &str,
+    extra_allowed_schemes: &[String],
+) -> anyhow::Result<String> {
     let trimmed = raw_uri.trim();
     if trimmed.is_empty() {
         anyhow::bail!("URI 不能为空");
@@ -158,22 +161,17 @@ pub fn validate_uri_safety(raw_uri: &str, extra_allowed_schemes: &[String]) -> a
     }
 
     if BLOCKED_URI_SCHEMES.contains(&scheme.as_str()) {
-        anyhow::bail!(
-            "安全拦截：严禁打开高危或受限 URI 协议 `{}:`",
-            scheme
-        );
+        anyhow::bail!("安全拦截：严禁打开高危或受限 URI 协议 `{}:`", scheme);
     }
 
     let is_allowed = SAFE_BUILTIN_SCHEMES.contains(&scheme.as_str())
-        || extra_allowed_schemes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(&scheme) && !BLOCKED_URI_SCHEMES.contains(&s.to_ascii_lowercase().as_str()));
+        || extra_allowed_schemes.iter().any(|s| {
+            s.eq_ignore_ascii_case(&scheme)
+                && !BLOCKED_URI_SCHEMES.contains(&s.to_ascii_lowercase().as_str())
+        });
 
     if !is_allowed {
-        anyhow::bail!(
-            "安全拦截：未在适配器白名单中的 URI 协议 `{}:`",
-            scheme
-        );
+        anyhow::bail!("安全拦截：未在适配器白名单中的 URI 协议 `{}:`", scheme);
     }
 
     Ok(trimmed.to_string())
@@ -253,9 +251,7 @@ pub fn build_uri_deeplink(
                 .or_else(|| params.get("col"))
                 .and_then(|v| v.as_u64());
             match (canonical, line, col) {
-                ("open_file_at_line" | "goto_file_line", Some(l), Some(c))
-                    if l >= 1 && c >= 1 =>
-                {
+                ("open_file_at_line" | "goto_file_line", Some(l), Some(c)) if l >= 1 && c >= 1 => {
                     format!("{}://file{}:{}:{}", primary_scheme, enc_path, l, c)
                 }
                 ("open_file_at_line" | "goto_file_line", Some(l), None) if l >= 1 => {
@@ -264,8 +260,7 @@ pub fn build_uri_deeplink(
                 _ => format!("{}://file{}", primary_scheme, enc_path),
             }
         }
-        ("wemeet", "join_meeting")
-        | (_, "join_meeting")
+        ("wemeet", "join_meeting") | (_, "join_meeting")
             if primary_scheme == "wemeet"
                 || profile.id.contains("wemeet")
                 || profile.uri_schemes.iter().any(|s| s == "wemeet") =>
@@ -416,10 +411,7 @@ pub fn build_uri_deeplink(
                 .or_else(|| params.get("title"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("新建 Obsidian 笔记缺少 `name` 参数"))?;
-            let content = params
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
             format!(
                 "obsidian://new?vault={}&name={}&content={}",
                 urlencoding::encode(vault),
@@ -449,7 +441,10 @@ pub fn build_uri_deeplink(
                 .or_else(|| params.get("email"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if to.chars().any(|c| c.is_control() || matches!(c, '?' | '&' | '\n' | '\r')) {
+            if to
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '?' | '&' | '\n' | '\r'))
+            {
                 anyhow::bail!("安全拦截：收件人地址包含非法字符");
             }
             let mut query_pairs = Vec::new();
@@ -481,7 +476,9 @@ pub fn build_uri_deeplink(
                 .or_else(|| params.get("contact"))
                 .or_else(|| params.get("chat"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Telegram 会话跳转缺少 `domain` / `username` 参数"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Telegram 会话跳转缺少 `domain` / `username` 参数")
+                })?;
             let clean = domain.trim().trim_start_matches('@');
             format!("tg://resolve?domain={}", urlencoding::encode(clean))
         }
@@ -1023,9 +1020,7 @@ pub fn execute_uri_deeplink(
     if !force_dry_run && has_gui_session() {
         let opener = resolve_trusted_executable("gio")
             .map(|b| (b, vec!["open".to_string(), uri.clone()]))
-            .or_else(|| {
-                resolve_trusted_executable("xdg-open").map(|b| (b, vec![uri.clone()]))
-            });
+            .or_else(|| resolve_trusted_executable("xdg-open").map(|b| (b, vec![uri.clone()])));
 
         if let Some((bin, args)) = opener {
             let mut cmd = Command::new(&bin);
@@ -1240,10 +1235,7 @@ pub fn execute_desktop_action(
                 verification: VerificationReport {
                     state: VerificationState::RequestedUnverified,
                     method: "desktop_action_spawn".into(),
-                    checks: vec![
-                        "desktop_action_parsed".into(),
-                        "non_shell_argv".into(),
-                    ],
+                    checks: vec!["desktop_action_parsed".into(), "non_shell_argv".into()],
                     details: Some("桌面应用快捷动作已发出（异步启动）".into()),
                 },
             });
@@ -1270,10 +1262,7 @@ pub fn execute_desktop_action(
         verification: VerificationReport {
             state: VerificationState::RequestedUnverified,
             method: "simulated_headless_desktop_action".into(),
-            checks: vec![
-                "desktop_action_parsed".into(),
-                "non_shell_argv".into(),
-            ],
+            checks: vec!["desktop_action_parsed".into(), "non_shell_argv".into()],
             details: Some("无活跃桌面会话或目标二进制未安装，返回解析后的非 Shell 参数".into()),
         },
     })

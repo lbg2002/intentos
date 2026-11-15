@@ -198,8 +198,8 @@ pub fn parse_numeric_slot(
     }
 
     // 4. Check explicit target number (`百分之30`, `50%`, `调到 30`, `设为 4500`, `三十`)
-    let pct_cn_re = Regex::new(r"百分之\s*([0-9一二三四五六七八九十百]+(?:\.\d+)?)")
-        .expect("valid regex");
+    let pct_cn_re =
+        Regex::new(r"百分之\s*([0-9一二三四五六七八九十百]+(?:\.\d+)?)").expect("valid regex");
     if let Some(caps) = pct_cn_re.captures(norm)
         && let Some(val) = parse_chinese_or_arabic_number(&caps[1])
     {
@@ -261,10 +261,9 @@ pub fn parse_time_range_slot(text: &str) -> Option<TimeRangeSlot> {
     }
 
     // `最近 N 小时` / `过去 N 小时` / `N 小时内`
-    let hours_re = Regex::new(
-        r"(?:最近|近|过去)?\s*([0-9一二两三四五六七八九十]+)\s*个?小时(?:内|以内|里)?",
-    )
-    .expect("valid regex");
+    let hours_re =
+        Regex::new(r"(?:最近|近|过去)?\s*([0-9一二两三四五六七八九十]+)\s*个?小时(?:内|以内|里)?")
+            .expect("valid regex");
     if let Some(caps) = hours_re.captures(trimmed)
         && (trimmed.contains("最近")
             || trimmed.contains("过去")
@@ -295,8 +294,9 @@ pub fn parse_time_range_slot(text: &str) -> Option<TimeRangeSlot> {
     }
 
     // `最近 N 周` / `过去 N 周`
-    let weeks_re = Regex::new(r"(?:最近|近|过去)\s*([0-9一二两三四五六七八九十]+)\s*(?:周|星期|礼拜)")
-        .expect("valid regex");
+    let weeks_re =
+        Regex::new(r"(?:最近|近|过去)\s*([0-9一二两三四五六七八九十]+)\s*(?:周|星期|礼拜)")
+            .expect("valid regex");
     if let Some(caps) = weeks_re.captures(trimmed)
         && let Some(w) = parse_chinese_or_arabic_number(&caps[1])
     {
@@ -351,7 +351,8 @@ pub fn parse_time_range_slot(text: &str) -> Option<TimeRangeSlot> {
             modified_within_hours: None,
         });
     }
-    if trimmed.contains("本月") || trimmed.contains("这个月") || trimmed.contains("最近一个月") {
+    if trimmed.contains("本月") || trimmed.contains("这个月") || trimmed.contains("最近一个月")
+    {
         return Some(TimeRangeSlot {
             label: "本月".to_string(),
             modified_within_days: Some(31),
@@ -428,14 +429,17 @@ pub fn parse_file_type_slot(text: &str) -> Option<FileTypeSlot> {
 
     // 1. Check explicit glob or dot-extension (`*.pdf`, `.rs`, `pdf文件`, etc.)
     let explicit_exts = [
-        "pdf", "docx", "doc", "xlsx", "xls", "csv", "pptx", "ppt", "md", "markdown", "txt",
-        "json", "yaml", "yml", "toml", "rs", "py", "ts", "tsx", "js", "jsx", "go", "c", "cpp",
-        "h", "sh", "zip", "tar", "gz", "tgz", "7z", "rar", "png", "jpg", "jpeg", "webp", "svg",
-        "gif", "mp4", "mkv", "mov", "mp3", "wav", "flac", "log", "sql", "html", "css",
+        "pdf", "docx", "doc", "xlsx", "xls", "csv", "pptx", "ppt", "md", "markdown", "txt", "json",
+        "yaml", "yml", "toml", "rs", "py", "ts", "tsx", "js", "jsx", "go", "c", "cpp", "h", "sh",
+        "zip", "tar", "gz", "tgz", "7z", "rar", "png", "jpg", "jpeg", "webp", "svg", "gif", "mp4",
+        "mkv", "mov", "mp3", "wav", "flac", "log", "sql", "html", "css",
     ];
 
     for ext in explicit_exts {
-        let pat = format!(r"(?i)(?:^|[^a-z0-9_])\*?\.?{}(?:$|[^a-z0-9_])", regex::escape(ext));
+        let pat = format!(
+            r"(?i)(?:^|[^a-z0-9_])\*?\.?{}(?:$|[^a-z0-9_])",
+            regex::escape(ext)
+        );
         if let Ok(re) = Regex::new(&pat)
             && re.is_match(&lc)
         {
@@ -470,7 +474,10 @@ pub fn parse_file_type_slot(text: &str) -> Option<FileTypeSlot> {
             primary_ext: Some("pptx".to_string()),
         });
     }
-    if text.contains("图片") || text.contains("照片") || text.contains("图像") || text.contains("截图")
+    if text.contains("图片")
+        || text.contains("照片")
+        || text.contains("图像")
+        || text.contains("截图")
     {
         return Some(FileTypeSlot {
             category_label: Some("图片".to_string()),
@@ -719,12 +726,10 @@ pub fn extract_slots_for_descriptor(
                 .unwrap_or_default();
 
             let state = if let Some(s) = analysis.detected_toggle.as_deref() {
-                if allowed.contains(&s) {
-                    s
-                } else {
-                    "on"
-                }
-            } else if raw_text.contains("取消") || raw_text.contains("恢复") || raw_text.contains("出声")
+                if allowed.contains(&s) { s } else { "on" }
+            } else if raw_text.contains("取消")
+                || raw_text.contains("恢复")
+                || raw_text.contains("出声")
             {
                 "off"
             } else {
@@ -801,26 +806,26 @@ pub fn extract_slots_for_descriptor(
 
     // 6. Capabilities with `panel` (`settings.open_panel`)
     if props.contains_key("panel") {
-        let panel = if raw_text.contains("蓝牙") || raw_text.to_ascii_lowercase().contains("bluetooth")
-        {
-            "bluetooth"
-        } else if raw_text.contains("网络")
-            || raw_text.contains("无线")
-            || raw_text.to_ascii_lowercase().contains("wifi")
-        {
-            "network"
-        } else if raw_text.contains("声音")
-            || raw_text.contains("音频")
-            || raw_text.contains("音量")
-        {
-            "sound"
-        } else if raw_text.contains("电源") || raw_text.contains("电池") {
-            "power"
-        } else if raw_text.contains("外观") || raw_text.contains("主题") {
-            "appearance"
-        } else {
-            "display"
-        };
+        let panel =
+            if raw_text.contains("蓝牙") || raw_text.to_ascii_lowercase().contains("bluetooth") {
+                "bluetooth"
+            } else if raw_text.contains("网络")
+                || raw_text.contains("无线")
+                || raw_text.to_ascii_lowercase().contains("wifi")
+            {
+                "network"
+            } else if raw_text.contains("声音")
+                || raw_text.contains("音频")
+                || raw_text.contains("音量")
+            {
+                "sound"
+            } else if raw_text.contains("电源") || raw_text.contains("电池") {
+                "power"
+            } else if raw_text.contains("外观") || raw_text.contains("主题") {
+                "appearance"
+            } else {
+                "display"
+            };
         args.insert("panel".to_string(), json!(panel));
     }
 
@@ -908,7 +913,16 @@ pub fn extract_slots_for_descriptor(
     if props.contains_key("app") && !args.contains_key("app") {
         let app_name = extract_entity_after_verbs(
             raw_text,
-            &["打开应用", "启动", "打开", "运行", "关闭", "退出", "切换到", "聚焦"],
+            &[
+                "打开应用",
+                "启动",
+                "打开",
+                "运行",
+                "关闭",
+                "退出",
+                "切换到",
+                "聚焦",
+            ],
         );
         if !app_name.is_empty() {
             args.insert("app".to_string(), json!(app_name));

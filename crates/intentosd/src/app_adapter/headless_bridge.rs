@@ -23,7 +23,9 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-const ALLOWED_DOC_FORMATS: &[&str] = &["pdf", "docx", "odt", "html", "txt", "rtf", "xlsx", "csv", "pptx"];
+const ALLOWED_DOC_FORMATS: &[&str] = &[
+    "pdf", "docx", "odt", "html", "txt", "rtf", "xlsx", "csv", "pptx",
+];
 const ALLOWED_IMAGE_FORMATS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "ico"];
 const ALLOWED_MEDIA_FORMATS: &[&str] = &["mp3", "wav", "flac", "ogg", "m4a", "mp4", "webm", "mkv"];
 
@@ -67,7 +69,10 @@ pub fn ensure_authorized_path(fs_engine: &SafeFsEngine, path: &Path) -> anyhow::
     }
     for comp in path.components() {
         if matches!(comp, Component::ParentDir) {
-            anyhow::bail!("安全拦截：拒绝包含 '..' 父目录逃逸的路径: {}", path.display());
+            anyhow::bail!(
+                "安全拦截：拒绝包含 '..' 父目录逃逸的路径: {}",
+                path.display()
+            );
         }
     }
     if fs_engine.is_forbidden(path) {
@@ -78,10 +83,7 @@ pub fn ensure_authorized_path(fs_engine: &SafeFsEngine, path: &Path) -> anyhow::
         .iter()
         .any(|root| path.starts_with(root));
     if !in_scope {
-        anyhow::bail!(
-            "安全拦截：路径不在已授权目录范围内: {}",
-            path.display()
-        );
+        anyhow::bail!("安全拦截：路径不在已授权目录范围内: {}", path.display());
     }
     Ok(())
 }
@@ -363,7 +365,10 @@ pub async fn execute_headless_transform(
             ok: false,
             channel_used: AdaptationChannel::HeadlessCli,
             translated_command,
-            summary: format!("Headless 转换源输入文件不存在: {}", plan.input_path.display()),
+            summary: format!(
+                "Headless 转换源输入文件不存在: {}",
+                plan.input_path.display()
+            ),
             data: json!({ "input_path": plan.input_path }),
             simulated: false,
             verification: VerificationReport {
@@ -546,9 +551,7 @@ pub async fn execute_headless_transform(
 
                 // Record reversible ChangeSet (`ChangeOp::Create`) when newly created
                 let mut changeset_id = None;
-                if !output_existed_before
-                    && let Ok(post_hash) = compute_file_sha256(out_file)
-                {
+                if !output_existed_before && let Ok(post_hash) = compute_file_sha256(out_file) {
                     let cs_id = format!("cs_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
                     let now = Utc::now();
                     let cs = ChangeSet {
@@ -567,10 +570,7 @@ pub async fn execute_headless_transform(
                         backup_bytes: 0,
                         status: ChangeSetStatus::Applied,
                         undo_expires_at: now + ChronoDuration::days(30),
-                        summary: format!(
-                            "Headless 生成文件 {}",
-                            out_file.display()
-                        ),
+                        summary: format!("Headless 生成文件 {}", out_file.display()),
                     };
                     if core.state_db.save_changeset(&cs).is_ok() {
                         changeset_id = Some(cs_id);

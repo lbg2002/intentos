@@ -359,7 +359,10 @@ pub fn validate_shortcut_safety(raw_shortcut: &str) -> anyhow::Result<String> {
     }
     if clean.chars().any(|c| {
         c.is_control()
-            || matches!(c, ';' | '|' | '&' | '$' | '`' | '\\' | '\'' | '"' | '<' | '>')
+            || matches!(
+                c,
+                ';' | '|' | '&' | '$' | '`' | '\\' | '\'' | '"' | '<' | '>'
+            )
     }) {
         anyhow::bail!("安全拦截：快捷键包含非法特殊字符: {}", clean);
     }
@@ -417,10 +420,7 @@ pub async fn enumerate_desktop_windows() -> Vec<DesktopWindowInfo> {
     // Merge live `StatusNotifierItem` tray apps so tray-minimized apps (`SodaM`, `wpscloudsvr`, etc.) are visible
     if has_dbus_session_address() {
         for tray in discover_live_tray_apps().await {
-            let wm_cls = tray
-                .comm
-                .clone()
-                .unwrap_or_else(|| tray.id.clone());
+            let wm_cls = tray.comm.clone().unwrap_or_else(|| tray.id.clone());
             let already_listed = windows.iter().any(|w| {
                 w.wm_class.eq_ignore_ascii_case(&wm_cls)
                     || (!tray.title.is_empty() && w.title.eq_ignore_ascii_case(&tray.title))
@@ -667,7 +667,8 @@ pub async fn execute_gui_bridge_action(
                 crate::app_adapter::sni_dbusmenu::activate_or_show_tray_app(target).await?;
             if tray_activated.is_none() && !target.eq_ignore_ascii_case(&profile.id) {
                 tray_activated =
-                    crate::app_adapter::sni_dbusmenu::activate_or_show_tray_app(&profile.id).await?;
+                    crate::app_adapter::sni_dbusmenu::activate_or_show_tray_app(&profile.id)
+                        .await?;
             }
             if let Some(tray_val) = tray_activated {
                 let svc = tray_val
@@ -681,7 +682,10 @@ pub async fn execute_gui_bridge_action(
                         lbl, profile.name
                     )
                 } else {
-                    format!("已通过系统托盘 StatusNotifierItem 唤醒「{}」窗口", profile.name)
+                    format!(
+                        "已通过系统托盘 StatusNotifierItem 唤醒「{}」窗口",
+                        profile.name
+                    )
                 };
                 return Ok(GuiDispatchResult {
                     ok: true,
@@ -728,13 +732,19 @@ pub async fn execute_gui_bridge_action(
                     approval_scope: None,
                     channel_used: AdaptationChannel::GuiAtspi,
                     translated_command: format!("/usr/bin/python3 <{}> {}", method_used, target),
-                    summary: format!("已将「{}」窗口（{}）切换至前台焦点", profile.name, win_title),
+                    summary: format!(
+                        "已将「{}」窗口（{}）切换至前台焦点",
+                        profile.name, win_title
+                    ),
                     data: py_res,
                     simulated: false,
                     verification: VerificationReport {
                         state: VerificationState::Passed,
                         method: method_used,
-                        checks: vec!["desktop_window_matched".into(), "window_activate_called".into()],
+                        checks: vec![
+                            "desktop_window_matched".into(),
+                            "window_activate_called".into(),
+                        ],
                         details: None,
                     },
                 });
@@ -913,8 +923,10 @@ pub async fn execute_gui_bridge_action(
             if ctrl.chars().any(char::is_control) {
                 anyhow::bail!("安全拦截：控件名称包含非法控制字符");
             }
-            let translated_command =
-                format!("/usr/bin/python3 -I -c <atspi_do_action> {} {}", profile.id, ctrl);
+            let translated_command = format!(
+                "/usr/bin/python3 -I -c <atspi_do_action> {} {}",
+                profile.id, ctrl
+            );
 
             if use_headless_sim {
                 return Ok(GuiDispatchResult {
@@ -1219,7 +1231,10 @@ mod tests {
             .unwrap();
         assert!(!res.simulated, "must never simulate on real GUI desktop");
         assert!(!res.ok, "non-running app focus must fail honestly");
-        assert_eq!(res.verification.state, VerificationState::VerificationFailed);
+        assert_eq!(
+            res.verification.state,
+            VerificationState::VerificationFailed
+        );
         assert!(
             res.summary.contains("当前未检测到") && !res.summary.contains("无头/仿真环境预演"),
             "unexpected summary: {}",

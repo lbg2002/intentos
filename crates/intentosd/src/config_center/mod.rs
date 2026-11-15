@@ -424,8 +424,7 @@ mod tests {
 
         // 2. Verify secret key NEVER appears in `config.toml`, `brain.toml`, or `domains.json`
         for filename in ["config.toml", "brain.toml", "domains.json"] {
-            let content =
-                std::fs::read_to_string(core.paths.config_dir.join(filename)).unwrap();
+            let content = std::fs::read_to_string(core.paths.config_dir.join(filename)).unwrap();
             assert!(
                 !content.contains(secret_key),
                 "SECURITY VIOLATION: API key leaked into {}!",
@@ -635,13 +634,10 @@ mod tests {
         assert_eq!(ok_site["site"]["id"], "jira");
 
         // 3. Delete custom site shortcut
-        let del_site = handle_module_rpc(
-            &core,
-            "delete_site_shortcut",
-            json!({ "site_id": "jira" }),
-        )
-        .await
-        .unwrap();
+        let del_site =
+            handle_module_rpc(&core, "delete_site_shortcut", json!({ "site_id": "jira" }))
+                .await
+                .unwrap();
         assert_eq!(del_site["deleted"], true);
 
         // 4. Upsert custom search engine (requires `{query}`)
@@ -657,7 +653,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(bad_eng.is_err(), "Search engine without {{query}} must fail");
+        assert!(
+            bad_eng.is_err(),
+            "Search engine without {{query}} must fail"
+        );
 
         let ok_eng = handle_module_rpc(
             &core,
@@ -733,13 +732,9 @@ mod tests {
         let _ = handle_module_rpc(&core, "reset_to_defaults", json!({ "domain_key": "all" }))
             .await
             .unwrap();
-        let imp = handle_module_rpc(
-            &core,
-            "import_config_bundle",
-            json!({ "bundle": bundle }),
-        )
-        .await
-        .unwrap();
+        let imp = handle_module_rpc(&core, "import_config_bundle", json!({ "bundle": bundle }))
+            .await
+            .unwrap();
         assert_eq!(imp["imported"], true);
     }
 

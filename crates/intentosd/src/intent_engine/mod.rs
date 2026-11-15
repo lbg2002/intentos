@@ -22,15 +22,13 @@ pub mod slot_extractor;
 pub use cognitive_parser::{parse_structured_intent, parse_structured_intent_with_llm};
 pub use compound_splitter::{
     CompoundExecutionReport, CompoundPlan, PlannedStep, StepExecutionOutcome, execute_compound,
-    split_compound_intent, split_into_clauses,
+    execute_compound_with_policy, split_compound_intent, split_into_clauses,
 };
-pub use context_resolver::{
-    ContextResolutionOutcome, DesktopContext, resolve_context_references,
-};
+pub use context_resolver::{ContextResolutionOutcome, DesktopContext, resolve_context_references};
 pub use fuzzy_scorer::{
     FuzzyScoreBreakdown, MatchTier, ScoredCapabilityMatch, char_bigram_similarity,
-    is_mixed_pinyin_match, jaro_winkler_similarity, levenshtein_distance,
-    score_descriptor_entry, score_query_against_term,
+    is_mixed_pinyin_match, jaro_winkler_similarity, levenshtein_distance, score_descriptor_entry,
+    score_query_against_term,
 };
 pub use goal_schema::{CognitiveIntentKind, GoalContextHints, StructuredIntent};
 pub use grouped_candidates::{
@@ -280,14 +278,8 @@ pub async fn handle_module_rpc(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            let actions = get_candidate_actions(
-                core,
-                candidate_id,
-                kind,
-                target,
-                capability_id,
-                &arguments,
-            );
+            let actions =
+                get_candidate_actions(core, candidate_id, kind, target, capability_id, &arguments);
             Ok(json!({
                 "candidate_id": candidate_id,
                 "kind": kind,
@@ -321,9 +313,7 @@ pub async fn handle_module_rpc(
             let desktop_ctx: Option<DesktopContext> = payload
                 .get("desktop_context")
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
-            let desktop_state_hint = payload
-                .get("desktop_state_hint")
-                .and_then(|v| v.as_str());
+            let desktop_state_hint = payload.get("desktop_state_hint").and_then(|v| v.as_str());
             let use_llm = payload
                 .get("use_llm")
                 .and_then(|v| v.as_bool())
@@ -401,10 +391,7 @@ pub async fn handle_module_rpc(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let capability_id = payload.get("capability_id").and_then(|v| v.as_str());
-            let query = payload
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let accepted = payload
                 .get("accepted")
                 .and_then(|v| v.as_bool())
@@ -418,15 +405,8 @@ pub async fn handle_module_rpc(
                 && accepted
             {
                 core.index_db.record_frecency(&format!("cap:{}", cap));
-                core.state_db.record_decision_calibration(
-                    query,
-                    "L0",
-                    0.95,
-                    0.45,
-                    0.0,
-                    0.0,
-                    "executed",
-                );
+                core.state_db
+                    .record_decision_calibration(query, "L0", 0.95, 0.45, 0.0, 0.0, "executed");
             }
 
             let new_boost = if !item_key.is_empty() {
@@ -461,8 +441,8 @@ mod tests {
             .and_then(|p| p.parent())
             .expect("workspace root")
             .to_path_buf();
-        let core = IntentOsCore::initialize(Some(tmp.path()), repo_root)
-            .expect("initialize IntentOsCore");
+        let core =
+            IntentOsCore::initialize(Some(tmp.path()), repo_root).expect("initialize IntentOsCore");
         (tmp, core)
     }
 
@@ -541,7 +521,10 @@ mod tests {
             &std::collections::HashMap::new(),
             &core.resources,
         );
-        assert_eq!(vol_args.get("relative").and_then(|v| v.as_str()), Some("down"));
+        assert_eq!(
+            vol_args.get("relative").and_then(|v| v.as_str()),
+            Some("down")
+        );
 
         let scale_desc = core
             .broker
@@ -620,7 +603,10 @@ mod tests {
         assert_eq!(plan2.steps.len(), 2);
         assert_eq!(plan2.steps[0].capability_id, "sound.volume.set");
         assert_eq!(
-            plan2.steps[0].arguments.get("value").and_then(|v| v.as_f64()),
+            plan2.steps[0]
+                .arguments
+                .get("value")
+                .and_then(|v| v.as_f64()),
             Some(20.0)
         );
         assert_eq!(plan2.steps[1].capability_id, "scene.apply");
@@ -726,11 +712,15 @@ mod tests {
             Some("进入论文写作专注状态")
         );
         assert_eq!(
-            thesis_goal.get("requires_planning").and_then(|v| v.as_bool()),
+            thesis_goal
+                .get("requires_planning")
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
         assert_eq!(
-            thesis_goal.get("recommended_route").and_then(|v| v.as_str()),
+            thesis_goal
+                .get("recommended_route")
+                .and_then(|v| v.as_str()),
             Some("L2")
         );
 

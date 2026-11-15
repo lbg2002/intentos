@@ -234,10 +234,7 @@ impl ModelRoleProfile {
         if let Some(ref k) = self.kind
             && !matches!(k.as_str(), "emulated" | "native")
         {
-            anyhow::bail!(
-                "决策角色 kind 仅允许 emulated 或 native，当前值: {}",
-                k
-            );
+            anyhow::bail!("决策角色 kind 仅允许 emulated 或 native，当前值: {}", k);
         }
         Ok(())
     }
@@ -1029,24 +1026,24 @@ impl FullDomainsConfig {
         }
 
         for (role, prof) in &brain.profiles {
-            let entry = self
-                .brain
-                .profiles
-                .entry(role.clone())
-                .or_insert_with(|| ModelRoleProfile {
-                    provider: prof.provider.clone(),
-                    model: prof.model.clone(),
-                    inherit: None,
-                    context_budget: prof.context_budget,
-                    max_output_tokens: prof.max_output_tokens,
-                    thinking: "medium".to_string(),
-                    temperature: 0.2,
-                    enabled: true,
-                    kind: None,
-                    direct_threshold: None,
-                    margin_threshold: None,
-                    clarify_threshold: None,
-                });
+            let entry =
+                self.brain
+                    .profiles
+                    .entry(role.clone())
+                    .or_insert_with(|| ModelRoleProfile {
+                        provider: prof.provider.clone(),
+                        model: prof.model.clone(),
+                        inherit: None,
+                        context_budget: prof.context_budget,
+                        max_output_tokens: prof.max_output_tokens,
+                        thinking: "medium".to_string(),
+                        temperature: 0.2,
+                        enabled: true,
+                        kind: None,
+                        direct_threshold: None,
+                        margin_threshold: None,
+                        clarify_threshold: None,
+                    });
             entry.provider = prof.provider.clone();
             entry.model = prof.model.clone();
             entry.context_budget = prof.context_budget;

@@ -1203,7 +1203,8 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let req_json_str = read_full_http_request_body(&mut stream).await;
                 let step_no = counter_clone.fetch_add(1, Ordering::SeqCst);
-                let req_val: Value = serde_json::from_str(&req_json_str).unwrap_or_else(|_| json!({}));
+                let req_val: Value =
+                    serde_json::from_str(&req_json_str).unwrap_or_else(|_| json!({}));
                 let msgs = req_val["messages"].as_array().cloned().unwrap_or_default();
                 let has_tool_result = msgs.iter().any(|m| m["role"] == "tool");
 
@@ -1442,7 +1443,8 @@ mod tests {
             .unwrap();
         }
 
-        let captured_req: Arc<std::sync::Mutex<Option<Value>>> = Arc::new(std::sync::Mutex::new(None));
+        let captured_req: Arc<std::sync::Mutex<Option<Value>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let captured_clone = captured_req.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1512,7 +1514,11 @@ mod tests {
         assert!(cc["dropped_tool_records"].as_u64().unwrap() >= 14);
         assert!(cc["saved_pct"].as_f64().unwrap() > 0.0);
 
-        let sent = captured_req.lock().unwrap().clone().expect("captured request");
+        let sent = captured_req
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured request");
         let sent_str = sent.to_string();
         assert!(
             !sent_str.contains("绝密内部思考链"),
@@ -1527,7 +1533,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_m1_effect_ledger_blocks_fallback_replay_after_mutating_tool_round1_ok_round2_500() {
+    async fn test_m1_effect_ledger_blocks_fallback_replay_after_mutating_tool_round1_ok_round2_500()
+    {
         let (tmp, core) = setup_test_core();
         let mock_home = tmp.path().join("mock_home_m1_ledger");
         std::fs::create_dir_all(&mock_home).unwrap();
@@ -1535,8 +1542,12 @@ mod tests {
         // Unit-verify canonical SHA-256 idempotency key stability & duplicate lookup first
         let mut unit_ledger = TurnEffectLedger::new("turn_unit_canon");
         let k1 = unit_ledger.compute_idempotency_key("sound.volume.set", r#"{"b":2,"value":38}"#);
-        let k2 = unit_ledger.compute_idempotency_key("sound.volume.set", r#"{"value": 38, "b": 2}"#);
-        assert_eq!(k1, k2, "Canonical JSON idempotency_key must be key-order invariant");
+        let k2 =
+            unit_ledger.compute_idempotency_key("sound.volume.set", r#"{"value": 38, "b": 2}"#);
+        assert_eq!(
+            k1, k2,
+            "Canonical JSON idempotency_key must be key-order invariant"
+        );
         assert_eq!(k1.len(), 64);
         assert!(unit_ledger.lookup_idempotent(&k2).is_none());
         let unit_sid = unit_ledger.next_step_id();
@@ -1684,8 +1695,10 @@ mod tests {
 
         let dots = res["trace_dots"].as_array().unwrap();
         assert!(
-            dots.iter()
-                .any(|d| d["title"].as_str().unwrap_or("").contains("sound.volume.set")),
+            dots.iter().any(|d| d["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("sound.volume.set")),
             "Round 1 trace_dots must be preserved on safe halt, got: {:?}",
             dots
         );
@@ -1794,7 +1807,12 @@ mod tests {
         );
 
         let incog_outbound = captured_bodies.lock().unwrap()[0].clone();
-        for forbidden in ["默认使用 WPS 打开文档", "文档偏好", "杭州滨江研发园区", "办公地点"] {
+        for forbidden in [
+            "默认使用 WPS 打开文档",
+            "文档偏好",
+            "杭州滨江研发园区",
+            "办公地点",
+        ] {
             assert!(
                 !incog_outbound.contains(forbidden),
                 "PRIVACY VIOLATION: Incognito outbound LLM payload leaked explicit StateDb memory '{}'! Payload: {}",
@@ -1812,8 +1830,7 @@ mod tests {
         .await;
         assert!(
             mem_ses.is_err()
-                || mem_ses
-                    .unwrap()["messages"]
+                || mem_ses.unwrap()["messages"]
                     .as_array()
                     .is_none_or(|arr| arr.is_empty()),
             "Incognito turn MUST NOT write conversation history!"
@@ -1923,9 +1940,10 @@ esac
         );
         let bright_dots = res_bright["trace_dots"].as_array().unwrap();
         assert!(
-            bright_dots
-                .iter()
-                .any(|d| d["title"].as_str().unwrap_or("").contains("display.brightness.set")),
+            bright_dots.iter().any(|d| d["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("display.brightness.set")),
             "CLI broker bridge must emit real `TraceDot` for executed capability, got: {:?}",
             bright_dots
         );

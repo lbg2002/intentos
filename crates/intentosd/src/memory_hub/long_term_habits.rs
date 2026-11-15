@@ -205,9 +205,7 @@ pub fn parse_xbel_content(xml: &str) -> Vec<XbelBookmark> {
         ranked_apps.sort_by(|a, b| {
             let a_portal = is_portal_helper_app(&a.name, &a.exec);
             let b_portal = is_portal_helper_app(&b.name, &b.exec);
-            a_portal
-                .cmp(&b_portal)
-                .then_with(|| b.count.cmp(&a.count))
+            a_portal.cmp(&b_portal).then_with(|| b.count.cmp(&a.count))
         });
         let mut preferred_apps = Vec::new();
         for a in ranked_apps {
@@ -647,7 +645,11 @@ fn extract_primary_executable(exec_raw: &str) -> String {
         }
         if (tok.ends_with("/flatpak") || tok == "flatpak") && idx + 2 < tokens.len() {
             for sub in &tokens[idx + 1..] {
-                if !sub.starts_with('-') && *sub != "run" && !sub.starts_with("@@") && !sub.starts_with('%') {
+                if !sub.starts_with('-')
+                    && *sub != "run"
+                    && !sub.starts_with("@@")
+                    && !sub.starts_with('%')
+                {
                     return sub.to_string();
                 }
             }
@@ -816,12 +818,16 @@ pub fn sync_system_usage_with_options(
         None => default_ubuntu_desktop_dirs(),
     };
     let mut apps = scan_desktop_directories(&dir_pairs);
-    if apps.is_empty() && custom_desktop_dirs.is_none() && core.app_config.allow_simulated_hardware_fallback {
+    if apps.is_empty()
+        && custom_desktop_dirs.is_none()
+        && core.app_config.allow_simulated_hardware_fallback
+    {
         apps = fallback_software_catalog();
     }
 
     // Read existing intentos_count & intentos_launch_count from memory_hub.db so we never lose IntentOS history
-    let mut existing_file_intentos: HashMap<String, (u64, i64, String, Vec<String>)> = HashMap::new();
+    let mut existing_file_intentos: HashMap<String, (u64, i64, String, Vec<String>)> =
+        HashMap::new();
     let mut existing_app_intentos: HashMap<String, (u64, i64, Option<String>)> = HashMap::new();
     {
         let conn = db.conn.lock().unwrap();
@@ -1107,8 +1113,10 @@ pub fn sync_system_usage_with_options(
                  )",
             )?;
             for app in &apps {
-                let (py_full, py_init) =
-                    to_pinyin_pair(&format!("{} {} {}", app.name, app.name_en, app.generic_name));
+                let (py_full, py_init) = to_pinyin_pair(&format!(
+                    "{} {} {}",
+                    app.name, app.name_en, app.generic_name
+                ));
                 ins_app.execute(params![
                     app.app_id,
                     app.name,
@@ -1182,10 +1190,7 @@ fn matches_xbel_app(app: &SoftwareProfile, x_name: &str, x_exec: &str) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let stem = app
-        .app_id
-        .trim_end_matches(".desktop")
-        .to_ascii_lowercase();
+    let stem = app.app_id.trim_end_matches(".desktop").to_ascii_lowercase();
     let stem_tail = stem.rsplit('.').next().unwrap_or(&stem);
     let app_exec_lc = app.executable.to_ascii_lowercase();
     let name_en_lc = app.name_en.to_ascii_lowercase();
@@ -1247,8 +1252,7 @@ pub fn record_file_usage(
         )
         .ok();
 
-    let (xbel_cnt, prev_ic, prev_json) =
-        existing.unwrap_or_else(|| (0, 0, "[]".to_string()));
+    let (xbel_cnt, prev_ic, prev_json) = existing.unwrap_or_else(|| (0, 0, "[]".to_string()));
     let new_ic = prev_ic + delta.max(1);
     let open_count = xbel_cnt + new_ic;
     let mut pref_apps: Vec<String> = serde_json::from_str(&prev_json).unwrap_or_default();
@@ -1515,7 +1519,10 @@ pub fn query_software_catalog(
             if app.name.to_ascii_lowercase() == ql
                 || app.name_en.to_ascii_lowercase() == ql
                 || app.executable.to_ascii_lowercase() == ql
-                || app.app_id.trim_end_matches(".desktop").eq_ignore_ascii_case(&ql)
+                || app
+                    .app_id
+                    .trim_end_matches(".desktop")
+                    .eq_ignore_ascii_case(&ql)
             {
                 match_score += 120.0;
             } else if app.name.to_ascii_lowercase().contains(&ql)
@@ -1528,7 +1535,10 @@ pub fn query_software_catalog(
             } else if app.generic_name.to_ascii_lowercase().contains(&ql)
                 || app.comment.to_ascii_lowercase().contains(&ql)
                 || app.uri_schemes.iter().any(|u| u.contains(&ql))
-                || app.mime_types.iter().any(|m| m.to_ascii_lowercase().contains(&ql))
+                || app
+                    .mime_types
+                    .iter()
+                    .any(|m| m.to_ascii_lowercase().contains(&ql))
                 || app.categories.iter().any(|c| {
                     let cl = c.to_ascii_lowercase();
                     cl.contains(&ql) || cat_synonyms.iter().any(|syn| cl.contains(syn))
@@ -1682,13 +1692,18 @@ fn is_generic_software_query(q: &str) -> bool {
 }
 
 fn map_chinese_category_keyword(ql: &str) -> &'static [&'static str] {
-    if ql.contains("音乐") || ql.contains("音频") || ql.contains("播放") || ql.contains("媒体") {
+    if ql.contains("音乐") || ql.contains("音频") || ql.contains("播放") || ql.contains("媒体")
+    {
         &["audio", "music", "player", "audiovideo", "video"]
     } else if ql.contains("视频") || ql.contains("电影") {
         &["video", "player", "audiovideo"]
     } else if ql.contains("浏览器") || ql.contains("上网") {
         &["webbrowser", "network"]
-    } else if ql.contains("编程") || ql.contains("开发") || ql.contains("编辑器") || ql.contains("代码") {
+    } else if ql.contains("编程")
+        || ql.contains("开发")
+        || ql.contains("编辑器")
+        || ql.contains("代码")
+    {
         &["development", "ide", "texteditor"]
     } else if ql.contains("办公") || ql.contains("文档") || ql.contains("表格") {
         &["office", "wordprocessor", "spreadsheet", "viewer"]
@@ -1731,7 +1746,11 @@ pub fn get_installed_apps_summary(db: &MemoryHubDb) -> anyhow::Result<InstalledA
         .into_iter()
         .map(|(category, count)| CategoryCount { category, count })
         .collect();
-    top_categories.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
+    top_categories.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.category.cmp(&b.category))
+    });
     top_categories.truncate(10);
 
     Ok(InstalledAppsSummary {
@@ -1746,37 +1765,93 @@ pub fn get_installed_apps_summary(db: &MemoryHubDb) -> anyhow::Result<InstalledA
 
 fn fallback_software_catalog() -> Vec<SoftwareProfile> {
     let seeds = [
-        ("code.desktop", "Visual Studio Code", Some("VS Code 编辑器"), "Code Editor", "code", &["Development", "IDE"][..], &["vscode"][..], false),
-        ("firefox.desktop", "Firefox 浏览器", Some("Firefox 浏览器"), "Web Browser", "firefox", &["Network", "WebBrowser"][..], &["http", "https"][..], false),
-        ("org.gnome.Nautilus.desktop", "文件管理器", Some("文件管理器"), "Files", "nautilus", &["System", "FileManager"][..], &[][..], true),
-        ("org.gnome.Evince.desktop", "文档查看器", Some("文档查看器"), "Document Viewer", "evince", &["Office", "Viewer"][..], &[][..], true),
-        ("libreoffice-writer.desktop", "LibreOffice Writer", Some("LibreOffice 文字"), "Word Processor", "libreoffice", &["Office", "WordProcessor"][..], &[][..], false),
-        ("org.gnome.Terminal.desktop", "终端", Some("终端"), "Terminal Emulator", "gnome-terminal", &["System", "TerminalEmulator"][..], &[][..], true),
+        (
+            "code.desktop",
+            "Visual Studio Code",
+            Some("VS Code 编辑器"),
+            "Code Editor",
+            "code",
+            &["Development", "IDE"][..],
+            &["vscode"][..],
+            false,
+        ),
+        (
+            "firefox.desktop",
+            "Firefox 浏览器",
+            Some("Firefox 浏览器"),
+            "Web Browser",
+            "firefox",
+            &["Network", "WebBrowser"][..],
+            &["http", "https"][..],
+            false,
+        ),
+        (
+            "org.gnome.Nautilus.desktop",
+            "文件管理器",
+            Some("文件管理器"),
+            "Files",
+            "nautilus",
+            &["System", "FileManager"][..],
+            &[][..],
+            true,
+        ),
+        (
+            "org.gnome.Evince.desktop",
+            "文档查看器",
+            Some("文档查看器"),
+            "Document Viewer",
+            "evince",
+            &["Office", "Viewer"][..],
+            &[][..],
+            true,
+        ),
+        (
+            "libreoffice-writer.desktop",
+            "LibreOffice Writer",
+            Some("LibreOffice 文字"),
+            "Word Processor",
+            "libreoffice",
+            &["Office", "WordProcessor"][..],
+            &[][..],
+            false,
+        ),
+        (
+            "org.gnome.Terminal.desktop",
+            "终端",
+            Some("终端"),
+            "Terminal Emulator",
+            "gnome-terminal",
+            &["System", "TerminalEmulator"][..],
+            &[][..],
+            true,
+        ),
     ];
     seeds
         .into_iter()
-        .map(|(id, name, zh, gname, exec, cats, schemes, dbus)| SoftwareProfile {
-            app_id: id.to_string(),
-            name: name.to_string(),
-            name_zh: zh.map(String::from),
-            name_en: name.to_string(),
-            generic_name: gname.to_string(),
-            comment: gname.to_string(),
-            exec: exec.to_string(),
-            executable: exec.to_string(),
-            icon: exec.to_string(),
-            categories: cats.iter().map(|s| (*s).to_string()).collect(),
-            mime_types: Vec::new(),
-            dbus_activatable: dbus,
-            uri_schemes: schemes.iter().map(|s| (*s).to_string()).collect(),
-            packaging: "catalog".to_string(),
-            desktop_file_path: format!("/usr/share/applications/{}", id),
-            xbel_launch_count: 0,
-            intentos_launch_count: 0,
-            launch_count: 0,
-            last_used_at: None,
-            last_used_epoch: 0,
-            frecency_score: 0.0,
-        })
+        .map(
+            |(id, name, zh, gname, exec, cats, schemes, dbus)| SoftwareProfile {
+                app_id: id.to_string(),
+                name: name.to_string(),
+                name_zh: zh.map(String::from),
+                name_en: name.to_string(),
+                generic_name: gname.to_string(),
+                comment: gname.to_string(),
+                exec: exec.to_string(),
+                executable: exec.to_string(),
+                icon: exec.to_string(),
+                categories: cats.iter().map(|s| (*s).to_string()).collect(),
+                mime_types: Vec::new(),
+                dbus_activatable: dbus,
+                uri_schemes: schemes.iter().map(|s| (*s).to_string()).collect(),
+                packaging: "catalog".to_string(),
+                desktop_file_path: format!("/usr/share/applications/{}", id),
+                xbel_launch_count: 0,
+                intentos_launch_count: 0,
+                launch_count: 0,
+                last_used_at: None,
+                last_used_epoch: 0,
+                frecency_score: 0.0,
+            },
+        )
         .collect()
 }

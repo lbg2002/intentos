@@ -165,7 +165,10 @@ async fn wave4_test1_sodam_pinyin_keyword_resolution_gio_launch_and_honest_missi
             assert_eq!(arguments["app_id"], "sodam.desktop");
             assert_eq!(arguments["query"], "汽水音乐");
         }
-        other => panic!("expected ExecuteL0 app.launch for 打开汽水音乐, got {:?}", other),
+        other => panic!(
+            "expected ExecuteL0 app.launch for 打开汽水音乐, got {:?}",
+            other
+        ),
     }
 
     // 3. Execute `"打开汽水音乐"` end-to-end: when GUI display & `gio` exist, verifies real `/proc` PID spawn
@@ -180,6 +183,7 @@ async fn wave4_test1_sodam_pinyin_keyword_resolution_gio_launch_and_honest_missi
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -189,7 +193,11 @@ async fn wave4_test1_sodam_pinyin_keyword_resolution_gio_launch_and_honest_missi
     assert_eq!(launch_task.status, TaskStatus::Completed);
     let step = launch_task.steps.first().expect("app.launch step");
     assert!(!step.message.contains("没有该应用程序"));
-    assert!(!step.stderr_summary_or_msg().contains("SodaM: No such application"));
+    assert!(
+        !step
+            .stderr_summary_or_msg()
+            .contains("SodaM: No such application")
+    );
 
     if has_gui_session() && Path::new("/usr/bin/gio").is_file() {
         assert_eq!(step.status, ExecutionStatus::Exited);
@@ -214,6 +222,7 @@ async fn wave4_test1_sodam_pinyin_keyword_resolution_gio_launch_and_honest_missi
                     selected_candidate_id: None,
                     cwd: None,
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )
@@ -255,6 +264,7 @@ async fn wave4_test1_sodam_pinyin_keyword_resolution_gio_launch_and_honest_missi
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -462,10 +472,7 @@ async fn wave4_test2_sni_dbusmenu_sodam_wps_parsing_and_inspect_app_tool_loop() 
     ]))"#;
     let wps_items = parse_dbusmenu_layout_gvariant(wps_gvariant);
     let wps_labels: Vec<&str> = wps_items.iter().map(|i| i.label.as_str()).collect();
-    assert_eq!(
-        wps_labels,
-        vec!["启动 WPS Office", "查看传输详情", "退出"]
-    );
+    assert_eq!(wps_labels, vec!["启动 WPS Office", "查看传输详情", "退出"]);
     assert_eq!(
         match_menu_item_for_action(&wps_items, "focus_window")
             .unwrap()
@@ -474,9 +481,11 @@ async fn wave4_test2_sni_dbusmenu_sodam_wps_parsing_and_inspect_app_tool_loop() 
     );
 
     // Verify discrete non-shell `gdbus` argv builders (`--` before `0 -1`!)
-    let layout_args =
-        build_dbusmenu_get_layout_args("org.kde.StatusNotifierItem-48120-1", "/com/canonical/dbusmenu")
-            .unwrap();
+    let layout_args = build_dbusmenu_get_layout_args(
+        "org.kde.StatusNotifierItem-48120-1",
+        "/com/canonical/dbusmenu",
+    )
+    .unwrap();
     assert!(layout_args.contains(&"--".to_string()));
     let event_args = build_dbusmenu_event_args(
         "org.kde.StatusNotifierItem-48120-1",
@@ -486,7 +495,11 @@ async fn wave4_test2_sni_dbusmenu_sodam_wps_parsing_and_inspect_app_tool_loop() 
         0,
     )
     .unwrap();
-    assert!(event_args.iter().any(|a| a == "com.canonical.dbusmenu.Event"));
+    assert!(
+        event_args
+            .iter()
+            .any(|a| a == "com.canonical.dbusmenu.Event")
+    );
 
     // -------------------------------------------------------------------------
     // Part B: 9 AIOS Tools (`app_adapter_inspect_app`) End-to-End in BOTH L2 & Quick-Chat!
@@ -543,6 +556,7 @@ async fn wave4_test2_sni_dbusmenu_sodam_wps_parsing_and_inspect_app_tool_loop() 
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -732,7 +746,8 @@ async fn wave4_test3_clean_desktop_subprocess_environment_strips_conda_keeps_sys
 // =============================================================================
 
 #[tokio::test]
-async fn wave4_test4_real_gui_session_never_fabricates_headless_simulation_and_routes_media_window() {
+async fn wave4_test4_real_gui_session_never_fabricates_headless_simulation_and_routes_media_window()
+{
     // 1. Pure truth-table check on `should_use_headless_simulation`
     assert!(!should_use_headless_simulation(true, false));
     assert!(should_use_headless_simulation(true, true));
@@ -823,9 +838,10 @@ async fn wave4_test4_real_gui_session_never_fabricates_headless_simulation_and_r
             VerificationState::VerificationFailed
         );
 
-        let list_res = execute_gui_bridge_action(&nonexistent_prof, "list_windows", &json!({}), true)
-            .await
-            .unwrap();
+        let list_res =
+            execute_gui_bridge_action(&nonexistent_prof, "list_windows", &json!({}), true)
+                .await
+                .unwrap();
         assert!(!list_res.simulated);
         assert!(!list_res.summary.contains("无头/仿真环境预演"));
         assert_eq!(list_res.verification.state, VerificationState::Passed);

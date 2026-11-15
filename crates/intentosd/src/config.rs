@@ -378,13 +378,24 @@ pub fn builtin_sites() -> Vec<SiteEntry> {
     vec![
         SiteEntry {
             id: "github".into(),
-            names: vec!["GitHub".into(), "github".into(), "gh".into(), "吉特哈布".into()],
+            names: vec![
+                "GitHub".into(),
+                "github".into(),
+                "gh".into(),
+                "吉特哈布".into(),
+            ],
             url: "https://github.com".into(),
             search: Some("https://github.com/search?q={query}".into()),
         },
         SiteEntry {
             id: "bilibili".into(),
-            names: vec!["哔哩哔哩".into(), "B站".into(), "b站".into(), "bili".into(), "bilibili".into()],
+            names: vec![
+                "哔哩哔哩".into(),
+                "B站".into(),
+                "b站".into(),
+                "bili".into(),
+                "bilibili".into(),
+            ],
             url: "https://www.bilibili.com".into(),
             search: Some("https://search.bilibili.com/all?keyword={query}".into()),
         },

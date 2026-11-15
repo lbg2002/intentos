@@ -129,24 +129,88 @@ pub fn normalize_software_category(raw: &str) -> Option<&'static str> {
     }
     let lc = trimmed.to_ascii_lowercase();
     match lc.as_str() {
-        "media_entertainment" | "media" | "music" | "audio" | "video" | "player"
-        | "影音娱乐" | "影音与音乐娱乐" => Some("media_entertainment"),
-        "social_collab" | "social" | "communication" | "chat" | "im" | "meeting" | "email"
-        | "mail" | "社交会议" | "社交通讯" | "社交通讯与视频会议" => Some("social_collab"),
-        "office_notes_doc" | "office" | "notes" | "note" | "document" | "doc" | "pdf"
-        | "办公笔记" | "办公文档" | "办公文档、pdf 与知识笔记" => Some("office_notes_doc"),
-        "cloud_transfer" | "cloud" | "transfer" | "sync" | "netdisk" | "云盘互传"
+        "media_entertainment"
+        | "media"
+        | "music"
+        | "audio"
+        | "video"
+        | "player"
+        | "影音娱乐"
+        | "影音与音乐娱乐" => Some("media_entertainment"),
+        "social_collab"
+        | "social"
+        | "communication"
+        | "chat"
+        | "im"
+        | "meeting"
+        | "email"
+        | "mail"
+        | "社交会议"
+        | "社交通讯"
+        | "社交通讯与视频会议" => Some("social_collab"),
+        "office_notes_doc"
+        | "office"
+        | "notes"
+        | "note"
+        | "document"
+        | "doc"
+        | "pdf"
+        | "办公笔记"
+        | "办公文档"
+        | "办公文档、pdf 与知识笔记" => Some("office_notes_doc"),
+        "cloud_transfer"
+        | "cloud"
+        | "transfer"
+        | "sync"
+        | "netdisk"
+        | "云盘互传"
         | "云盘同步与局域网互传" => Some("cloud_transfer"),
-        "network_browser" | "browser" | "network" | "proxy" | "vpn" | "web" | "网络代理"
+        "network_browser"
+        | "browser"
+        | "network"
+        | "proxy"
+        | "vpn"
+        | "web"
+        | "网络代理"
         | "网络代理、vpn 与浏览器" => Some("network_browser"),
-        "dev_ai_ide" | "ide" | "dev" | "development" | "terminal" | "ai" | "coding"
-        | "code" | "开发与ai" | "ai 编程、ide 与开发逆向" => Some("dev_ai_ide"),
-        "creative_disc" | "creative" | "graphics" | "photo" | "diagram" | "disc"
-        | "burn" | "创意刻录" | "图形摄影、流程图与光盘刻录" => Some("creative_disc"),
-        "remote_vm" | "remote" | "vm" | "virtualization" | "container" | "rdp" | "vnc"
-        | "远程虚拟机" | "远程桌面与虚拟化容器" => Some("remote_vm"),
-        "hardware_system" | "hardware" | "system" | "file_manager" | "files" | "utility"
-        | "tools" | "input_method" | "desktop_app" | "硬件系统"
+        "dev_ai_ide"
+        | "ide"
+        | "dev"
+        | "development"
+        | "terminal"
+        | "ai"
+        | "coding"
+        | "code"
+        | "开发与ai"
+        | "ai 编程、ide 与开发逆向" => Some("dev_ai_ide"),
+        "creative_disc"
+        | "creative"
+        | "graphics"
+        | "photo"
+        | "diagram"
+        | "disc"
+        | "burn"
+        | "创意刻录"
+        | "图形摄影、流程图与光盘刻录" => Some("creative_disc"),
+        "remote_vm"
+        | "remote"
+        | "vm"
+        | "virtualization"
+        | "container"
+        | "rdp"
+        | "vnc"
+        | "远程虚拟机"
+        | "远程桌面与虚拟化容器" => Some("remote_vm"),
+        "hardware_system"
+        | "hardware"
+        | "system"
+        | "file_manager"
+        | "files"
+        | "utility"
+        | "tools"
+        | "input_method"
+        | "desktop_app"
+        | "硬件系统"
         | "硬件外设、输入法与系统工具" => Some("hardware_system"),
         _ => {
             if trimmed.contains("影音") || trimmed.contains("音乐") {
@@ -383,9 +447,7 @@ fn is_pure_uninstaller_entry(rec: &RawDesktopRecord) -> bool {
     {
         return true;
     }
-    if name_lc.starts_with("uninstall ")
-        || name_lc.starts_with("remove ")
-        || zh.starts_with("卸载")
+    if name_lc.starts_with("uninstall ") || name_lc.starts_with("remove ") || zh.starts_with("卸载")
     {
         return true;
     }
@@ -1229,23 +1291,79 @@ fn snapshot_user_running_processes() -> Vec<RunningProcessEntry> {
 /// Detect companion CLI tools installed across `/usr/bin`, `/usr/local/bin`, `/snap/bin`, `/opt`, and `~/.local/bin`.
 pub fn detect_companion_cli_tools() -> Vec<CompanionCliTool> {
     let specs: &[(&str, &str, &str)] = &[
-        ("libreoffice", "office_notes_doc", "LibreOffice 无头文档/PDF 转换引擎"),
-        ("evince", "office_notes_doc", "GNOME Evince PDF 页码跳转与全文检索"),
-        ("pdfarranger", "office_notes_doc", "PDF Arranger 页面合并与拆分工具"),
-        ("drawio", "creative_disc", "draw.io 流程图无头导出与编辑 CLI"),
-        ("VBoxManage", "remote_vm", "Oracle VirtualBox 虚拟机生命周期控制 CLI"),
-        ("rustdesk", "remote_vm", "RustDesk 远程桌面设备 ID 与受控连接 CLI"),
-        ("fcitx5-remote", "hardware_system", "Fcitx5 中文输入法状态探针与热切换 CLI"),
-        ("fcitx5-configtool", "hardware_system", "Fcitx5 输入法配置中心"),
-        ("nvidia-smi", "hardware_system", "NVIDIA GPU 温度/显存/利用率实时遥测 CLI"),
+        (
+            "libreoffice",
+            "office_notes_doc",
+            "LibreOffice 无头文档/PDF 转换引擎",
+        ),
+        (
+            "evince",
+            "office_notes_doc",
+            "GNOME Evince PDF 页码跳转与全文检索",
+        ),
+        (
+            "pdfarranger",
+            "office_notes_doc",
+            "PDF Arranger 页面合并与拆分工具",
+        ),
+        (
+            "drawio",
+            "creative_disc",
+            "draw.io 流程图无头导出与编辑 CLI",
+        ),
+        (
+            "VBoxManage",
+            "remote_vm",
+            "Oracle VirtualBox 虚拟机生命周期控制 CLI",
+        ),
+        (
+            "rustdesk",
+            "remote_vm",
+            "RustDesk 远程桌面设备 ID 与受控连接 CLI",
+        ),
+        (
+            "fcitx5-remote",
+            "hardware_system",
+            "Fcitx5 中文输入法状态探针与热切换 CLI",
+        ),
+        (
+            "fcitx5-configtool",
+            "hardware_system",
+            "Fcitx5 输入法配置中心",
+        ),
+        (
+            "nvidia-smi",
+            "hardware_system",
+            "NVIDIA GPU 温度/显存/利用率实时遥测 CLI",
+        ),
         ("nvidia-settings", "hardware_system", "NVIDIA 显卡设置面板"),
-        ("tailscale", "network_browser", "Tailscale 组网状态与虚拟 IP 查询 CLI"),
-        ("localsend_app", "cloud_transfer", "LocalSend 局域网高速传文件工具"),
-        ("code", "dev_ai_ide", "VS Code 工作区/行列跳转/双文件 Diff CLI"),
+        (
+            "tailscale",
+            "network_browser",
+            "Tailscale 组网状态与虚拟 IP 查询 CLI",
+        ),
+        (
+            "localsend_app",
+            "cloud_transfer",
+            "LocalSend 局域网高速传文件工具",
+        ),
+        (
+            "code",
+            "dev_ai_ide",
+            "VS Code 工作区/行列跳转/双文件 Diff CLI",
+        ),
         ("trae-cn", "dev_ai_ide", "Trae CN AI IDE CLI"),
         ("zcode", "dev_ai_ide", "ZCode AI IDE CLI"),
-        ("nautilus", "hardware_system", "GNOME Files 文件定位与窗口唤起 CLI"),
-        ("vlc", "media_entertainment", "VLC 媒体播放与 MPRIS 控制 CLI"),
+        (
+            "nautilus",
+            "hardware_system",
+            "GNOME Files 文件定位与窗口唤起 CLI",
+        ),
+        (
+            "vlc",
+            "media_entertainment",
+            "VLC 媒体播放与 MPRIS 控制 CLI",
+        ),
     ];
 
     let mut found = Vec::new();
@@ -1309,8 +1427,7 @@ fn match_running_pids(
             || (!wm_lc.is_empty() && wm_lc.len() >= 3 && p.comm_lc == wm_lc)
             || matched_adapter_cli.iter().any(|cli| {
                 let c_lc = cli.to_ascii_lowercase();
-                c_lc.len() >= 3
-                    && (p.comm_lc == c_lc || p.exe_lc.ends_with(&format!("/{}", c_lc)))
+                c_lc.len() >= 3 && (p.comm_lc == c_lc || p.exe_lc.ends_with(&format!("/{}", c_lc)))
             });
         if matched {
             pids.push(p.pid);
@@ -1420,8 +1537,7 @@ fn find_matching_adapter_profile<'a>(
         }
     } else if let Some(ref zh) = rec.name_zh {
         if let Some(p) = all_profiles.iter().copied().find(|p| {
-            p.name.eq_ignore_ascii_case(zh)
-                || p.aliases.iter().any(|a| a.eq_ignore_ascii_case(zh))
+            p.name.eq_ignore_ascii_case(zh) || p.aliases.iter().any(|a| a.eq_ignore_ascii_case(zh))
         }) {
             return Some(p);
         }
@@ -1644,10 +1760,7 @@ fn collect_scan_directories(
             PathBuf::from(&home).join(".local/share/flatpak/exports/share/applications"),
             "flatpak",
         ),
-        (
-            PathBuf::from("/var/lib/snapd/desktop/applications"),
-            "snap",
-        ),
+        (PathBuf::from("/var/lib/snapd/desktop/applications"), "snap"),
         (PathBuf::from("/usr/share/applications"), "system_apt"),
         (PathBuf::from("/usr/local/share/applications"), "system_apt"),
         (
@@ -1761,7 +1874,9 @@ pub async fn deep_scan_local_software(
 ) -> DeepScanCatalog {
     let has_custom_cfg_apps = config_dir.is_some_and(|cfg| {
         cfg.join("applications").is_dir()
-            || cfg.parent().is_some_and(|p| p.join("applications").is_dir())
+            || cfg
+                .parent()
+                .is_some_and(|p| p.join("applications").is_dir())
     });
     let use_global_cache =
         options.scan_dirs.is_empty() && options.extra_dirs.is_empty() && !has_custom_cfg_apps;
@@ -1888,12 +2003,8 @@ pub async fn deep_scan_local_software(
         let running_pids = match_running_pids(&rec, &running_procs, &matched_cli_list);
         let is_running = tray_hit.is_some() || mpris_hit.is_some() || !running_pids.is_empty();
 
-        let (channels, synthesized_actions) = synthesize_actions_and_channels(
-            &rec,
-            matched_profile,
-            tray_hit,
-            mpris_hit.as_deref(),
-        );
+        let (channels, synthesized_actions) =
+            synthesize_actions_and_channels(&rec, matched_profile, tray_hit, mpris_hit.as_deref());
 
         let actions: Vec<String> = synthesized_actions
             .iter()
@@ -1983,9 +2094,7 @@ pub async fn deep_scan_local_software(
             running_pids,
             tray_service: tray_hit.map(|t| t.service.clone()),
             tray_title: tray_hit.map(|t| t.title.clone()),
-            tray_menu_items: tray_hit
-                .map(|t| t.menu_items.clone())
-                .unwrap_or_default(),
+            tray_menu_items: tray_hit.map(|t| t.menu_items.clone()).unwrap_or_default(),
             mpris_service: mpris_hit,
             companion_clis,
         });
@@ -1995,8 +2104,16 @@ pub async fn deep_scan_local_software(
     apps.sort_by(|a, b| {
         b.is_running
             .cmp(&a.is_running)
-            .then_with(|| b.matched_adapter_id.is_some().cmp(&a.matched_adapter_id.is_some()))
-            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+            .then_with(|| {
+                b.matched_adapter_id
+                    .is_some()
+                    .cmp(&a.matched_adapter_id.is_some())
+            })
+            .then_with(|| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            })
     });
 
     let categories: Vec<CategoryScanSummary> = ALL_SOFTWARE_CATEGORIES
@@ -2035,9 +2152,7 @@ pub async fn deep_scan_local_software(
         cached: false,
     };
 
-    if use_global_cache
-        && let Ok(mut guard) = cache_lock.lock()
-    {
+    if use_global_cache && let Ok(mut guard) = cache_lock.lock() {
         *guard = Some(CachedScanState {
             created_at: Instant::now(),
             include_hidden: options.include_hidden,
@@ -2338,7 +2453,9 @@ pub async fn find_scanned_app(
                 || a.id.eq_ignore_ascii_case(q_stem)
                 || a.display_name.eq_ignore_ascii_case(q)
                 || a.name.eq_ignore_ascii_case(q)
-                || a.name_zh.as_deref().is_some_and(|z| z.eq_ignore_ascii_case(q))
+                || a.name_zh
+                    .as_deref()
+                    .is_some_and(|z| z.eq_ignore_ascii_case(q))
         })
         .or_else(|| {
             catalog.apps.iter().find(|a| {
@@ -2835,7 +2952,10 @@ async fn exec_drawio_export(
             app_name,
             "export_diagram",
             AdaptationChannel::HeadlessCli,
-            format!("draw.io 不支持的导出格式: `{}`（支持 pdf/png/svg/jpg）", fmt),
+            format!(
+                "draw.io 不支持的导出格式: `{}`（支持 pdf/png/svg/jpg）",
+                fmt
+            ),
         );
     }
 
@@ -3739,7 +3859,10 @@ async fn exec_nvidia_telemetry(
         "query_gpu_telemetry",
         AdaptationChannel::CliWrapper,
         &["nvidia-smi"],
-        &query_args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+        &query_args
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>(),
         &[],
         true,
         json!({}),
@@ -3757,9 +3880,7 @@ async fn try_wake_via_sni_or_launch(
     env_pairs: &[(String, String)],
     dry_run: bool,
 ) -> AdapterExecutionOutcome {
-    if !dry_run
-        && let Ok(Some(tray_val)) = activate_or_show_tray_app(sni_hint).await
-    {
+    if !dry_run && let Ok(Some(tray_val)) = activate_or_show_tray_app(sni_hint).await {
         return make_outcome(
             app_id,
             app_name,
@@ -4195,13 +4316,7 @@ pub async fn try_execute_rich_local_action(
     if canonical_action == "wake_main_window"
         && matches!(
             app_id.as_str(),
-            "qq"
-                | "wechat"
-                | "bytedance-feishu"
-                | "feishu"
-                | "wemeetapp"
-                | "wemeet"
-                | "dingtalk"
+            "qq" | "wechat" | "bytedance-feishu" | "feishu" | "wemeetapp" | "wemeet" | "dingtalk"
         )
     {
         let launch_bins: &[&str] = match app_id.as_str() {
@@ -4438,7 +4553,12 @@ pub async fn try_execute_rich_local_action(
             )
             .await
         {
-            return Some(dbus_result_to_outcome(&app_id, &app_name, canonical_action, m));
+            return Some(dbus_result_to_outcome(
+                &app_id,
+                &app_name,
+                canonical_action,
+                m,
+            ));
         }
     }
 
@@ -4500,7 +4620,10 @@ pub async fn try_execute_rich_local_action(
     }
 
     if (app_id.contains("baidunetdisk") || app_id.contains("mcloud"))
-        && matches!(canonical_action, "wake_cloud_drive" | "open_download_folder")
+        && matches!(
+            canonical_action,
+            "wake_cloud_drive" | "open_download_folder"
+        )
     {
         if canonical_action == "wake_cloud_drive" {
             let bins: &[&str] = if app_id.contains("baidunetdisk") {
@@ -4583,7 +4706,11 @@ pub async fn try_execute_rich_local_action(
             "brave" => &["brave-browser", "/opt/brave.com/brave/brave-browser"],
             "firefox" => &["firefox", "/snap/bin/firefox"],
             "microsoft-edge" => &["microsoft-edge"],
-            _ => &["google-chrome", "/opt/google/chrome/google-chrome", "chromium"],
+            _ => &[
+                "google-chrome",
+                "/opt/google/chrome/google-chrome",
+                "chromium",
+            ],
         };
         let opt_url = if let Some(u) = params
             .get("url")
@@ -4748,7 +4875,11 @@ pub async fn try_execute_rich_local_action(
                         ));
                     }
                 };
-                let line = params.get("line").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+                let line = params
+                    .get("line")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .max(1);
                 let col = params
                     .get("column")
                     .or_else(|| params.get("col"))
@@ -4880,17 +5011,17 @@ pub async fn try_execute_rich_local_action(
     if app_id == "fcitx5"
         && matches!(
             canonical_action,
-            "input_method_status"
-                | "activate_chinese"
-                | "deactivate_chinese"
-                | "open_fcitx_config"
+            "input_method_status" | "activate_chinese" | "deactivate_chinese" | "open_fcitx_config"
         )
     {
         return Some(exec_fcitx5_action(&app_id, &app_name, canonical_action, params).await);
     }
 
     if (app_id == "nvidia-settings" || app_id == "nvidia")
-        && matches!(canonical_action, "query_gpu_telemetry" | "open_nvidia_settings")
+        && matches!(
+            canonical_action,
+            "query_gpu_telemetry" | "open_nvidia_settings"
+        )
     {
         return Some(exec_nvidia_telemetry(&app_id, &app_name, canonical_action, params).await);
     }
@@ -5094,27 +5225,153 @@ mod tests {
     #[test]
     fn test_classifier_covers_all_nine_categories_accurately() {
         let cases = [
-            ("qqmusic.desktop", "/opt/qqmusic/qqmusic", "qqmusic", Some("QQ音乐"), "media_entertainment"),
-            ("sodam.desktop", "/opt/SodaM/sodam", "SodaM", Some("汽水音乐"), "media_entertainment"),
-            ("chrome-ibcfedatapddnfdnbjfkamdhbiepdbke-Default.desktop", "/opt/google/chrome/google-chrome", "抖音", Some("抖音"), "media_entertainment"),
-            ("qq.desktop", "/opt/QQ/qq", "QQ", Some("QQ"), "social_collab"),
-            ("wemeetapp.desktop", "/opt/wemeet/wemeetapp.sh", "Tencent Meeting", Some("腾讯会议"), "social_collab"),
-            ("bytedance-feishu.desktop", "/opt/bytedance/feishu/bytedance-feishu", "Feishu", Some("飞书"), "social_collab"),
-            ("wps-office-wps.desktop", "/usr/bin/wps", "WPS Writer", Some("WPS 文字"), "office_notes_doc"),
-            ("yozo-office-word.desktop", "/opt/apps/Yozo_Office/yozow", "Yozo Writer", Some("永中文字"), "office_notes_doc"),
-            ("com.github.paperhead.BetterNotes.desktop", "/usr/bin/betternotes", "BetterNotes", Some("轻笺"), "office_notes_doc"),
-            ("baidunetdisk.desktop", "/opt/baidunetdisk/baidunetdisk", "baidunetdisk", Some("百度网盘"), "cloud_transfer"),
-            ("localsend_app.desktop", "/usr/bin/localsend_app", "LocalSend", None, "cloud_transfer"),
-            ("FlClash.desktop", "/opt/FlClash/FlClash", "FlClash", None, "network_browser"),
-            ("trae-cn.desktop", "/opt/Trae CN/trae-cn", "Trae CN", None, "dev_ai_ide"),
-            ("antigravity-ide.desktop", "/usr/bin/agy", "Antigravity IDE", None, "dev_ai_ide"),
-            ("crypticapps-com.hopperapp.Hopper.desktop", "/opt/hopper/bin/Hopper", "Hopper", None, "dev_ai_ide"),
-            ("drawio.desktop", "/opt/drawio/drawio", "draw.io", None, "creative_disc"),
-            ("io.github.discforge.native.desktop", "/usr/bin/discforge", "DiscForge", Some("光铸"), "creative_disc"),
-            ("rustdesk.desktop", "/usr/bin/rustdesk", "RustDesk", None, "remote_vm"),
-            ("virtualbox.desktop", "/usr/bin/virtualbox", "Oracle VirtualBox", None, "remote_vm"),
-            ("omni-mouse-studio.desktop", "/opt/OmniMouseStudio/omni-mouse-studio", "Omni Mouse", Some("多功能鼠标智控中心"), "hardware_system"),
-            ("org.fcitx.Fcitx5.desktop", "/usr/bin/fcitx5", "Fcitx 5", None, "hardware_system"),
+            (
+                "qqmusic.desktop",
+                "/opt/qqmusic/qqmusic",
+                "qqmusic",
+                Some("QQ音乐"),
+                "media_entertainment",
+            ),
+            (
+                "sodam.desktop",
+                "/opt/SodaM/sodam",
+                "SodaM",
+                Some("汽水音乐"),
+                "media_entertainment",
+            ),
+            (
+                "chrome-ibcfedatapddnfdnbjfkamdhbiepdbke-Default.desktop",
+                "/opt/google/chrome/google-chrome",
+                "抖音",
+                Some("抖音"),
+                "media_entertainment",
+            ),
+            (
+                "qq.desktop",
+                "/opt/QQ/qq",
+                "QQ",
+                Some("QQ"),
+                "social_collab",
+            ),
+            (
+                "wemeetapp.desktop",
+                "/opt/wemeet/wemeetapp.sh",
+                "Tencent Meeting",
+                Some("腾讯会议"),
+                "social_collab",
+            ),
+            (
+                "bytedance-feishu.desktop",
+                "/opt/bytedance/feishu/bytedance-feishu",
+                "Feishu",
+                Some("飞书"),
+                "social_collab",
+            ),
+            (
+                "wps-office-wps.desktop",
+                "/usr/bin/wps",
+                "WPS Writer",
+                Some("WPS 文字"),
+                "office_notes_doc",
+            ),
+            (
+                "yozo-office-word.desktop",
+                "/opt/apps/Yozo_Office/yozow",
+                "Yozo Writer",
+                Some("永中文字"),
+                "office_notes_doc",
+            ),
+            (
+                "com.github.paperhead.BetterNotes.desktop",
+                "/usr/bin/betternotes",
+                "BetterNotes",
+                Some("轻笺"),
+                "office_notes_doc",
+            ),
+            (
+                "baidunetdisk.desktop",
+                "/opt/baidunetdisk/baidunetdisk",
+                "baidunetdisk",
+                Some("百度网盘"),
+                "cloud_transfer",
+            ),
+            (
+                "localsend_app.desktop",
+                "/usr/bin/localsend_app",
+                "LocalSend",
+                None,
+                "cloud_transfer",
+            ),
+            (
+                "FlClash.desktop",
+                "/opt/FlClash/FlClash",
+                "FlClash",
+                None,
+                "network_browser",
+            ),
+            (
+                "trae-cn.desktop",
+                "/opt/Trae CN/trae-cn",
+                "Trae CN",
+                None,
+                "dev_ai_ide",
+            ),
+            (
+                "antigravity-ide.desktop",
+                "/usr/bin/agy",
+                "Antigravity IDE",
+                None,
+                "dev_ai_ide",
+            ),
+            (
+                "crypticapps-com.hopperapp.Hopper.desktop",
+                "/opt/hopper/bin/Hopper",
+                "Hopper",
+                None,
+                "dev_ai_ide",
+            ),
+            (
+                "drawio.desktop",
+                "/opt/drawio/drawio",
+                "draw.io",
+                None,
+                "creative_disc",
+            ),
+            (
+                "io.github.discforge.native.desktop",
+                "/usr/bin/discforge",
+                "DiscForge",
+                Some("光铸"),
+                "creative_disc",
+            ),
+            (
+                "rustdesk.desktop",
+                "/usr/bin/rustdesk",
+                "RustDesk",
+                None,
+                "remote_vm",
+            ),
+            (
+                "virtualbox.desktop",
+                "/usr/bin/virtualbox",
+                "Oracle VirtualBox",
+                None,
+                "remote_vm",
+            ),
+            (
+                "omni-mouse-studio.desktop",
+                "/opt/OmniMouseStudio/omni-mouse-studio",
+                "Omni Mouse",
+                Some("多功能鼠标智控中心"),
+                "hardware_system",
+            ),
+            (
+                "org.fcitx.Fcitx5.desktop",
+                "/usr/bin/fcitx5",
+                "Fcitx 5",
+                None,
+                "hardware_system",
+            ),
         ];
 
         for (did, bin, name, zh, expected_cat) in cases {

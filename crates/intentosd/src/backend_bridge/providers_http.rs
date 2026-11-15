@@ -12,7 +12,7 @@
 use crate::backend_bridge::broker_bridge::{
     BackendExecutionMode, QuickChatToolExecOutcome, TraceDot, TurnExecutionOutcome,
     build_quick_chat_anthropic_tools, build_quick_chat_openai_tools, execute_quick_chat_tool_call,
-    finalize_completed_turn_outcome, prepare_system_prompt_and_context,
+    finalize_completed_turn_outcome, prepare_system_prompt_and_context_with_policy,
     prepare_turn_context_blocks, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
@@ -297,8 +297,17 @@ pub async fn run_openai_tool_calling_turn_with_policy(
         BackendExecutionMode::ExternalChatOnly
     };
 
-    let (mut sys_text, taints, data_class) =
-        prepare_system_prompt_and_context(core, active, extra_blocks, incognito);
+    let effective_privacy = if incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+    let (mut sys_text, taints, data_class) = prepare_system_prompt_and_context_with_policy(
+        core,
+        active,
+        extra_blocks,
+        effective_privacy,
+    );
     if !allow_broker_tools {
         sys_text.push_str(HTTP_CHAT_ONLY_PROMPT_NOTE);
     }
@@ -604,8 +613,17 @@ pub async fn run_anthropic_tool_calling_turn_with_policy(
         BackendExecutionMode::ExternalChatOnly
     };
 
-    let (mut sys_text, taints, data_class) =
-        prepare_system_prompt_and_context(core, active, extra_blocks, incognito);
+    let effective_privacy = if incognito {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated
+    } else {
+        effect_ledger.privacy()
+    };
+    let (mut sys_text, taints, data_class) = prepare_system_prompt_and_context_with_policy(
+        core,
+        active,
+        extra_blocks,
+        effective_privacy,
+    );
     if !allow_broker_tools {
         sys_text.push_str(HTTP_CHAT_ONLY_PROMPT_NOTE);
     }

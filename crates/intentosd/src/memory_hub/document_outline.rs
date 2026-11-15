@@ -34,9 +34,7 @@ const MAX_TEXT_READ_BYTES: u64 = 256 * 1024; // 256 KiB
 const MAX_LAZY_DOCS_PER_PASS: usize = 120;
 const MAX_SECTION_EXCERPT_CHARS: usize = 900;
 
-const SUPPORTED_DOC_EXTENSIONS: &[&str] = &[
-    "docx", "md", "markdown", "txt", "tex", "typ", "pdf",
-];
+const SUPPORTED_DOC_EXTENSIONS: &[&str] = &["docx", "md", "markdown", "txt", "tex", "typ", "pdf"];
 
 const SKIP_DIR_NAMES: &[&str] = &[
     "node_modules",
@@ -298,7 +296,11 @@ fn collect_candidate_documents(
     let mut seen_roots: HashSet<PathBuf> = HashSet::new();
 
     let mut push_root = |p: PathBuf| {
-        if p.exists() && p.is_dir() && !core.fs_engine.is_forbidden(&p) && seen_roots.insert(p.clone()) {
+        if p.exists()
+            && p.is_dir()
+            && !core.fs_engine.is_forbidden(&p)
+            && seen_roots.insert(p.clone())
+        {
             roots.push(p);
         }
     };
@@ -359,9 +361,9 @@ fn collect_candidate_documents(
         consider_file(ep.clone());
     }
     if let Ok(conn) = db.conn.lock() {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT path FROM long_term_files ORDER BY frecency_score DESC LIMIT 200",
-        ) && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT path FROM long_term_files ORDER BY frecency_score DESC LIMIT 200")
+            && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
         {
             for p in rows.flatten() {
                 consider_file(PathBuf::from(p));
@@ -603,7 +605,9 @@ fn read_docx_entry_bytes(path: &Path, entry_name: &str, max_bytes: u64) -> Optio
     // 2. Fallback: pure-Rust Stored-ZIP entry scanner (works without `unzip` installed)
     let file = File::open(path).ok()?;
     let mut zip_bytes = Vec::new();
-    file.take(MAX_DOC_FILE_BYTES).read_to_end(&mut zip_bytes).ok()?;
+    file.take(MAX_DOC_FILE_BYTES)
+        .read_to_end(&mut zip_bytes)
+        .ok()?;
     extract_stored_zip_entry(&zip_bytes, entry_name, max_bytes as usize)
 }
 
@@ -807,7 +811,11 @@ fn parse_docx_styles_xml(styles_xml: &str) -> HashMap<String, (String, Option<u8
     let mut map = HashMap::new();
     for m in block_re.find_iter(styles_xml) {
         let full = m.as_str();
-        let Some(sid) = id_re.captures(full).and_then(|c| c.get(1)).map(|x| x.as_str()) else {
+        let Some(sid) = id_re
+            .captures(full)
+            .and_then(|c| c.get(1))
+            .map(|x| x.as_str())
+        else {
             continue;
         };
         let sname = name_re
@@ -874,9 +882,7 @@ fn parse_docx_paragraphs(
 
         // Preserve tab separators between heading numbers and titles if `<w:tab/>` was used
         let normalized_inner = if inner.contains("<w:tab") || inner.contains("<w:br") {
-            tab_br_re
-                .replace_all(inner, "<w:t> </w:t>")
-                .into_owned()
+            tab_br_re.replace_all(inner, "<w:t> </w:t>").into_owned()
         } else {
             inner.to_string()
         };
@@ -947,8 +953,8 @@ fn infer_docx_title(paragraphs: &[RawParagraph], fallback_stem: &str) -> String 
         }
 
         if candidate_subject.is_none() {
-            let is_university_only =
-                char_len <= 16 && (t.ends_with("大学") || t.ends_with("学院") || t.ends_with("研究院"));
+            let is_university_only = char_len <= 16
+                && (t.ends_with("大学") || t.ends_with("学院") || t.ends_with("研究院"));
             if !is_university_only
                 && (sl.contains("title")
                     || sl.contains("标题")
@@ -1003,9 +1009,9 @@ fn is_cover_metadata_line(t: &str) -> bool {
         "提交日期",
         "答辩日期",
     ];
-    prefixes
-        .iter()
-        .any(|p| t.starts_with(p) && (t.contains('：') || t.contains(':') || t.chars().count() <= 24))
+    prefixes.iter().any(|p| {
+        t.starts_with(p) && (t.contains('：') || t.contains(':') || t.chars().count() <= 24)
+    })
 }
 
 fn is_abstract_or_chapter_start(t: &str) -> bool {
@@ -1151,7 +1157,15 @@ pub fn classify_heading_text_pattern(text: &str) -> Option<u8> {
     let compact: String = t.chars().filter(|c| !c.is_whitespace()).collect();
     if matches!(
         compact.as_str(),
-        "摘要" | "Abstract" | "引言" | "绪论" | "结论" | "总结与展望" | "致谢" | "参考文献" | "References"
+        "摘要"
+            | "Abstract"
+            | "引言"
+            | "绪论"
+            | "结论"
+            | "总结与展望"
+            | "致谢"
+            | "参考文献"
+            | "References"
     ) {
         return Some(1);
     }
@@ -1169,10 +1183,8 @@ fn build_sections_from_paragraphs(
     for p in paragraphs {
         if let Some(level) = detect_paragraph_heading_level(p, doc_title, allow_toc) {
             if let Some(last) = sections.last_mut() {
-                last.excerpt = scrub_sensitive_text(&truncate_clean(
-                    &current_body,
-                    MAX_SECTION_EXCERPT_CHARS,
-                ));
+                last.excerpt =
+                    scrub_sensitive_text(&truncate_clean(&current_body, MAX_SECTION_EXCERPT_CHARS));
             }
             current_body.clear();
             let clean_heading = scrub_sensitive_text(&clean_toc_dots(&p.text));
@@ -1182,7 +1194,9 @@ fn build_sections_from_paragraphs(
                 paragraph_index: p.index,
                 excerpt: String::new(),
             });
-        } else if !sections.is_empty() && current_body.chars().count() < MAX_SECTION_EXCERPT_CHARS + 120 {
+        } else if !sections.is_empty()
+            && current_body.chars().count() < MAX_SECTION_EXCERPT_CHARS + 120
+        {
             if !current_body.is_empty() {
                 current_body.push(' ');
             }
@@ -1318,9 +1332,16 @@ fn build_document_keywords(
 
     // Semantic academic / thesis / report tags so English filenames like `paper_main.docx`
     // match natural Chinese queries like `"我的硕士论文"` / `"毕业论文"`!
-    let has_abstract = headings.iter().any(|h| h.contains("摘要") || h.eq_ignore_ascii_case("abstract"))
-        || paragraphs.iter().take(20).any(|p| p.text.starts_with("摘要") || p.text.starts_with("关键词"));
-    let has_refs = headings.iter().any(|h| h.contains("参考文献") || h.eq_ignore_ascii_case("references"));
+    let has_abstract = headings
+        .iter()
+        .any(|h| h.contains("摘要") || h.eq_ignore_ascii_case("abstract"))
+        || paragraphs
+            .iter()
+            .take(20)
+            .any(|p| p.text.starts_with("摘要") || p.text.starts_with("关键词"));
+    let has_refs = headings
+        .iter()
+        .any(|h| h.contains("参考文献") || h.eq_ignore_ascii_case("references"));
     let is_academic_paper = stem_lc.contains("paper")
         || stem_lc.contains("thesis")
         || stem_lc.contains("dissertation")
@@ -1407,7 +1428,14 @@ fn extract_pdf_outline(
     if raw_text.trim().is_empty() {
         return None;
     }
-    parse_plain_or_markup_text(path, "pdf", &raw_text, mtime_epoch, size_bytes, indexed_epoch)
+    parse_plain_or_markup_text(
+        path,
+        "pdf",
+        &raw_text,
+        mtime_epoch,
+        size_bytes,
+        indexed_epoch,
+    )
 }
 
 fn parse_plain_or_markup_text(
@@ -1519,10 +1547,8 @@ fn parse_plain_or_markup_text(
 
         if let Some((lvl, h_title)) = detected_heading {
             if let Some(last) = sections.last_mut() {
-                last.excerpt = scrub_sensitive_text(&truncate_clean(
-                    &current_body,
-                    MAX_SECTION_EXCERPT_CHARS,
-                ));
+                last.excerpt =
+                    scrub_sensitive_text(&truncate_clean(&current_body, MAX_SECTION_EXCERPT_CHARS));
             }
             current_body.clear();
             sections.push(DocSection {
@@ -1552,8 +1578,7 @@ fn parse_plain_or_markup_text(
     }
 
     let doc_title = scrub_sensitive_text(
-        &explicit_title
-            .unwrap_or_else(|| infer_docx_title(&raw_paras, &fallback_stem)),
+        &explicit_title.unwrap_or_else(|| infer_docx_title(&raw_paras, &fallback_stem)),
     );
     let doc_summary = scrub_sensitive_text(&if !intro_body.is_empty() {
         truncate_clean(&intro_body, 150)
@@ -1767,7 +1792,9 @@ pub fn search_document_outlines(
         .or_else(|| extract_chapter_number_hint(&combined_sec_text));
 
     let topic_tokens = extract_doc_topic_tokens(q_trim);
-    let sec_topic_tokens = sec_trim.map(extract_section_topic_tokens).unwrap_or_default();
+    let sec_topic_tokens = sec_trim
+        .map(extract_section_topic_tokens)
+        .unwrap_or_default();
     let q_lc = q_trim.to_ascii_lowercase();
 
     let mut hits: Vec<DocumentOutlineHit> = Vec::new();
@@ -1791,7 +1818,9 @@ pub fn search_document_outlines(
         let mut topic_score = 0.0f64;
 
         // 1. Direct path or filename match
-        if !q_lc.is_empty() && (rec.path == q_trim || path_lc == q_lc || fname_lc == q_lc || stem_lc == q_lc) {
+        if !q_lc.is_empty()
+            && (rec.path == q_trim || path_lc == q_lc || fname_lc == q_lc || stem_lc == q_lc)
+        {
             topic_score += 115.0;
         } else if stem_lc.len() >= 3 && q_lc.contains(&stem_lc) {
             topic_score += 95.0;
@@ -1992,7 +2021,10 @@ pub fn format_toc_preview(
     }
     if let Some(mh) = matched_h {
         let mh_short = truncate_clean(mh, 28);
-        if !picked.iter().any(|p| p == &mh_short || mh.starts_with(p.trim_end_matches('…'))) {
+        if !picked
+            .iter()
+            .any(|p| p == &mh_short || mh.starts_with(p.trim_end_matches('…')))
+        {
             if top_headings.len() > 3 {
                 picked.push("...".to_string());
             }
@@ -2065,8 +2097,26 @@ fn extract_doc_topic_tokens(query: &str) -> Vec<String> {
             c.is_whitespace()
                 || matches!(
                     c,
-                    '，' | ',' | '。' | '？' | '?' | '！' | '!' | '：' | ':' | '；' | ';' | '《'
-                        | '》' | '「' | '」' | '"' | '\'' | '(' | ')' | '（' | '）'
+                    '，' | ','
+                        | '。'
+                        | '？'
+                        | '?'
+                        | '！'
+                        | '!'
+                        | '：'
+                        | ':'
+                        | '；'
+                        | ';'
+                        | '《'
+                        | '》'
+                        | '「'
+                        | '」'
+                        | '"'
+                        | '\''
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
                 )
         })
         .map(str::trim)
@@ -2083,7 +2133,9 @@ fn extract_section_topic_tokens(section: &str) -> Vec<String> {
     });
     let cleaned = chap_re.replace_all(section, " ");
     cleaned
-        .split(|c: char| c.is_whitespace() || matches!(c, '/' | '|' | '，' | ',' | '、' | '：' | ':'))
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, '/' | '|' | '，' | ',' | '、' | '：' | ':')
+        })
         .map(str::trim)
         .filter(|s| !s.is_empty() && s.chars().count() >= 2)
         .map(String::from)

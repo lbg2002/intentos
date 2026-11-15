@@ -289,7 +289,8 @@ fn validate_and_sanitize_llm_intent(
 }
 
 fn try_parse_exact_builtin_scene(t: &str) -> Option<StructuredIntent> {
-    for scene_name in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"] {
+    for scene_name in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"]
+    {
         if t == scene_name
             || t == format!("开启{}", scene_name)
             || t == format!("打开{}", scene_name)
@@ -462,15 +463,7 @@ fn try_parse_compound_task(t: &str) -> Option<StructuredIntent> {
         "告诉我",
         "整理成清单",
     ];
-    let step_connectors = [
-        "然后",
-        "接着",
-        "并且",
-        "同时把",
-        "完成后",
-        "再把",
-        "再发给",
-    ];
+    let step_connectors = ["然后", "接着", "并且", "同时把", "完成后", "再把", "再发给"];
     let comma_count = t.chars().filter(|&c| c == '，' || c == ',').count();
 
     let has_cognitive_marker = cognitive_markers.iter().any(|m| t.contains(m));
@@ -513,7 +506,9 @@ fn try_parse_compound_task(t: &str) -> Option<StructuredIntent> {
                 preserve_running_critical_apps: true,
                 ..Default::default()
             },
-            constraints: vec!["跨步操作须按依赖顺序执行，涉及写入或移动时保留可撤销记录".to_string()],
+            constraints: vec![
+                "跨步操作须按依赖顺序执行，涉及写入或移动时保留可撤销记录".to_string(),
+            ],
             required_capabilities: req_caps,
             recommended_route: RouteLayer::L2,
             requires_planning: true,
@@ -527,8 +522,18 @@ fn try_parse_compound_task(t: &str) -> Option<StructuredIntent> {
 
 fn split_rough_clauses(text: &str) -> Vec<String> {
     let mut work = text.to_string();
-    for sep in ["，然后", ",然后", "，接着", "，并且", "，同时", "然后", "接着", "并且", "，", ","]
-    {
+    for sep in [
+        "，然后",
+        ",然后",
+        "，接着",
+        "，并且",
+        "，同时",
+        "然后",
+        "接着",
+        "并且",
+        "，",
+        ",",
+    ] {
         work = work.replace(sep, "\n");
     }
     work.lines()
@@ -554,7 +559,8 @@ fn try_parse_goal_workspace(t: &str) -> Option<StructuredIntent> {
     let is_thesis_writing_goal = !is_deterministic_file_op
         && ((t.contains("写论文")
             || t.contains("论文写作")
-            || (t.contains("论文") && (t.contains("专心") || t.contains("专注") || t.contains("状态"))))
+            || (t.contains("论文")
+                && (t.contains("专心") || t.contains("专注") || t.contains("状态"))))
             || matches!(
                 t,
                 "进入写作状态" | "开始写作" | "今天想专心写作" | "进入专注写作状态"
@@ -603,7 +609,10 @@ fn try_parse_goal_workspace(t: &str) -> Option<StructuredIntent> {
         && (t.contains("开组会")
             || t.contains("组会汇报")
             || ((t.contains("开会") || t.contains("组会") || t.contains("线上会议"))
-                && (t.contains("准备") || t.contains("马上") || t.contains("进入") || t.contains("要"))));
+                && (t.contains("准备")
+                    || t.contains("马上")
+                    || t.contains("进入")
+                    || t.contains("要"))));
 
     if is_meeting_prep {
         return Some(StructuredIntent {
@@ -644,8 +653,10 @@ fn try_parse_goal_workspace(t: &str) -> Option<StructuredIntent> {
 
     // 3. Cluttered Directory Inspection & Controlled Organization Plan:
     // `"下载目录太乱了"` / `"帮我整理下载文件夹"` / `"桌面太乱了"`
-    let has_dir_target =
-        t.contains("下载目录") || t.contains("下载文件夹") || t.contains("桌面") || t.contains("文档目录");
+    let has_dir_target = t.contains("下载目录")
+        || t.contains("下载文件夹")
+        || t.contains("桌面")
+        || t.contains("文档目录");
     let has_clutter_or_organize =
         t.contains("太乱") || t.contains("好乱") || t.contains("很乱") || t.contains("整理");
 
@@ -818,10 +829,7 @@ fn try_parse_relative_adjustment(t: &str) -> Option<StructuredIntent> {
                 RouteLayer::L1
             },
             requires_planning: false,
-            direct_capability: Some((
-                "sound.volume.set".to_string(),
-                json!({ "relative": "up" }),
-            )),
+            direct_capability: Some(("sound.volume.set".to_string(), json!({ "relative": "up" }))),
             confidence: 0.94,
         });
     }
@@ -847,8 +855,10 @@ fn try_parse_relative_adjustment(t: &str) -> Option<StructuredIntent> {
             | "亮度低一点"
             | "亮度调低一点"
     ) {
-        let is_l0_phrase = matches!(t, "暗一点" | "调暗一点" | "再暗一点" | "屏幕暗一点" | "屏幕太亮" | "屏幕太亮了")
-            || t.contains("亮度");
+        let is_l0_phrase = matches!(
+            t,
+            "暗一点" | "调暗一点" | "再暗一点" | "屏幕暗一点" | "屏幕太亮" | "屏幕太亮了"
+        ) || t.contains("亮度");
         return Some(StructuredIntent {
             intent_type: CognitiveIntentKind::RelativeAdjustment,
             goal: "调暗屏幕亮度 (-10%)".to_string(),
@@ -884,8 +894,10 @@ fn try_parse_relative_adjustment(t: &str) -> Option<StructuredIntent> {
             | "亮度高一点"
             | "亮度调高一点"
     ) {
-        let is_l0_phrase = matches!(t, "亮一点" | "调亮一点" | "再亮一点" | "屏幕亮一点" | "屏幕太暗" | "屏幕太暗了")
-            || t.contains("亮度");
+        let is_l0_phrase = matches!(
+            t,
+            "亮一点" | "调亮一点" | "再亮一点" | "屏幕亮一点" | "屏幕太暗" | "屏幕太暗了"
+        ) || t.contains("亮度");
         return Some(StructuredIntent {
             intent_type: CognitiveIntentKind::RelativeAdjustment,
             goal: "调亮屏幕亮度 (+10%)".to_string(),
@@ -1189,7 +1201,8 @@ mod tests {
     #[test]
     fn parses_thesis_focus_goal_workspace_archetypes() {
         let caps = sample_capabilities();
-        for utterance in ["今天想专心写论文", "开始写论文", "进入论文写作状态"] {
+        for utterance in ["今天想专心写论文", "开始写论文", "进入论文写作状态"]
+        {
             let parsed = parse_structured_intent(utterance, &caps);
             assert_eq!(
                 parsed.intent_type,
@@ -1202,7 +1215,10 @@ mod tests {
             assert!(parsed.context.preserve_running_critical_apps);
             assert_eq!(
                 parsed.constraints,
-                vec!["避免打扰".to_string(), "不关闭正在运行的重要程序".to_string()]
+                vec![
+                    "避免打扰".to_string(),
+                    "不关闭正在运行的重要程序".to_string()
+                ]
             );
             assert_eq!(
                 parsed.required_capabilities,
@@ -1228,23 +1244,38 @@ mod tests {
         assert!(meeting.requires_planning);
         assert_eq!(meeting.recommended_route, RouteLayer::L2);
         assert!(meeting.context.avoid_distraction);
-        assert!(meeting.required_capabilities.contains(&"notify.dnd.set".to_string()));
+        assert!(
+            meeting
+                .required_capabilities
+                .contains(&"notify.dnd.set".to_string())
+        );
 
         for clutter in ["下载目录太乱了", "帮我整理下载文件夹"] {
             let clean_goal = parse_structured_intent(clutter, &caps);
             assert_eq!(clean_goal.intent_type, CognitiveIntentKind::GoalWorkspace);
             assert!(clean_goal.requires_planning);
             assert_eq!(clean_goal.recommended_route, RouteLayer::L2);
-            assert!(clean_goal.required_capabilities.contains(&"file.search".to_string()));
-            assert!(clean_goal.required_capabilities.contains(&"file.move".to_string()));
+            assert!(
+                clean_goal
+                    .required_capabilities
+                    .contains(&"file.search".to_string())
+            );
+            assert!(
+                clean_goal
+                    .required_capabilities
+                    .contains(&"file.move".to_string())
+            );
         }
     }
 
     #[test]
     fn parses_system_diagnosis_archetypes() {
         let caps = sample_capabilities();
-        for utterance in ["电脑最近有点卡", "系统好慢帮我查查", "我的软件怎么又启动不了了"]
-        {
+        for utterance in [
+            "电脑最近有点卡",
+            "系统好慢帮我查查",
+            "我的软件怎么又启动不了了",
+        ] {
             let diag = parse_structured_intent(utterance, &caps);
             assert_eq!(
                 diag.intent_type,
@@ -1278,7 +1309,10 @@ mod tests {
         assert_eq!(compound.recommended_route, RouteLayer::L2);
 
         let how_to = parse_structured_intent("怎么批量查找最近7天修改过的日志", &caps);
-        assert_eq!(how_to.intent_type, CognitiveIntentKind::ProceduralOrKnowledge);
+        assert_eq!(
+            how_to.intent_type,
+            CognitiveIntentKind::ProceduralOrKnowledge
+        );
         assert!(how_to.requires_planning);
         assert_eq!(how_to.recommended_route, RouteLayer::L2);
     }
@@ -1291,7 +1325,10 @@ mod tests {
         assert_eq!(noisy.intent_type, CognitiveIntentKind::RelativeAdjustment);
         assert_eq!(
             noisy.direct_capability,
-            Some(("sound.volume.set".to_string(), json!({ "relative": "down" })))
+            Some((
+                "sound.volume.set".to_string(),
+                json!({ "relative": "down" })
+            ))
         );
 
         for bright in ["屏幕有点刺眼", "太亮了"] {
@@ -1309,7 +1346,10 @@ mod tests {
         let ip = parse_structured_intent("查一下内网地址", &caps);
         assert_eq!(ip.intent_type, CognitiveIntentKind::DeterministicCommand);
         assert_eq!(ip.recommended_route, RouteLayer::L0);
-        assert_eq!(ip.direct_capability, Some(("network.ip".to_string(), json!({}))));
+        assert_eq!(
+            ip.direct_capability,
+            Some(("network.ip".to_string(), json!({})))
+        );
 
         let pwr = parse_structured_intent("开启省电续航", &caps);
         assert_eq!(pwr.intent_type, CognitiveIntentKind::DeterministicCommand);

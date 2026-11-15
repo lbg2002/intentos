@@ -101,14 +101,23 @@ pub fn resolve_context_references(
                     return ContextResolutionOutcome::NeedsClarification {
                         original_text: trimmed.to_string(),
                         matched_reference: phrase.to_string(),
-                        prompt: format!("您提到了「{}」，但当前未检测到活动窗口名称，请指定目标应用或窗口。", phrase),
+                        prompt: format!(
+                            "您提到了「{}」，但当前未检测到活动窗口名称，请指定目标应用或窗口。",
+                            phrase
+                        ),
                         candidate_targets: Vec::new(),
                     };
                 }
             }
         }
 
-        for phrase in ["选中的文本", "选中文本", "选中的文字", "选中文字", "选中的内容"] {
+        for phrase in [
+            "选中的文本",
+            "选中文本",
+            "选中的文字",
+            "选中文字",
+            "选中的内容",
+        ] {
             if trimmed.contains(phrase) {
                 if let Some(sel) = dctx.selected_text.as_ref().filter(|s| !s.trim().is_empty()) {
                     let rewritten = trimmed.replace(phrase, sel.trim());
@@ -130,9 +139,14 @@ pub fn resolve_context_references(
             }
         }
 
-        for phrase in ["剪贴板里的内容", "剪贴板内容", "剪贴板里的文字", "剪贴板"] {
+        for phrase in ["剪贴板里的内容", "剪贴板内容", "剪贴板里的文字", "剪贴板"]
+        {
             if trimmed.contains(phrase) {
-                if let Some(clip) = dctx.clipboard_text.as_ref().filter(|s| !s.trim().is_empty()) {
+                if let Some(clip) = dctx
+                    .clipboard_text
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                {
                     let rewritten = trimmed.replace(phrase, clip.trim());
                     return ContextResolutionOutcome::Resolved {
                         original_text: trimmed.to_string(),
@@ -297,7 +311,11 @@ fn collect_recent_targets(
 
     // 2. Session `last_resource_path`
     if let Some(sess) = session {
-        if let Some(last) = sess.last_resource_path.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(last) = sess
+            .last_resource_path
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             let clean = last.trim().to_string();
             if primary.is_none() {
                 primary = Some(clean.clone());
@@ -309,8 +327,8 @@ fn collect_recent_targets(
         }
 
         // Also scan recent session messages in reverse for file paths (`/path/...` or `~/...`)
-        let path_re =
-            Regex::new(r#"(~[^\s，,。；;"'`]+|/[a-zA-Z0-9._/\-\u{4e00}-\u{9fa5}]+)"#).expect("valid regex");
+        let path_re = Regex::new(r#"(~[^\s，,。；;"'`]+|/[a-zA-Z0-9._/\-\u{4e00}-\u{9fa5}]+)"#)
+            .expect("valid regex");
         for msg in sess.messages.iter().rev() {
             for caps in path_re.captures_iter(&msg.content) {
                 let p = caps[1].trim().to_string();
@@ -327,7 +345,9 @@ fn collect_recent_targets(
     // 3. Fallback to `StateDb` memory (`last_resource_path`)
     if primary.is_none()
         && let Some(db) = state_db
-        && let Some(mem_path) = db.get_memory_value("last_resource_path").filter(|s| !s.trim().is_empty())
+        && let Some(mem_path) = db
+            .get_memory_value("last_resource_path")
+            .filter(|s| !s.trim().is_empty())
     {
         let clean = mem_path.trim().to_string();
         if all_targets.is_empty() {

@@ -72,7 +72,9 @@ impl Effect {
 }
 
 /// Data sensitivity classification for Model Gateway egress control (§5.4).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DataClass {
     #[default]
@@ -238,7 +240,11 @@ fn default_object_schema() -> serde_json::Value {
 
 impl CapabilityDescriptor {
     pub fn max_effect(&self) -> Effect {
-        self.effects.iter().copied().max().unwrap_or(Effect::Observe)
+        self.effects
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(Effect::Observe)
     }
 }
 
@@ -493,6 +499,109 @@ impl PendingApproval {
     }
 }
 
+/// Three-tier privacy session memory & persistence isolation policy (`H05`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacySessionPolicy {
+    /// Normal persistent session: reads and writes personal memories & session history.
+    #[default]
+    Standard,
+    /// Ephemeral read-only session: may consult existing user preferences/memories, never writes new memories/history/tasks.
+    EphemeralReadOnly,
+    /// Strict isolated incognito session: ZERO memory reads and ZERO memory/task/cache/habit writes.
+    StrictIsolated,
+}
+
+impl PrivacySessionPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::EphemeralReadOnly => "ephemeral_read_only",
+            Self::StrictIsolated => "strict_isolated",
+        }
+    }
+
+    pub fn parse_policy_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "ephemeral_read_only" => Some(Self::EphemeralReadOnly),
+            "strict_isolated" => Some(Self::StrictIsolated),
+            _ => None,
+        }
+    }
+
+    /// Map boolean `incognito` flag to `StrictIsolated` (`true`) or `Standard` (`false`).
+    pub fn from_incognito(incognito: bool) -> Self {
+        if incognito {
+            Self::StrictIsolated
+        } else {
+            Self::Standard
+        }
+    }
+
+    /// Resolve policy from both explicit `incognito` flag and `session_id` convention (`incog_*` / `ephemeral_ro_*`).
+    pub fn from_session(incognito: bool, session_id: Option<&str>) -> Self {
+        if incognito || session_id.is_some_and(|sid| sid.trim().starts_with("incog_")) {
+            Self::StrictIsolated
+        } else if session_id.is_some_and(|sid| sid.trim().starts_with("ephemeral_ro_")) {
+            Self::EphemeralReadOnly
+        } else {
+            Self::Standard
+        }
+    }
+
+    /// Infer conservative task privacy policy from `task_id` prefix (`incog_*` / `ephemeral_ro_*`).
+    pub fn from_task_id(task_id: &str) -> Self {
+        let trimmed = task_id.trim();
+        if trimmed.starts_with("incog_") {
+            Self::StrictIsolated
+        } else if trimmed.starts_with("ephemeral_ro_") {
+            Self::EphemeralReadOnly
+        } else {
+            Self::Standard
+        }
+    }
+
+    /// Resolve effective three-state policy combining optional explicit `privacy_policy`,
+    /// legacy `incognito` flag, and `session_id` naming convention (`incog_*` / `ephemeral_ro_*`).
+    pub fn resolve(explicit: Option<Self>, incognito: bool, session_id: Option<&str>) -> Self {
+        if incognito || session_id.is_some_and(|sid| sid.trim().starts_with("incog_")) {
+            Self::StrictIsolated
+        } else if let Some(policy) = explicit {
+            policy
+        } else if session_id.is_some_and(|sid| sid.trim().starts_with("ephemeral_ro_")) {
+            Self::EphemeralReadOnly
+        } else {
+            Self::Standard
+        }
+    }
+
+    /// Whether long-term preferences (`StateDb`) and `MemoryHubDb` may be read into prompts/routing.
+    pub fn allows_memory_read(self) -> bool {
+        matches!(self, Self::Standard | Self::EphemeralReadOnly)
+    }
+
+    /// Whether conversation history, extracted entities, or explicit memories may be written to disk.
+    pub fn allows_memory_write(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    /// Whether tasks, step execution logs, suspended checkpoints, changesets, and audit entries should be persisted to `state.db`.
+    pub fn allows_task_persistence(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    /// Whether completed turn responses may be stored in or served from the `TurnRegistry` replay cache.
+    pub fn allows_replay_cache(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    /// Whether usage habits, frecency counters, and memory candidates may be learned or updated.
+    pub fn allows_habit_learning(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
 /// Intent & Real-time Candidate structures (§3.1, §4, §15.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentRequest {
@@ -510,6 +619,34 @@ pub struct IntentRequest {
     /// Temporary privacy session (`M-01`, §11.3, §18.2): never stores history or memory candidates.
     #[serde(default)]
     pub incognito: bool,
+    /// Explicit three-state privacy policy (`H05`: `standard` | `ephemeral_read_only` | `strict_isolated`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy: Option<PrivacySessionPolicy>,
+}
+
+impl Default for IntentRequest {
+    fn default() -> Self {
+        Self {
+            protocol_version: default_protocol_version(),
+            text: String::new(),
+            session_id: None,
+            force_agent: false,
+            selected_candidate_id: None,
+            cwd: None,
+            incognito: false,
+            privacy_policy: None,
+        }
+    }
+}
+
+impl IntentRequest {
+    pub fn effective_privacy(&self) -> PrivacySessionPolicy {
+        PrivacySessionPolicy::resolve(
+            self.privacy_policy,
+            self.incognito,
+            self.session_id.as_deref(),
+        )
+    }
 }
 
 fn default_protocol_version() -> u32 {

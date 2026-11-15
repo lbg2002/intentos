@@ -11,9 +11,7 @@ use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
 use crate::intent_engine::fuzzy_scorer::rank_capabilities;
 use crate::intent_engine::pattern_compiler::PatternCompiler;
-use crate::intent_engine::slot_extractor::{
-    extract_slots_for_descriptor, extract_universal_slots,
-};
+use crate::intent_engine::slot_extractor::{extract_slots_for_descriptor, extract_universal_slots};
 use crate::router::RoutedIntent;
 use intentos_protocol::{
     CapabilityCall, Effect, ExecutionStatus, InvocationOrigin, Taint, UndoStrategy,
@@ -130,10 +128,9 @@ pub fn split_into_clauses(raw_text: &str) -> Vec<String> {
     }
 
     // Replace explicit multi-step connectors with a delimiter `\n|||\n` (no look-around needed)
-    let connector_re = Regex::new(
-        r"(?:；|;|，然后|,\s*然后|然后|接着|随后|之后|并且|同时|顺便|再把|再去)",
-    )
-    .expect("valid compound connector regex");
+    let connector_re =
+        Regex::new(r"(?:；|;|，然后|,\s*然后|然后|接着|随后|之后|并且|同时|顺便|再把|再去)")
+            .expect("valid compound connector regex");
     let verb_connector_re = Regex::new(
         r"(?:(?:并|再)(开启|打开|启动|关闭|关掉|禁用|设置|设为|调|切|静音|复制|移动|重命名|删除|锁屏|截图|进入|启用|取消|查看|查)|并(帮我|分析|总结|生成|整理|解释|排查|写|发))",
     )
@@ -407,10 +404,7 @@ fn classify_multi_clause(
     let mut ranked = rank_capabilities(trimmed, compiler, Some(&core.index_db), 3);
     if probe != trimmed {
         let probe_ranked = rank_capabilities(probe, compiler, Some(&core.index_db), 3);
-        if probe_ranked
-            .first()
-            .map(|r| r.confidence)
-            .unwrap_or(0.0)
+        if probe_ranked.first().map(|r| r.confidence).unwrap_or(0.0)
             > ranked.first().map(|r| r.confidence).unwrap_or(0.0)
         {
             ranked = probe_ranked;
@@ -449,9 +443,7 @@ fn classify_multi_clause(
                     top.confidence >= 0.85
                         && !matches!(top.capability_id.as_str(), "app.launch" | "web.search")
                 });
-            if !compiler_has_better
-                && let Some(desc) = core.broker.get_descriptor(&capability_id)
-            {
+            if !compiler_has_better && let Some(desc) = core.broker.get_descriptor(&capability_id) {
                 let mut step =
                     build_planned_step(clause_index, trimmed, desc, arguments, false, 0.96);
                 if !summary.is_empty() {
@@ -468,12 +460,8 @@ fn classify_multi_clause(
         && let Some(desc) = core.broker.get_descriptor(&top.capability_id)
     {
         if top.confidence >= 0.75 {
-            let args = extract_slots_for_descriptor(
-                desc,
-                trimmed,
-                &top.captured_slots,
-                &core.resources,
-            );
+            let args =
+                extract_slots_for_descriptor(desc, trimmed, &top.captured_slots, &core.resources);
             return ClauseResolution::Resolved(build_planned_step(
                 clause_index,
                 trimmed,
@@ -517,7 +505,9 @@ fn resolve_clause_to_step(
     // 1. Check cross-step dependent file operations (e.g., `复制到桌面`, `移动到下载`, `打开它`, `重命名为...`)
     if let Some(prev) = prev_step {
         let uni = extract_universal_slots(trimmed, &core.resources);
-        if (trimmed.starts_with("复制到") || trimmed.starts_with("拷贝到") || trimmed.contains("把它复制到"))
+        if (trimmed.starts_with("复制到")
+            || trimmed.starts_with("拷贝到")
+            || trimmed.contains("把它复制到"))
             && let Some(dest) = uni.locations.first()
             && let Some(desc) = core.broker.get_descriptor("fs.copy")
         {
@@ -527,16 +517,13 @@ fn resolve_clause_to_step(
                 "dest_dir": dest.resolved_path,
             });
             return Some(build_planned_step(
-                step_index,
-                trimmed,
-                desc,
-                args,
-                true,
-                0.92,
+                step_index, trimmed, desc, args, true, 0.92,
             ));
         }
 
-        if (trimmed.starts_with("移动到") || trimmed.starts_with("移到") || trimmed.contains("把它移动到"))
+        if (trimmed.starts_with("移动到")
+            || trimmed.starts_with("移到")
+            || trimmed.contains("把它移动到"))
             && let Some(dest) = uni.locations.first()
             && let Some(desc) = core.broker.get_descriptor("fs.move")
         {
@@ -546,12 +533,7 @@ fn resolve_clause_to_step(
                 "dest_dir": dest.resolved_path,
             });
             return Some(build_planned_step(
-                step_index,
-                trimmed,
-                desc,
-                args,
-                true,
-                0.92,
+                step_index, trimmed, desc, args, true, 0.92,
             ));
         }
 
@@ -561,12 +543,7 @@ fn resolve_clause_to_step(
             let prev_ref = infer_previous_target_reference(prev);
             let args = json!({ "target": prev_ref });
             return Some(build_planned_step(
-                step_index,
-                trimmed,
-                desc,
-                args,
-                true,
-                0.90,
+                step_index, trimmed, desc, args, true, 0.90,
             ));
         }
     }
@@ -589,9 +566,7 @@ fn resolve_clause_to_step(
                     && !matches!(top.capability_id.as_str(), "app.launch" | "web.search")
             });
 
-        if !compiler_has_better
-            && let Some(desc) = core.broker.get_descriptor(&capability_id)
-        {
+        if !compiler_has_better && let Some(desc) = core.broker.get_descriptor(&capability_id) {
             let mut step = build_planned_step(step_index, trimmed, desc, arguments, false, 0.96);
             if !summary.is_empty() {
                 step.summary = summary;
@@ -604,12 +579,8 @@ fn resolve_clause_to_step(
     if let Some(top) = ranked.first()
         && let Some(desc) = core.broker.get_descriptor(&top.capability_id)
     {
-        let args = extract_slots_for_descriptor(
-            desc,
-            trimmed,
-            &top.captured_slots,
-            &core.resources,
-        );
+        let args =
+            extract_slots_for_descriptor(desc, trimmed, &top.captured_slots, &core.resources);
         return Some(build_planned_step(
             step_index,
             trimmed,
@@ -671,16 +642,43 @@ pub async fn execute_compound(
     incognito: bool,
     compiler: &PatternCompiler,
 ) -> anyhow::Result<CompoundExecutionReport> {
+    let privacy = crate::security_guard::PrivacySessionPolicy::from_session(incognito, session_id);
+    execute_compound_with_policy(
+        core,
+        raw_text,
+        steps_override,
+        session_id,
+        privacy,
+        compiler,
+    )
+    .await
+}
+
+pub async fn execute_compound_with_policy(
+    core: &IntentOsCore,
+    raw_text: &str,
+    steps_override: Option<Vec<PlannedStep>>,
+    session_id: Option<&str>,
+    privacy: crate::security_guard::PrivacySessionPolicy,
+    compiler: &PatternCompiler,
+) -> anyhow::Result<CompoundExecutionReport> {
     let steps = match steps_override {
         Some(s) if !s.is_empty() => s,
         _ => split_compound_intent(core, raw_text, compiler).steps,
     };
 
-    let task_id = if incognito {
-        format!("incog_task_compound_{}", Uuid::new_v4())
-    } else {
-        format!("task-compound-{}", Uuid::new_v4())
+    let task_id = match privacy {
+        crate::security_guard::PrivacySessionPolicy::StrictIsolated => {
+            format!("incog_task_compound_{}", Uuid::new_v4())
+        }
+        crate::security_guard::PrivacySessionPolicy::EphemeralReadOnly => {
+            format!("ephemeral_ro_task_compound_{}", Uuid::new_v4())
+        }
+        crate::security_guard::PrivacySessionPolicy::Standard => {
+            format!("task-compound-{}", Uuid::new_v4())
+        }
     };
+    core.register_task_privacy_policy(&task_id, privacy);
     let total_steps = steps.len();
     let is_compound = total_steps > 1;
     let mut step_results = Vec::with_capacity(total_steps);
@@ -740,7 +738,10 @@ pub async fn execute_compound(
                     capability_id: step.capability_id.clone(),
                     status: "requires_approval".to_string(),
                     ok: false,
-                    message: format!("步骤 {} 需要用户授权确认: {}", step.step_index, pending.summary),
+                    message: format!(
+                        "步骤 {} 需要用户授权确认: {}",
+                        step.step_index, pending.summary
+                    ),
                     data: serde_json::to_value(&pending).unwrap_or_else(|_| json!({})),
                     changeset_id: None,
                     approval_nonce: Some(pending.nonce),
@@ -775,15 +776,11 @@ pub async fn execute_compound(
             .join("；")
     };
 
-    if !incognito {
+    if privacy.allows_memory_write() {
         let sess = core.sessions.get_or_create(session_id);
         let last_res = last_discovered_paths.first().cloned();
-        core.sessions.append_turn(
-            &sess.session_id,
-            raw_text,
-            &summary_message,
-            last_res,
-        );
+        core.sessions
+            .append_turn(&sess.session_id, raw_text, &summary_message, last_res);
     }
 
     Ok(CompoundExecutionReport {
@@ -895,7 +892,10 @@ mod tests {
         // Clause 2 is preserved as `RequiresAgent` in `resolutions` and `unresolved_clauses`
         assert!(matches!(
             plan.resolutions[1],
-            ClauseResolution::RequiresAgent { clause_index: 2, .. }
+            ClauseResolution::RequiresAgent {
+                clause_index: 2,
+                ..
+            }
         ));
         assert_eq!(plan.unresolved_clauses.len(), 1);
         assert_eq!(plan.unresolved_clauses[0].clause_index, 2);
@@ -929,11 +929,7 @@ mod tests {
         assert_eq!(single.steps.len(), 1);
 
         // Forbidden credential path clause in compound intent is classified as `Unsupported`
-        let unsup = split_compound_intent(
-            &core,
-            "把音量调到25，然后删除 /etc/shadow",
-            &compiler,
-        );
+        let unsup = split_compound_intent(&core, "把音量调到25，然后删除 /etc/shadow", &compiler);
         assert_eq!(unsup.total_clauses, 2);
         assert!(unsup.has_unresolved_clauses());
         assert!(!unsup.all_clauses_resolved);

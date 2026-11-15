@@ -17,8 +17,9 @@ pub use crate::backend_bridge::turn_checkpoint::{
 
 use crate::backend_bridge::broker_bridge::{
     TurnExecutionOutcome, build_halted_side_effect_outcome, convert_core_task_to_turn_outcome,
-    extract_approval_grant_target, prepare_turn_context_blocks, record_approved_step_into_ledger,
-    supplement_approved_dir_file_search, synthesize_rich_approved_step_markdown,
+    extract_approval_grant_target, prepare_turn_context_blocks_with_policy,
+    record_approved_step_into_ledger, supplement_approved_dir_file_search,
+    synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, BackendsCatalog, CatalogBackends, DiscoveryOptions,
@@ -28,12 +29,13 @@ use crate::backend_bridge::detector::{
 };
 use crate::backend_bridge::providers_cli::{run_cli_backend_turn, scrub_text_secrets};
 use crate::backend_bridge::providers_http::{
-    UpstreamTransport, resolve_upstream_transport, run_anthropic_tool_calling_turn,
-    run_openai_tool_calling_turn,
+    UpstreamTransport, resolve_upstream_transport, run_anthropic_tool_calling_turn_with_policy,
+    run_openai_tool_calling_turn_with_policy,
 };
 use crate::backend_bridge::turn_checkpoint::{
-    TurnStartOutcome, begin_turn, build_cancelled_turn_response, build_denied_resume_response,
-    complete_turn, remove_active_turn, resume_suspended_checkpoint_and_finalize,
+    TurnIdentity, TurnRegistrationOutcome, abort_turn_atomic, build_cancelled_turn_response,
+    build_denied_resume_response, complete_turn_atomic, register_or_join_turn,
+    resume_persisted_checkpoint_across_restart, resume_suspended_checkpoint_and_finalize,
     take_suspended_checkpoint,
 };
 use crate::config_center::brain_manager::{store_provider_credential, upsert_provider};
@@ -41,11 +43,11 @@ use crate::config_center::store::{load_domains_config, save_domains_config};
 use crate::core::IntentOsCore;
 use crate::intent_engine::{CognitiveIntentKind, parse_structured_intent};
 use crate::runtime::SessionState;
-use crate::security_guard::{PrivacySessionPolicy, SensitiveDataGuard};
+use crate::security_guard::{ExecutionContext, PrivacySessionPolicy, SensitiveDataGuard};
 use chrono::Utc;
 use intentos_protocol::{
     ContextBlock, DataClass, ExecutionStatus, IntentRequest, PROTOCOL_VERSION, PendingApproval,
-    Taint, TaskStep,
+    Taint, TaskBudget, TaskStep,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -400,6 +402,32 @@ pub async fn set_active_backend_with_options(
     }))
 }
 
+struct ActiveTurnDropGuard {
+    handle: Arc<ActiveTurnHandle>,
+    completed: bool,
+}
+
+impl ActiveTurnDropGuard {
+    fn new(handle: Arc<ActiveTurnHandle>) -> Self {
+        Self {
+            handle,
+            completed: false,
+        }
+    }
+
+    fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ActiveTurnDropGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            abort_turn_atomic(&self.handle);
+        }
+    }
+}
+
 /// Execute a unified AIOS Quick-Chat turn (`send_quick_chat_turn`).
 pub async fn send_quick_chat_turn_with_options(
     core: &IntentOsCore,
@@ -414,10 +442,22 @@ pub async fn send_quick_chat_turn_with_options(
         .ok_or_else(|| anyhow::anyhow!("send_quick_chat_turn 缺少非空 text"))?
         .to_string();
 
-    let incognito = payload
+    let legacy_incognito = payload
         .get("incognito")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let explicit_privacy = match payload.get("privacy_policy") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => Some(
+            PrivacySessionPolicy::parse_policy_str(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "不支持的 privacy_policy '{}'（仅支持 standard / ephemeral_read_only / strict_isolated）",
+                    raw
+                )
+            })?,
+        ),
+        Some(_) => anyhow::bail!("privacy_policy 必须为字符串"),
+    };
     let allow_broker_tools = payload
         .get("allow_broker_tools")
         .and_then(|v| v.as_bool())
@@ -449,38 +489,110 @@ pub async fn send_quick_chat_turn_with_options(
     let turn_id = client_turn_id
         .unwrap_or_else(|| format!("turn_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
 
-    let privacy = PrivacySessionPolicy::from_session(incognito, req_session_id.as_deref());
-    let incognito = !privacy.allows_memory_read();
+    let privacy = PrivacySessionPolicy::resolve(
+        explicit_privacy,
+        legacy_incognito,
+        req_session_id.as_deref(),
+    );
+    let strict_incognito = !privacy.allows_memory_read();
 
-    let session = if !privacy.allows_memory_write() {
+    let session = if privacy.allows_memory_write() {
+        core.sessions.get_or_create(req_session_id.as_deref())
+    } else if privacy.allows_memory_read() {
+        req_session_id
+            .as_deref()
+            .and_then(|sid| core.sessions.peek(sid))
+            .unwrap_or_else(|| SessionState {
+                session_id: req_session_id
+                    .clone()
+                    .unwrap_or_else(|| ExecutionContext::fallback_session_id(privacy)),
+                messages: Vec::new(),
+                last_resource_path: None,
+                updated_at: Utc::now(),
+            })
+    } else {
         SessionState {
-            session_id: req_session_id.unwrap_or_else(|| {
-                format!("incog_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
-            }),
+            session_id: req_session_id
+                .clone()
+                .unwrap_or_else(|| ExecutionContext::fallback_session_id(privacy)),
             messages: Vec::new(),
             last_resource_path: None,
             updated_at: Utc::now(),
         }
-    } else {
-        core.sessions.get_or_create(req_session_id.as_deref())
     };
 
-    let turn_handle = match begin_turn(&turn_id, Some(&session.session_id)) {
-        TurnStartOutcome::IdempotentReplay(mut cached) => {
+    let req_model_key = format!(
+        "{}:{}:{}",
+        payload
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("auto"),
+        payload
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("auto"),
+        payload
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("auto"),
+    );
+    let req_exec_mode_key = format!(
+        "broker_tools={}:force_cli={}",
+        allow_broker_tools, force_cli
+    );
+    let turn_identity = TurnIdentity::from_request(
+        &turn_id,
+        req_session_id.as_deref(),
+        &text,
+        clipboard_context.as_deref(),
+        allow_broker_tools,
+        req_model_key,
+        req_exec_mode_key,
+        privacy,
+    );
+
+    let turn_handle = match register_or_join_turn(turn_identity) {
+        TurnRegistrationOutcome::IdempotentReplay(mut cached) => {
             if let Some(obj) = cached.as_object_mut() {
                 obj.insert("idempotent_replay".to_string(), json!(true));
             }
             return Ok(cached);
         }
-        TurnStartOutcome::PreCancelled => {
+        TurnRegistrationOutcome::PreCancelled => {
             return Ok(build_cancelled_turn_response(
                 &turn_id,
                 &session.session_id,
                 Vec::new(),
             ));
         }
-        TurnStartOutcome::Started(h) => h,
+        TurnRegistrationOutcome::Conflict { reason } => {
+            anyhow::bail!("turn_conflict: {}", reason);
+        }
+        TurnRegistrationOutcome::AlreadyRunning(existing_handle) => {
+            if let Some(mut joined_res) = existing_handle.wait_finished_result().await {
+                if let Some(obj) = joined_res.as_object_mut() {
+                    obj.insert("coalesced_in_flight".to_string(), json!(true));
+                }
+                return Ok(joined_res);
+            }
+            if existing_handle.is_cancelled() {
+                return Ok(build_cancelled_turn_response(
+                    &turn_id,
+                    &session.session_id,
+                    Vec::new(),
+                ));
+            }
+            anyhow::bail!("并发合并的主回合异常中止 (turn_aborted)");
+        }
+        TurnRegistrationOutcome::Started(h) => h,
     };
+    let mut turn_guard = ActiveTurnDropGuard::new(turn_handle.clone());
 
     let catalog = discover_backends_catalog(core, opts).await;
     let mut active = catalog.active.clone();
@@ -518,29 +630,30 @@ pub async fn send_quick_chat_turn_with_options(
     let mut memory_hits: Vec<Value> = Vec::new();
     let mut memory_dot: Option<TraceDot> = None;
 
-    if let Some(arr) = payload.get("memory_hits").and_then(|v| v.as_array()) {
-        memory_hits.extend(arr.iter().cloned());
-    }
-    if let Some(mc) = payload
-        .get("memory_context")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        extra_blocks.push(ContextBlock {
-            id: "personal_memory_injected".to_string(),
-            label: "personal_os_memory".to_string(),
-            content: mc.to_string(),
-            taint: Taint::Memory,
-            data_class: DataClass::Personal,
-        });
-    }
+    if privacy.allows_memory_read() {
+        if let Some(arr) = payload.get("memory_hits").and_then(|v| v.as_array()) {
+            memory_hits.extend(arr.iter().cloned());
+        }
+        if let Some(mc) = payload
+            .get("memory_context")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            extra_blocks.push(ContextBlock {
+                id: "personal_memory_injected".to_string(),
+                label: "personal_os_memory".to_string(),
+                content: mc.to_string(),
+                taint: Taint::Memory,
+                data_class: DataClass::Personal,
+            });
+        }
 
-    if !incognito {
-        let (ctx_md, rag_hits) = crate::memory_hub::build_personal_memory_prompt(
+        let (ctx_md, rag_hits) = crate::memory_hub::build_personal_memory_prompt_with_policy(
             core,
             &text,
             Some(session.session_id.as_str()),
+            privacy,
         );
         for h in rag_hits {
             memory_hits.push(h);
@@ -556,21 +669,19 @@ pub async fn send_quick_chat_turn_with_options(
                 data_class: DataClass::Personal,
             });
         }
-    }
 
-    // P0 Privacy Fix: NEVER read explicit `state_db` preferences when `incognito == true`!
-    if !incognito
-        && memory_hits.is_empty()
-        && let Ok(explicit_mems) = core.state_db.list_active_memories()
-        && !explicit_mems.is_empty()
-    {
-        for (id, subj, val) in explicit_mems.iter().take(5) {
-            memory_hits.push(json!({
-                "id": id,
-                "kind": "preference",
-                "title": subj,
-                "value": val,
-            }));
+        if memory_hits.is_empty()
+            && let Ok(explicit_mems) = core.state_db.list_active_memories()
+            && !explicit_mems.is_empty()
+        {
+            for (id, subj, val) in explicit_mems.iter().take(5) {
+                memory_hits.push(json!({
+                    "id": id,
+                    "kind": "preference",
+                    "title": subj,
+                    "value": val,
+                }));
+            }
         }
     }
 
@@ -637,7 +748,6 @@ pub async fn send_quick_chat_turn_with_options(
     }
 
     if turn_handle.is_cancelled() {
-        remove_active_turn(&turn_id);
         return Ok(build_cancelled_turn_response(
             &turn_id,
             &session.session_id,
@@ -646,19 +756,31 @@ pub async fn send_quick_chat_turn_with_options(
     }
 
     let compressed_history =
-        crate::memory_hub::build_compressed_session_history(core, &session, incognito);
+        crate::memory_hub::build_compressed_session_history_with_policy(core, &session, privacy);
 
-    let task_id = if !privacy.allows_task_persistence() {
-        format!(
-            "incog_task_{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..10]
-        )
-    } else {
-        format!("task_{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
-    };
+    let task_id = ExecutionContext::new_task_id(privacy);
+    core.register_task_privacy_policy(&task_id, privacy);
     *turn_handle.task_id.lock().unwrap() = Some(task_id.clone());
 
+    let (_, ctx_taints, ctx_data_class) =
+        prepare_turn_context_blocks_with_policy(core, &extra_blocks, privacy);
+    let exec_ctx = ExecutionContext::new(
+        session.session_id.clone(),
+        task_id.clone(),
+        Some(turn_id.clone()),
+        privacy,
+        ctx_taints,
+        ctx_data_class,
+        TaskBudget::default(),
+    );
+
     let mut effect_ledger = TurnEffectLedger::new(&turn_id);
+    effect_ledger.bind_persistence(
+        core.state_db.clone(),
+        exec_ctx.task_id.clone(),
+        exec_ctx.session_id.clone(),
+        exec_ctx.privacy,
+    );
 
     let execution_outcome = execute_selected_backend_or_fallback(
         core,
@@ -666,14 +788,13 @@ pub async fn send_quick_chat_turn_with_options(
         &catalog,
         &active,
         &turn_handle,
-        &task_id,
+        &exec_ctx,
         &session,
         &text,
         &extra_blocks,
         &compressed_history,
         &memory_hits,
         memory_dot.as_ref(),
-        incognito,
         allow_broker_tools,
         force_cli,
         &mut effect_ledger,
@@ -681,7 +802,6 @@ pub async fn send_quick_chat_turn_with_options(
     .await;
 
     if turn_handle.is_cancelled() {
-        remove_active_turn(&turn_id);
         let partial_dots = execution_outcome
             .ok()
             .map(|o| o.trace_dots)
@@ -696,20 +816,18 @@ pub async fn send_quick_chat_turn_with_options(
     let mut outcome = match execution_outcome {
         Ok(o) => o,
         Err(err) => {
-            if effect_ledger.has_committed_side_effects() {
-                let (_, taints, data_class) =
-                    prepare_turn_context_blocks(core, &extra_blocks, incognito);
+            if effect_ledger.has_uncertain_or_committed_side_effects() {
                 let scrubbed_err =
                     SensitiveDataGuard::redact_text(&scrub_text_secrets(&err.to_string())).0;
                 build_halted_side_effect_outcome(
                     core,
                     &active,
-                    &task_id,
+                    &exec_ctx.task_id,
                     &session,
                     &text,
-                    incognito,
-                    taints,
-                    data_class,
+                    strict_incognito,
+                    exec_ctx.taints.clone(),
+                    exec_ctx.data_class,
                     &mut effect_ledger,
                     &scrubbed_err,
                 )
@@ -723,7 +841,7 @@ pub async fn send_quick_chat_turn_with_options(
                     &session,
                     &text,
                     extra_blocks,
-                    incognito,
+                    privacy,
                     &mut effect_ledger,
                 )
                 .await?
@@ -744,7 +862,10 @@ pub async fn send_quick_chat_turn_with_options(
     }
     final_dots.append(&mut outcome.trace_dots);
 
-    if privacy.allows_memory_write() && outcome.pending_approval.is_none() {
+    if privacy.allows_memory_write()
+        && privacy.allows_habit_learning()
+        && outcome.pending_approval.is_none()
+    {
         let _ = crate::memory_hub::handle_module_rpc(
             core,
             "record_conversation_turn",
@@ -756,16 +877,25 @@ pub async fn send_quick_chat_turn_with_options(
                 "trace_dots": final_dots,
                 "tool_steps": outcome.tool_steps_json,
                 "incognito": false,
+                "privacy_policy": privacy,
             }),
         )
         .await;
     }
 
+    let turn_status = if outcome.pending_approval.is_some() {
+        "awaiting_approval"
+    } else if effect_ledger.has_uncertain_side_effects() {
+        "recovery_required"
+    } else {
+        "completed"
+    };
+
     let mut response = json!({
         "turn_id": turn_id,
         "task_id": outcome.task_id,
         "session_id": session.session_id,
-        "status": if outcome.pending_approval.is_some() { "awaiting_approval" } else { "completed" },
+        "status": turn_status,
         "execution_mode": outcome.execution_mode,
         "privacy_policy": privacy,
         "structured_intent": structured_intent,
@@ -790,10 +920,11 @@ pub async fn send_quick_chat_turn_with_options(
     scrub_json_secrets(&mut response);
     SensitiveDataGuard::redact_json(&mut response);
 
-    complete_turn(
-        &turn_id,
+    turn_guard.mark_completed();
+    complete_turn_atomic(
+        &turn_handle,
         response.clone(),
-        has_explicit_turn_id && privacy.allows_memory_write(),
+        has_explicit_turn_id && privacy.allows_replay_cache(),
     );
     Ok(response)
 }
@@ -805,25 +936,28 @@ async fn execute_selected_backend_or_fallback(
     catalog: &BackendsCatalog,
     active: &ActiveBackendSelection,
     turn_handle: &Arc<ActiveTurnHandle>,
-    task_id: &str,
+    exec_ctx: &ExecutionContext,
     session: &SessionState,
     user_text: &str,
     extra_blocks: &[ContextBlock],
     compressed_history: &crate::memory_hub::CompressedSessionHistory,
     memory_hits: &[Value],
     memory_dot: Option<&TraceDot>,
-    incognito: bool,
     allow_broker_tools: bool,
     force_cli: bool,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<TurnExecutionOutcome> {
+    let privacy = exec_ctx.privacy;
+    let strict_incognito = !privacy.allows_memory_read();
+    let task_id = exec_ctx.task_id.as_str();
+
     if user_text.trim().starts_with('$') {
         return run_submit_intent_fallback(
             core,
             session,
             user_text,
             extra_blocks.to_vec(),
-            incognito,
+            privacy,
             effect_ledger,
         )
         .await;
@@ -838,7 +972,7 @@ async fn execute_selected_backend_or_fallback(
             active,
             task_id,
             extra_blocks,
-            incognito,
+            strict_incognito,
         )
     {
         let res = match transport {
@@ -847,7 +981,7 @@ async fn execute_selected_backend_or_fallback(
                 api_key,
                 trust,
             } => {
-                run_anthropic_tool_calling_turn(
+                run_anthropic_tool_calling_turn_with_policy(
                     core,
                     opts,
                     &base_url,
@@ -862,13 +996,14 @@ async fn execute_selected_backend_or_fallback(
                     compressed_history,
                     memory_hits,
                     memory_dot,
-                    incognito,
+                    strict_incognito,
+                    allow_broker_tools,
                     effect_ledger,
                 )
                 .await
             }
             other_transport => {
-                run_openai_tool_calling_turn(
+                run_openai_tool_calling_turn_with_policy(
                     core,
                     opts,
                     other_transport,
@@ -881,7 +1016,8 @@ async fn execute_selected_backend_or_fallback(
                     compressed_history,
                     memory_hits,
                     memory_dot,
-                    incognito,
+                    strict_incognito,
+                    allow_broker_tools,
                     effect_ledger,
                 )
                 .await
@@ -893,14 +1029,12 @@ async fn execute_selected_backend_or_fallback(
                 if turn_handle.is_cancelled() {
                     return Err(err);
                 }
-                // P0 Side-Effect Replay Guard: NEVER fall back after a mutating tool committed!
-                if effect_ledger.has_committed_side_effects() {
-                    let (_, taints, data_class) =
-                        prepare_turn_context_blocks(core, extra_blocks, incognito);
+                // P0 Side-Effect Replay Guard: NEVER fall back after a mutating tool committed or entered unknown state!
+                if effect_ledger.has_uncertain_or_committed_side_effects() {
                     let scrubbed_err =
                         SensitiveDataGuard::redact_text(&scrub_text_secrets(&err.to_string())).0;
                     tracing::warn!(
-                        "Halting fallback after committed side-effects on {}:{} ({})",
+                        "Halting fallback after uncertain/committed side-effects on {}:{} ({})",
                         active.backend,
                         active.provider,
                         scrubbed_err
@@ -911,9 +1045,9 @@ async fn execute_selected_backend_or_fallback(
                         task_id,
                         session,
                         user_text,
-                        incognito,
-                        taints,
-                        data_class,
+                        strict_incognito,
+                        exec_ctx.taints.clone(),
+                        exec_ctx.data_class,
                         effect_ledger,
                         &scrubbed_err,
                     ));
@@ -946,7 +1080,7 @@ async fn execute_selected_backend_or_fallback(
             compressed_history,
             memory_hits,
             memory_dot,
-            incognito,
+            strict_incognito,
             allow_broker_tools,
             effect_ledger,
         )
@@ -957,13 +1091,11 @@ async fn execute_selected_backend_or_fallback(
                 if turn_handle.is_cancelled() {
                     return Err(err);
                 }
-                if effect_ledger.has_committed_side_effects() {
-                    let (_, taints, data_class) =
-                        prepare_turn_context_blocks(core, extra_blocks, incognito);
+                if effect_ledger.has_uncertain_or_committed_side_effects() {
                     let scrubbed_err =
                         SensitiveDataGuard::redact_text(&scrub_text_secrets(&err.to_string())).0;
                     tracing::warn!(
-                        "Halting fallback after CLI committed side-effects on '{}' ({})",
+                        "Halting fallback after CLI uncertain/committed side-effects on '{}' ({})",
                         active.backend,
                         scrubbed_err
                     );
@@ -973,9 +1105,9 @@ async fn execute_selected_backend_or_fallback(
                         task_id,
                         session,
                         user_text,
-                        incognito,
-                        taints,
-                        data_class,
+                        strict_incognito,
+                        exec_ctx.taints.clone(),
+                        exec_ctx.data_class,
                         effect_ledger,
                         &scrubbed_err,
                     ));
@@ -995,7 +1127,7 @@ async fn execute_selected_backend_or_fallback(
         session,
         user_text,
         extra_blocks.to_vec(),
-        incognito,
+        privacy,
         effect_ledger,
     )
     .await
@@ -1007,7 +1139,7 @@ async fn run_submit_intent_fallback(
     session: &SessionState,
     user_text: &str,
     extra_blocks: Vec<ContextBlock>,
-    incognito: bool,
+    privacy: PrivacySessionPolicy,
     effect_ledger: &mut TurnEffectLedger,
 ) -> anyhow::Result<TurnExecutionOutcome> {
     let req = IntentRequest {
@@ -1017,7 +1149,8 @@ async fn run_submit_intent_fallback(
         force_agent: false,
         selected_candidate_id: None,
         cwd: None,
-        incognito,
+        incognito: !privacy.allows_memory_read(),
+        privacy_policy: Some(privacy),
     };
 
     let task = core
@@ -1105,6 +1238,15 @@ pub async fn resume_approved_turn_with_options(
 
     let checkpoint = take_suspended_checkpoint(&approval_id);
     let policy_pa = core.policy.peek_pending_approval(&approval_id);
+    if checkpoint.is_none()
+        && policy_pa.is_none()
+        && core
+            .state_db
+            .get_suspended_checkpoint_row(&approval_id)?
+            .is_some()
+    {
+        return resume_persisted_checkpoint_across_restart(core, payload, opts).await;
+    }
     let pa_ref: Option<PendingApproval> = checkpoint
         .as_ref()
         .map(|c| c.pending_approval.clone())
@@ -1212,6 +1354,7 @@ pub async fn resume_approved_turn_with_options(
     }
 
     // No `SuspendedTurnCheckpoint` (e.g. L0/L1 task from `submit_intent`)
+    let task_privacy = core.task_privacy_policy(&approved_task.id);
     let sid = approved_task
         .session_id
         .clone()
@@ -1223,12 +1366,28 @@ pub async fn resume_approved_turn_with_options(
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         })
-        .unwrap_or_else(|| core.sessions.get_or_create(None).session_id);
-    let incognito = sid.starts_with("incog_") || approved_task.id.starts_with("incog_");
+        .unwrap_or_else(|| {
+            if task_privacy.allows_memory_write() {
+                core.sessions.get_or_create(None).session_id
+            } else {
+                ExecutionContext::fallback_session_id(task_privacy)
+            }
+        });
+    let effective_privacy = PrivacySessionPolicy::resolve(
+        Some(task_privacy),
+        !task_privacy.allows_memory_read(),
+        Some(&sid),
+    );
     let rich_reply =
         synthesize_rich_approved_step_markdown(&approved_task.goal, std::slice::from_ref(&step));
 
     let mut fallback_ledger = TurnEffectLedger::new(&resume_turn_id);
+    fallback_ledger.bind_persistence(
+        core.state_db.clone(),
+        approved_task.id.clone(),
+        sid.clone(),
+        effective_privacy,
+    );
     record_approved_step_into_ledger(
         core,
         &mut fallback_ledger,
@@ -1238,11 +1397,13 @@ pub async fn resume_approved_turn_with_options(
     );
     let final_dots = fallback_ledger.trace_dots.clone();
 
-    if !incognito {
+    if effective_privacy.allows_task_persistence() {
         approved_task.session_id = Some(sid.clone());
         approved_task.assistant_message = Some(rich_reply.clone());
         approved_task.result_summary = Some(rich_reply.clone());
         let _ = core.state_db.upsert_task(&approved_task);
+    }
+    if effective_privacy.allows_memory_write() {
         core.sessions.append_turn(
             &sid,
             &approved_task.goal,
@@ -1254,7 +1415,7 @@ pub async fn resume_approved_turn_with_options(
             .ok()
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default();
-        let _ = crate::memory_hub::record_conversation_turn(
+        let _ = crate::memory_hub::record_conversation_turn_with_policy(
             core,
             &crate::memory_hub::RecordTurnInput {
                 session_id: Some(sid.clone()),
@@ -1265,12 +1426,26 @@ pub async fn resume_approved_turn_with_options(
                 trace_dots: dots_val,
                 incognito: false,
             },
+            effective_privacy,
         );
     }
 
-    let session_obj = core.sessions.get_or_create(Some(&sid));
-    let cc_stats =
-        crate::memory_hub::build_compressed_session_history(core, &session_obj, incognito).stats;
+    let session_obj = if effective_privacy.allows_memory_write() {
+        core.sessions.get_or_create(Some(&sid))
+    } else {
+        core.sessions.peek(&sid).unwrap_or(SessionState {
+            session_id: sid.clone(),
+            messages: Vec::new(),
+            last_resource_path: None,
+            updated_at: Utc::now(),
+        })
+    };
+    let cc_stats = crate::memory_hub::build_compressed_session_history_with_policy(
+        core,
+        &session_obj,
+        effective_privacy,
+    )
+    .stats;
 
     let mut response = json!({
         "turn_id": resume_turn_id,

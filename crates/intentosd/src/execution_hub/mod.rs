@@ -405,9 +405,24 @@ mod tests {
         let proposal_id = stage_res["proposal_id"].as_str().unwrap().to_string();
         assert_eq!(stage_res["status"], "staged");
         assert_eq!(stage_res["requires_approval"], true);
-        assert_eq!(stage_res["diffs"]["added_files"].as_array().unwrap().len(), 1);
-        assert_eq!(stage_res["diffs"]["modified_files"].as_array().unwrap().len(), 1);
-        assert_eq!(stage_res["diffs"]["deleted_files"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            stage_res["diffs"]["added_files"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            stage_res["diffs"]["modified_files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            stage_res["diffs"]["deleted_files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         let mod_diff = &stage_res["diffs"]["modified_files"][0]["unified_diff"]
             .as_str()
@@ -571,7 +586,10 @@ mod tests {
             true,
             800,
         );
-        assert!(prop.is_some(), "3rd consecutive approval must propose a rule");
+        assert!(
+            prop.is_some(),
+            "3rd consecutive approval must propose a rule"
+        );
         let prop_id = prop.unwrap().proposal_id;
 
         // Verify confirm_each effects NEVER generate a RuleProposal even after 5 approvals
@@ -627,10 +645,7 @@ mod tests {
         assert!(projects.iter().any(|p| {
             p["name"] == "demo-app"
                 && p["git_branch"] == "feat/v03"
-                && p["tech_stack"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("Rust"))
+                && p["tech_stack"].as_array().unwrap().contains(&json!("Rust"))
         }));
 
         // 2. Run a real L0 task so we can extract both Memory Candidates and learn a Workflow (`M-05`, `M-07`)
@@ -646,6 +661,7 @@ mod tests {
                     selected_candidate_id: None,
                     cwd: Some(proj_dir.to_string_lossy().to_string()),
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )
@@ -790,16 +806,13 @@ mod tests {
             .submit_intent(
                 IntentRequest {
                     protocol_version: 1,
-                    text: format!(
-                        "把 {} 移到 {}",
-                        src_file.display(),
-                        dst_file.display()
-                    ),
+                    text: format!("把 {} 移到 {}", src_file.display(), dst_file.display()),
                     session_id: None,
                     force_agent: false,
                     selected_candidate_id: None,
                     cwd: None,
                     incognito: false,
+                    privacy_policy: None,
                 },
                 Vec::new(),
             )
@@ -845,13 +858,9 @@ mod tests {
         assert!(posture0["session_grants"].as_array().unwrap().is_empty());
 
         // Switch security mode
-        let set_res = handle_module_rpc(
-            &core,
-            "set_security_mode",
-            json!({ "mode": "strict" }),
-        )
-        .await
-        .unwrap();
+        let set_res = handle_module_rpc(&core, "set_security_mode", json!({ "mode": "strict" }))
+            .await
+            .unwrap();
         assert_eq!(set_res["security_mode"], "strict");
 
         // Forbidden path cannot be granted
@@ -901,13 +910,9 @@ mod tests {
         );
 
         // Revoke session grant -> removes both grant and approved_root
-        let rev = handle_module_rpc(
-            &core,
-            "revoke_session_grant",
-            json!({ "id": grant_id }),
-        )
-        .await
-        .unwrap();
+        let rev = handle_module_rpc(&core, "revoke_session_grant", json!({ "id": grant_id }))
+            .await
+            .unwrap();
         assert_eq!(rev["revoked"], true);
         assert!(rev["session_grants"].as_array().unwrap().is_empty());
         assert!(rev["approved_roots"].as_array().unwrap().is_empty());

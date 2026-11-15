@@ -249,9 +249,10 @@ impl ModelGateway {
 
         // 3. Inject profile model if missing, force non-streaming JSON for clean metering over socket bridge
         if body.get("model").is_none()
-            && let Some(obj) = body.as_object_mut() {
-                obj.insert("model".into(), json!(profile.model));
-            }
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("model".into(), json!(profile.model));
+        }
 
         let mock_url = self.mock_upstream_url.lock().unwrap().clone();
         let target_url = match mock_url {
@@ -376,10 +377,8 @@ impl ModelGateway {
     fn lookup_credential_with_vault(&self, provider_id: &str, cred_ref: &str) -> Option<String> {
         let maybe_paths = self.paths.lock().unwrap().clone();
         if let Some(ref paths) = maybe_paths
-            && let Some(k) = crate::config_center::brain_manager::lookup_provider_credential(
-                paths,
-                provider_id,
-            )
+            && let Some(k) =
+                crate::config_center::brain_manager::lookup_provider_credential(paths, provider_id)
         {
             return Some(k);
         }
@@ -391,12 +390,13 @@ impl ModelGateway {
         if let Ok(out) = Command::new("secret-tool")
             .args(["lookup", "service", "intentos", "provider", provider_id])
             .output()
-            && out.status.success() {
-                let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !secret.is_empty() {
-                    return Some(secret);
-                }
+            && out.status.success()
+        {
+            let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !secret.is_empty() {
+                return Some(secret);
             }
+        }
         // 2. Core-only environment fallback for developer CLI sessions (never forwarded to sandboxed Worker!)
         for env_key in [
             "INTENTOS_API_KEY",
@@ -440,10 +440,12 @@ async fn handle_gateway_unix_http(gw: Arc<ModelGateway>, stream: UnixStream) -> 
                 content_length = vt.parse().unwrap_or(0);
             } else if kl == "x-intentos-run-token" {
                 run_token = vt.to_string();
-            } else if kl == "authorization" && run_token.is_empty()
-                && let Some(tok) = vt.strip_prefix("Bearer ") {
-                    run_token = tok.trim().to_string();
-                }
+            } else if kl == "authorization"
+                && run_token.is_empty()
+                && let Some(tok) = vt.strip_prefix("Bearer ")
+            {
+                run_token = tok.trim().to_string();
+            }
         }
     }
 
@@ -493,7 +495,10 @@ mod tests {
         // Standard trust provider + Sensitive data_class MUST be denied with `egress_denied` (§5.4, §19.2)!
         let token = gw.issue_run_lease("task_sec", "main", DataClass::Sensitive);
         let err = gw
-            .proxy_chat_completion(&token, json!({"messages": [{"role": "user", "content": "secret"}]}))
+            .proxy_chat_completion(
+                &token,
+                json!({"messages": [{"role": "user", "content": "secret"}]}),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::EgressDenied(_)));

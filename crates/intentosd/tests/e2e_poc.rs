@@ -188,6 +188,7 @@ async fn e2e_sandboxed_pi_worker_gateway_approval_and_undo() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -199,7 +200,10 @@ async fn e2e_sandboxed_pi_worker_gateway_approval_and_undo() {
     assert_eq!(state.calls.load(Ordering::SeqCst), 2);
     assert_eq!(task.steps.len(), 1);
     assert_eq!(task.steps[0].capability_id, "file.search");
-    assert!(report_src.exists(), "file must NOT move before user approval");
+    assert!(
+        report_src.exists(),
+        "file must NOT move before user approval"
+    );
 
     let pa = task.pending_approval.expect("must have PendingApproval");
     assert_eq!(pa.capability_id, "file.move");
@@ -247,6 +251,7 @@ async fn consecutive_relative_volume_adjustments_coalesce_changeset() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -265,6 +270,7 @@ async fn consecutive_relative_volume_adjustments_coalesce_changeset() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -280,6 +286,7 @@ async fn consecutive_relative_volume_adjustments_coalesce_changeset() {
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )

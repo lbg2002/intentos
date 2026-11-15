@@ -44,12 +44,15 @@ impl PublicDbusService {
             selected_candidate_id: None,
             cwd: None,
             incognito: false,
+            privacy_policy: None,
         };
         self.core.submit_intent(req, Vec::new()).await
     }
 
     pub fn list_tasks(&self, limit: u32) -> anyhow::Result<Vec<Task>> {
-        self.core.state_db.list_tasks((limit as usize).clamp(1, 100))
+        self.core
+            .state_db
+            .list_tasks((limit as usize).clamp(1, 100))
     }
 
     pub fn get_task(&self, task_id: &str) -> anyhow::Result<Option<Task>> {

@@ -135,8 +135,7 @@ fn discover_python_candidates() -> Vec<PathBuf> {
             home.join("miniforge3/envs"),
         ] {
             if let Ok(entries) = std::fs::read_dir(base) {
-                let mut env_dirs: Vec<PathBuf> =
-                    entries.flatten().map(|e| e.path()).collect();
+                let mut env_dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
                 env_dirs.sort();
                 for dir in env_dirs {
                     push_unique(dir.join("bin/python3"));
@@ -243,7 +242,11 @@ pub fn get_runtime_readiness(core: &IntentOsCore) -> Value {
     let models = list_models_with_status(core);
     let installed_count = models
         .iter()
-        .filter(|m| m.get("installed").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter(|m| {
+            m.get("installed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .count();
 
     json!({
@@ -323,7 +326,12 @@ pub fn list_audio_sources() -> Vec<AudioSourceInfo> {
             if src_name.is_empty() {
                 continue;
             }
-            let driver = cols.get(2).copied().unwrap_or("PipeWire").trim().to_string();
+            let driver = cols
+                .get(2)
+                .copied()
+                .unwrap_or("PipeWire")
+                .trim()
+                .to_string();
             let state = cols.get(4).copied().unwrap_or("IDLE").trim().to_string();
             let is_monitor = src_name.ends_with(".monitor") || src_name.contains(".monitor");
 
@@ -635,7 +643,8 @@ pub async fn start_recording(core: &IntentOsCore, payload: &Value) -> anyhow::Re
         ("arecord", "/usr/bin/arecord"),
     ];
 
-    let mut last_err = String::from("未找到可用的录音工具（pw-record / parecord / ffmpeg / arecord）");
+    let mut last_err =
+        String::from("未找到可用的录音工具（pw-record / parecord / ffmpeg / arecord）");
     for (backend_name, bin_path) in backends {
         if !Path::new(bin_path).is_file() {
             continue;
@@ -707,8 +716,7 @@ pub fn repair_wav_header_if_needed(wav_path: &Path) -> anyhow::Result<()> {
     let mut pos = 12usize;
     while pos + 8 <= total_len {
         let chunk_id = [buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]];
-        let chunk_sz =
-            u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
+        let chunk_sz = u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
         if &chunk_id == b"data" {
             let actual_data = (total_len.saturating_sub(pos + 8)).min(u32::MAX as usize) as u32;
             if chunk_sz == 0
@@ -1040,7 +1048,10 @@ async fn transcribe_wav_internal(
             anyhow::bail!("未识别到清晰的语音文字内容，请靠近麦克风重试");
         }
 
-        let elapsed_val = parsed.get("elapsed_ms").cloned().unwrap_or_else(|| json!(0));
+        let elapsed_val = parsed
+            .get("elapsed_ms")
+            .cloned()
+            .unwrap_or_else(|| json!(0));
         return Ok(json!({
             "ok": true,
             "text": text,
@@ -1097,9 +1108,7 @@ async fn transcribe_via_cloud_endpoint(
     body.extend_from_slice(b"\r\n");
 
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(
-        b"Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n",
-    );
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n");
 
     if language != "auto" && !language.is_empty() {
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
@@ -1187,7 +1196,10 @@ pub async fn run_asr_runner_self_test(core: &IntentOsCore) -> anyhow::Result<Val
         .unwrap_or_else(|| "/usr/bin/python3".to_string());
     let script = resolve_asr_runner_script(core);
     if !script.is_file() {
-        anyhow::bail!("找不到 scripts/intentos_asr_runner.py: {}", script.display());
+        anyhow::bail!(
+            "找不到 scripts/intentos_asr_runner.py: {}",
+            script.display()
+        );
     }
 
     let mut cmd = tokio::process::Command::new(&python_bin);

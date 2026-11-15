@@ -112,7 +112,9 @@ pub fn scan_skills_and_workflows(core: &IntentOsCore) -> anyhow::Result<Vec<Skil
                 continue;
             }
             if let Ok(parsed) = parse_skill_md_file(path, default_trust)
-                && !entries.iter().any(|e: &SkillOrWorkflowEntry| e.id == parsed.id)
+                && !entries
+                    .iter()
+                    .any(|e: &SkillOrWorkflowEntry| e.id == parsed.id)
             {
                 entries.push(parsed);
             }
@@ -299,8 +301,7 @@ pub fn learn_workflow_from_task(
     let mut wf_steps = Vec::new();
     let mut allowed_caps = Vec::new();
     for (idx, st) in task.steps.iter().enumerate() {
-        let args: Value =
-            serde_json::from_str(&st.arguments_summary).unwrap_or_else(|_| json!({}));
+        let args: Value = serde_json::from_str(&st.arguments_summary).unwrap_or_else(|_| json!({}));
         let expected_paths = collect_existing_paths_from_args(&args);
         if !allowed_caps.contains(&st.capability_id) {
             allowed_caps.push(st.capability_id.clone());
@@ -353,11 +354,10 @@ pub fn learn_workflow_from_task(
     }
     md_lines.push(String::new());
     md_lines.push("## 说明".to_string());
-    md_lines.push(format!(
-        "- 来源任务：`{}`（目标：{}）",
-        task_id, task.goal
-    ));
-    md_lines.push("- 执行时每一步均经 Policy Engine 校验；若引用的资源发生漂移则安全中止。".to_string());
+    md_lines.push(format!("- 来源任务：`{}`（目标：{}）", task_id, task.goal));
+    md_lines.push(
+        "- 执行时每一步均经 Policy Engine 校验；若引用的资源发生漂移则安全中止。".to_string(),
+    );
 
     let skill_dir = core.paths.data_dir.join("skills/user").join(&slug);
     std::fs::create_dir_all(&skill_dir)?;
@@ -378,7 +378,10 @@ pub fn learn_workflow_from_task(
             "task_id": task_id,
             "skill_md_path": skill_md_path.to_string_lossy(),
         }),
-        Some(&format!("已从任务 {} 学习并保存工作流 {}", task_id, clean_name)),
+        Some(&format!(
+            "已从任务 {} 学习并保存工作流 {}",
+            task_id, clean_name
+        )),
     );
 
     Ok(json!({
@@ -448,7 +451,10 @@ pub async fn run_workflow(
     }
 
     let now = Utc::now();
-    let task_id = format!("task_wf_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let task_id = format!(
+        "task_wf_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
     let mut taints = vec![Taint::User];
     if wf.trust_level == "untrusted" {
         taints.push(Taint::RemoteUntrusted);
@@ -478,7 +484,11 @@ pub async fn run_workflow(
 
     for step_spec in &wf.steps {
         // 1. Check capability availability (drift check)
-        if core.broker.get_descriptor(&step_spec.capability_id).is_none() {
+        if core
+            .broker
+            .get_descriptor(&step_spec.capability_id)
+            .is_none()
+        {
             let reason = format!(
                 "资源/能力漂移检测拦截：工作流步骤 #{} 引用的能力 `{}` 未注册或已不可用",
                 step_spec.step_index, step_spec.capability_id

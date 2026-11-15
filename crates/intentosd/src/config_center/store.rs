@@ -231,10 +231,7 @@ pub fn enrich_live_metrics(core: &IntentOsCore, cfg: &mut FullDomainsConfig) {
 
 /// Persist `FullDomainsConfig` to `${config_dir}/config.toml`, `${config_dir}/brain.toml`,
 /// and `${config_dir}/domains.json`, stripping any secrets so API keys never touch disk in `config_dir`.
-pub fn save_domains_config(
-    core: &IntentOsCore,
-    cfg: &mut FullDomainsConfig,
-) -> anyhow::Result<()> {
+pub fn save_domains_config(core: &IntentOsCore, cfg: &mut FullDomainsConfig) -> anyhow::Result<()> {
     core.paths.ensure_dirs()?;
     cfg.enforce_invariants();
 

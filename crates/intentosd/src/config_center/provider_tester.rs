@@ -298,10 +298,7 @@ pub async fn test_provider_tools(
                 .profiles
                 .get("main")
                 .map(|p| p.model.clone())
-                .or_else(|| {
-                    provider_opt
-                        .and_then(|p| p.available_models.first().cloned())
-                })
+                .or_else(|| provider_opt.and_then(|p| p.available_models.first().cloned()))
         })
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
@@ -410,7 +407,10 @@ pub async fn test_provider_tools(
                     supported: false,
                     status: "unsupported".to_string(),
                     latency_ms,
-                    details: format!("上游返回 HTTP {}，可能不支持 tools 字段: {}", code, body_val),
+                    details: format!(
+                        "上游返回 HTTP {}，可能不支持 tools 字段: {}",
+                        code, body_val
+                    ),
                 };
                 return Ok(serde_json::to_value(out)?);
             }
@@ -425,12 +425,10 @@ pub async fn test_provider_tools(
                         .and_then(|tc| tc.as_array())
                         .filter(|a| !a.is_empty())
                         .or_else(|| {
-                            m.get("function_call")
-                                .filter(|fc| fc.is_object())
-                                .map(|_| {
-                                    static DUMMY: Vec<Value> = Vec::new();
-                                    &DUMMY
-                                })
+                            m.get("function_call").filter(|fc| fc.is_object()).map(|_| {
+                                static DUMMY: Vec<Value> = Vec::new();
+                                &DUMMY
+                            })
                         })
                 })
                 .is_some();

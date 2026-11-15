@@ -136,17 +136,17 @@ fn resolve_authorized_work_dir(
     {
         let candidate = expand_home(req);
         if core.fs_engine.is_forbidden(&candidate) {
-            anyhow::bail!("E2 沙箱拒绝挂载受保护路径 (forbidden): {}", candidate.display());
+            anyhow::bail!(
+                "E2 沙箱拒绝挂载受保护路径 (forbidden): {}",
+                candidate.display()
+            );
         }
         if !candidate.is_absolute() {
             anyhow::bail!("E2 工作目录必须为绝对路径: {}", candidate.display());
         }
         let in_scope = roots.iter().any(|r| candidate.starts_with(r));
         if !in_scope {
-            anyhow::bail!(
-                "E2 工作目录超出授权目录范围: {}",
-                candidate.display()
-            );
+            anyhow::bail!("E2 工作目录超出授权目录范围: {}", candidate.display());
         }
         std::fs::create_dir_all(&candidate)?;
         return Ok(candidate);
@@ -202,7 +202,10 @@ pub async fn stage_e2_command(
         "PATH".to_string(),
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
     );
-    env_vars.insert("HOME".to_string(), staged_work_dir.to_string_lossy().to_string());
+    env_vars.insert(
+        "HOME".to_string(),
+        staged_work_dir.to_string_lossy().to_string(),
+    );
     env_vars.insert("TMPDIR".to_string(), tmp_dir.to_string_lossy().to_string());
     env_vars.insert(
         "INTENTOS_ARTIFACTS_DIR".to_string(),
@@ -412,10 +415,7 @@ pub fn compute_staging_diff(
     let mut unified_chunks = Vec::new();
 
     for (rel_path, post) in &post_snapshot {
-        let target_path = real_work_dir
-            .join(rel_path)
-            .to_string_lossy()
-            .to_string();
+        let target_path = real_work_dir.join(rel_path).to_string_lossy().to_string();
         match pre_snapshot.get(rel_path) {
             None => {
                 let preview = if let Some(ref txt) = post.text_content {
@@ -478,10 +478,7 @@ pub fn compute_staging_diff(
 
     for (rel_path, pre) in pre_snapshot {
         if !post_snapshot.contains_key(rel_path) {
-            let target_path = real_work_dir
-                .join(rel_path)
-                .to_string_lossy()
-                .to_string();
+            let target_path = real_work_dir.join(rel_path).to_string_lossy().to_string();
             unified_chunks.push(format!(
                 "--- a/{}\n+++ /dev/null\n@@ deleted ({} bytes, {}) @@",
                 rel_path, pre.size_bytes, pre.sha256

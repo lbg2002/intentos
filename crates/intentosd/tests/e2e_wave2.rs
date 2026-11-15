@@ -68,10 +68,7 @@ fn setup_wave2_core(
     (temp, core, downloads, documents)
 }
 
-fn seed_xbel_and_desktop_assets(
-    base: &Path,
-    frequent_file: &Path,
-) -> (PathBuf, Vec<PathBuf>) {
+fn seed_xbel_and_desktop_assets(base: &Path, frequent_file: &Path) -> (PathBuf, Vec<PathBuf>) {
     let xbel_path = base.join("recently-used.xbel");
     // Percent-encoded UTF-8 URI for `架构白皮书_2026.pdf`
     let parent_uri = format!("file://{}", frequent_file.parent().unwrap().display());
@@ -139,7 +136,11 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
             },
         )
         .await;
-    assert!(sync_resp.ok, "sync_system_usage failed: {:?}", sync_resp.error);
+    assert!(
+        sync_resp.ok,
+        "sync_system_usage failed: {:?}",
+        sync_resp.error
+    );
 
     // 2. Offline query: "我长期使用的文件有哪些" -> returns percent-decoded `架构白皮书_2026.pdf`!
     let freq_task = core
@@ -152,6 +153,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -176,6 +178,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -208,6 +211,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -234,6 +238,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -251,6 +256,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -275,6 +281,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -298,6 +305,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -321,6 +329,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -342,6 +351,7 @@ async fn wave2_e2e_offline_personal_memory_habit_sync_and_multi_turn_resolution(
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: true,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -467,6 +477,7 @@ async fn wave2_e2e_core_l2_and_quick_chat_bridge_llm_memory_injection_and_7_aios
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -514,6 +525,7 @@ async fn wave2_e2e_core_l2_and_quick_chat_bridge_llm_memory_injection_and_7_aios
                 selected_candidate_id: None,
                 cwd: None,
                 incognito: false,
+                privacy_policy: None,
             },
             Vec::new(),
         )
@@ -641,10 +653,7 @@ async fn wave2_e2e_core_l2_and_quick_chat_bridge_llm_memory_injection_and_7_aios
 
     // Verify ordered 6-color Trace Dots: `thinking` (gray) + `memory` (purple) + `adapter` (cyan)
     let dots = qc_resp["trace_dots"].as_array().unwrap();
-    let dot_kinds: Vec<&str> = dots
-        .iter()
-        .filter_map(|d| d["kind"].as_str())
-        .collect();
+    let dot_kinds: Vec<&str> = dots.iter().filter_map(|d| d["kind"].as_str()).collect();
     assert_eq!(dot_kinds.first().copied(), Some("thinking"));
     assert!(dot_kinds.contains(&"memory"));
     assert!(dot_kinds.contains(&"adapter"));

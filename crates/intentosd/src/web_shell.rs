@@ -4,11 +4,11 @@
 //! IntentOS Shell interactively in browser or Preview pane alongside `ui.sock` and `intentosctl`.
 
 use crate::core::IntentOsCore;
+use axum::Router;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use intentos_protocol::{UiRpcEnvelope, UiRpcResponse};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -54,5 +54,8 @@ async fn rpc_handler(
     State(core): State<Arc<IntentOsCore>>,
     Json(envelope): Json<UiRpcEnvelope>,
 ) -> Json<UiRpcResponse> {
-    Json(core.handle_trusted_ui_rpc(envelope.id, envelope.request).await)
+    Json(
+        core.handle_trusted_ui_rpc(envelope.id, envelope.request)
+            .await,
+    )
 }

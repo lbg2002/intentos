@@ -369,12 +369,8 @@ impl DiscoveryOptions {
     ///   without polluting tests with host binaries/env keys, while STILL enabling live `/models` probing
     ///   for configured mock/local providers!
     pub fn from_core(core: &IntentOsCore, force_refresh: bool) -> Self {
-        let is_custom_test_base = core
-            .paths
-            .config_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            == Some("config");
+        let is_custom_test_base =
+            core.paths.config_dir.file_name().and_then(|s| s.to_str()) == Some("config");
 
         if is_custom_test_base {
             let base = core
@@ -593,15 +589,9 @@ pub fn build_models_candidate_urls(base_url: &str, kind: &str) -> Vec<String> {
         return vec![format!("{}/models", clean)];
     }
     if lower.ends_with("/anthropic") || is_anthropic_endpoint(kind, Some(clean)) {
-        return vec![
-            format!("{}/models", clean),
-            format!("{}/v1/models", clean),
-        ];
+        return vec![format!("{}/models", clean), format!("{}/v1/models", clean)];
     }
-    vec![
-        format!("{}/v1/models", clean),
-        format!("{}/models", clean),
-    ]
+    vec![format!("{}/v1/models", clean), format!("{}/models", clean)]
 }
 
 /// Parse OpenAI / Anthropic / vLLM / LiteLLM / Ollama `/models` JSON responses and filter non-chat utility models.
@@ -1926,7 +1916,8 @@ pub fn auto_select_best_backend(backends: &CatalogBackends) -> ActiveBackendSele
     let is_direct_ready = |p: &DiscoveredProvider| {
         p.enabled
             && p.has_api_key
-            && (p.direct_openai_compatible || is_direct_http_endpoint(&p.kind, p.base_url.as_deref()))
+            && (p.direct_openai_compatible
+                || is_direct_http_endpoint(&p.kind, p.base_url.as_deref()))
             && !p.models.is_empty()
     };
 
@@ -2265,13 +2256,8 @@ async fn enrich_backends_with_live_models_and_proxy_sharing(
 
         let force = opts.force_refresh_models;
         let results = join_all(jobs.iter().map(|job| async move {
-            fetch_live_models_for_provider(
-                &job.base_url,
-                &job.kind,
-                job.api_key.as_deref(),
-                force,
-            )
-            .await
+            fetch_live_models_for_provider(&job.base_url, &job.kind, job.api_key.as_deref(), force)
+                .await
         }))
         .await;
 

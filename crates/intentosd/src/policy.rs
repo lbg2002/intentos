@@ -174,7 +174,12 @@ impl PolicyEngine {
         self.security_mode.lock().unwrap().clone()
     }
 
-    pub fn add_session_grant(&self, scope_kind: &str, scope_value: &str, ttl_minutes: i64) -> Value {
+    pub fn add_session_grant(
+        &self,
+        scope_kind: &str,
+        scope_value: &str,
+        ttl_minutes: i64,
+    ) -> Value {
         let kind = match scope_kind.trim().to_ascii_lowercase().as_str() {
             "directory" | "dir" | "path" => "directory".to_string(),
             "capability" | "cap" => "capability".to_string(),
@@ -456,8 +461,9 @@ impl PolicyEngine {
             )
         {
             return PolicyDecision::PreviewAndApprove {
-                reason: "上下文包含外部/不可信内容（Taint: untrusted），写或外发操作必须经人工预览确认"
-                    .into(),
+                reason:
+                    "上下文包含外部/不可信内容（Taint: untrusted），写或外发操作必须经人工预览确认"
+                        .into(),
             };
         }
 
@@ -526,8 +532,9 @@ impl PolicyEngine {
                             PolicyDecision::AllowWithUndo
                         } else {
                             PolicyDecision::PreviewAndApprove {
-                                reason: "AI 发起的文件修改需确认（执行后生成可逆变更集，支持一键撤销）"
-                                    .into(),
+                                reason:
+                                    "AI 发起的文件修改需确认（执行后生成可逆变更集，支持一键撤销）"
+                                        .into(),
                             }
                         }
                     }
@@ -536,8 +543,9 @@ impl PolicyEngine {
                             PolicyDecision::AllowWithUndo
                         } else {
                             PolicyDecision::PreviewAndApprove {
-                                reason: "AI 发起的文件修改需确认（执行后生成可逆变更集，支持一键撤销）"
-                                    .into(),
+                                reason:
+                                    "AI 发起的文件修改需确认（执行后生成可逆变更集，支持一键撤销）"
+                                        .into(),
                             }
                         }
                     }
@@ -697,7 +705,11 @@ impl PolicyEngine {
     }
 }
 
-fn classify_risk_tier_tag(desc: &CapabilityDescriptor, reason: &str, reversible: bool) -> &'static str {
+fn classify_risk_tier_tag(
+    desc: &CapabilityDescriptor,
+    reason: &str,
+    reversible: bool,
+) -> &'static str {
     let max_eff = desc.max_effect();
     if matches!(
         max_eff,
@@ -936,7 +948,11 @@ mod tests {
         // (a) Forbidden paths (`~/.ssh/id_ed25519` and `/etc/shadow`) -> ALWAYS hard Deny!
         policy.set_security_mode("developer");
         let _ = policy.add_session_grant("directory", "~/.ssh", 60);
-        for forbidden in ["~/.ssh/id_ed25519", "/home/user/.ssh/id_ed25519", "/etc/shadow"] {
+        for forbidden in [
+            "~/.ssh/id_ed25519",
+            "/home/user/.ssh/id_ed25519",
+            "/etc/shadow",
+        ] {
             let dec = policy.evaluate(
                 open_desc,
                 &json!({ "path": forbidden }),
@@ -945,7 +961,12 @@ mod tests {
                 1,
                 true,
             );
-            assert!(dec.is_denied(), "{} must be hard Deny, got {:?}", forbidden, dec);
+            assert!(
+                dec.is_denied(),
+                "{} must be hard Deny, got {:?}",
+                forbidden,
+                dec
+            );
         }
         policy.set_security_mode("balanced");
 
@@ -989,7 +1010,10 @@ mod tests {
             "访问隐藏/敏感配置路径（~/.config/demo.conf），需人工确认授权",
             false,
         );
-        assert!(pa.diff_preview.contains("⚠️ 风险等级: R2 敏感路径或进程控制"));
+        assert!(
+            pa.diff_preview
+                .contains("⚠️ 风险等级: R2 敏感路径或进程控制")
+        );
 
         // (c) Session Scope Grant allows OutsideScope directory & syncs `fs_engine.approve_path_scope`!
         let ext_dir = tmp.path().join("external_project");
@@ -1097,7 +1121,11 @@ mod tests {
         let grant = policy.add_session_grant("directory", "/home/", 60);
         assert_eq!(grant["scope_kind"], "directory");
         assert_eq!(grant["scope_value"], "/home");
-        assert!(fs_eng.list_approved_roots().contains(&PathBuf::from("/home")));
+        assert!(
+            fs_eng
+                .list_approved_roots()
+                .contains(&PathBuf::from("/home"))
+        );
 
         // Subsequent turns in the same session MUST NOT re-prompt for `/home` or child dot-paths!
         assert!(policy.is_session_granted("file.search", &home_search_args));

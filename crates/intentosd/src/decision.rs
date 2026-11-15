@@ -161,8 +161,7 @@ impl DecisionAdapter {
         };
 
         let multistep_prob = estimate_multistep_probability(trimmed);
-        let owned_caps: Vec<CapabilityDescriptor> =
-            descriptors.iter().copied().cloned().collect();
+        let owned_caps: Vec<CapabilityDescriptor> = descriptors.iter().copied().cloned().collect();
         let structured = self.evaluate_structured_goal(trimmed, &owned_caps);
 
         if matches!(
@@ -300,7 +299,11 @@ impl DecisionAdapter {
                         id: format!("l1:{}:{}", d.id, trimmed),
                         kind: CandidateKind::Capability,
                         title: d.summary.clone(),
-                        subtitle: format!("能力 `{}` · 置信分 {:.0}%", d.id, (sc * 100.0).min(99.0)),
+                        subtitle: format!(
+                            "能力 `{}` · 置信分 {:.0}%",
+                            d.id,
+                            (sc * 100.0).min(99.0)
+                        ),
                         badge: format!("L1·{}", d.max_effect().risk_badge()),
                         score: *sc * 100.0,
                         capability_id: Some(d.id.clone()),
@@ -321,7 +324,10 @@ impl DecisionAdapter {
                     "clarify_l1",
                 );
                 return L1DecisionOutcome::Clarify {
-                    prompt: format!("发现以下相近能力，请确认要执行的操作（L1 p={:.2}）：", top_prob),
+                    prompt: format!(
+                        "发现以下相近能力，请确认要执行的操作（L1 p={:.2}）：",
+                        top_prob
+                    ),
                     candidates,
                     extra_taint,
                 };
@@ -362,11 +368,7 @@ fn evaluate_question_locally(state_text: &str, q: &DecisionQuestion) -> Decision
                 confidence: 0.85,
             }
         }
-        DecisionQuestion::Choice {
-            id,
-            options,
-            ..
-        } => {
+        DecisionQuestion::Choice { id, options, .. } => {
             let mut dist = BTreeMap::new();
             let lower = state_text.to_ascii_lowercase();
             let mut sum = 0.0;
@@ -399,7 +401,14 @@ fn evaluate_question_locally(state_text: &str, q: &DecisionQuestion) -> Decision
             if !scale.is_empty() {
                 let idx = ((risk * (scale.len() - 1) as f64).round() as usize).min(scale.len() - 1);
                 for (i, label) in scale.iter().enumerate() {
-                    dist.insert(label.clone(), if i == idx { 0.8 } else { 0.2 / (scale.len().max(2) - 1) as f64 });
+                    dist.insert(
+                        label.clone(),
+                        if i == idx {
+                            0.8
+                        } else {
+                            0.2 / (scale.len().max(2) - 1) as f64
+                        },
+                    );
                 }
             }
             DecisionAnswer {
@@ -441,7 +450,15 @@ pub fn estimate_multistep_probability(text: &str) -> f64 {
         return 0.90;
     }
     let connectors = [
-        "并且", "然后再", "然后把", "接着", "完成后告诉我", "再提醒我", "并整理", "再发给", "同时把",
+        "并且",
+        "然后再",
+        "然后把",
+        "接着",
+        "完成后告诉我",
+        "再提醒我",
+        "并整理",
+        "再发给",
+        "同时把",
     ];
     if connectors.iter().any(|c| t.contains(c)) {
         0.88
@@ -492,7 +509,9 @@ fn score_capability_match(text: &str, desc: &CapabilityDescriptor) -> f64 {
             0.94
         }
         "display.night_light.set" if lc.contains("护眼灯") || lc.contains("防蓝光") => 0.94,
-        "power.battery.status" if lc.contains("还有多少电") || lc.contains("电池百分比") => 0.94,
+        "power.battery.status" if lc.contains("还有多少电") || lc.contains("电池百分比") => {
+            0.94
+        }
         "power.profile.set"
             if lc.contains("省电续航")
                 || lc.contains("续航优先")
@@ -549,7 +568,11 @@ fn fill_deterministic_slots(text: &str, desc: &CapabilityDescriptor) -> Option<V
     let t = text.trim();
     match desc.id.as_str() {
         "sound.mute.set" => {
-            let st = if t.contains("取消") || t.contains("恢复") || t.contains("开声音") || t.contains("出声") {
+            let st = if t.contains("取消")
+                || t.contains("恢复")
+                || t.contains("开声音")
+                || t.contains("出声")
+            {
                 "off"
             } else {
                 "on"
@@ -557,7 +580,8 @@ fn fill_deterministic_slots(text: &str, desc: &CapabilityDescriptor) -> Option<V
             Some(json!({ "mode": st }))
         }
         "sound.mic.mute.set" => {
-            let st = if t.contains("取消") || t.contains("开麦") || t.contains("打开麦克风") {
+            let st = if t.contains("取消") || t.contains("开麦") || t.contains("打开麦克风")
+            {
                 "off"
             } else {
                 "on"
@@ -583,7 +607,8 @@ fn fill_deterministic_slots(text: &str, desc: &CapabilityDescriptor) -> Option<V
             Some(json!({ "profile": p }))
         }
         "scene.apply" => {
-            for s in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"] {
+            for s in ["护眼模式", "演示模式", "安静模式", "会议模式", "专注模式"]
+            {
                 if t.contains(s.trim_end_matches("模式")) {
                     return Some(json!({ "scene": s }));
                 }
@@ -650,7 +675,10 @@ mod tests {
             L1DecisionOutcome::EscalateL2 { extra_taint, .. } => {
                 assert_eq!(extra_taint, Some(Taint::LocalUntrusted));
             }
-            other => panic!("expected EscalateL2 with LocalUntrusted taint, got {:?}", other),
+            other => panic!(
+                "expected EscalateL2 with LocalUntrusted taint, got {:?}",
+                other
+            ),
         }
     }
 
@@ -662,10 +690,25 @@ mod tests {
         let adapter = DecisionAdapter::new(gw, db);
 
         let caps = vec![
-            make_desc("notify.dnd.set", "开启或关闭勿扰模式", &["勿扰", "专注"], &["enabled"]),
-            make_desc("system.inspect", "查看系统状态与负载", &["系统状态", "电脑状态"], &[]),
+            make_desc(
+                "notify.dnd.set",
+                "开启或关闭勿扰模式",
+                &["勿扰", "专注"],
+                &["enabled"],
+            ),
+            make_desc(
+                "system.inspect",
+                "查看系统状态与负载",
+                &["系统状态", "电脑状态"],
+                &[],
+            ),
             make_desc("disk.free", "查看磁盘剩余空间", &["磁盘空间"], &[]),
-            make_desc("file.search", "查找目录与日志中的文件", &["查找文件", "下载目录"], &[]),
+            make_desc(
+                "file.search",
+                "查找目录与日志中的文件",
+                &["查找文件", "下载目录"],
+                &[],
+            ),
         ];
         let refs: Vec<&CapabilityDescriptor> = caps.iter().collect();
 
@@ -708,8 +751,18 @@ mod tests {
         let adapter = DecisionAdapter::new(gw, db);
 
         let caps = [
-            make_desc("sound.volume.set", "设置或调整系统音量", &["音量", "声音"], &[]),
-            make_desc("display.brightness.set", "设置或调整屏幕亮度", &["亮度"], &[]),
+            make_desc(
+                "sound.volume.set",
+                "设置或调整系统音量",
+                &["音量", "声音"],
+                &[],
+            ),
+            make_desc(
+                "display.brightness.set",
+                "设置或调整屏幕亮度",
+                &["亮度"],
+                &[],
+            ),
             make_desc(
                 "power.battery.status",
                 "读取电池电量百分比与续航状态",
@@ -722,7 +775,12 @@ mod tests {
                 &["省电模式", "性能模式", "平衡模式"],
                 &["profile"],
             ),
-            make_desc("network.ip", "查询本机局域网与内网 IP 地址", &["本机IP"], &[]),
+            make_desc(
+                "network.ip",
+                "查询本机局域网与内网 IP 地址",
+                &["本机IP"],
+                &[],
+            ),
             make_desc("network.status", "查询当前网络连接状态", &["网络状态"], &[]),
         ];
         let refs: Vec<&CapabilityDescriptor> = caps.iter().collect();
@@ -750,7 +808,9 @@ mod tests {
                     assert_eq!(capability_id, "display.brightness.set");
                     assert_eq!(arguments["relative"], "down");
                 }
-                other => panic!("expected Execute display.brightness.set for {bright}, got {other:?}"),
+                other => {
+                    panic!("expected Execute display.brightness.set for {bright}, got {other:?}")
+                }
             }
         }
 

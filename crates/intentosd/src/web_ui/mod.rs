@@ -261,8 +261,8 @@ mod tests {
     #[test]
     fn test_quick_chat_dialog_dimensions_and_trace_dots_contract() {
         let root = test_repo_root();
-        let (_, css_bytes) =
-            load_static_asset(&root, "styles/quick-chat-dialog.css").expect("quick-chat-dialog.css");
+        let (_, css_bytes) = load_static_asset(&root, "styles/quick-chat-dialog.css")
+            .expect("quick-chat-dialog.css");
         let css = String::from_utf8(css_bytes).expect("utf8 css");
         assert!(css.contains("width: min(560px, 94vw)"));
         assert!(css.contains("height: min(740px, 90vh)"));
@@ -271,7 +271,9 @@ mod tests {
 
         let (_, dots_bytes) = load_static_asset(&root, "js/trace-dots.js").expect("trace-dots.js");
         let dots_js = String::from_utf8(dots_bytes).expect("utf8 trace-dots.js");
-        for kind in ["thinking", "memory", "adapter", "approval", "tool_ok", "tool_err"] {
+        for kind in [
+            "thinking", "memory", "adapter", "approval", "tool_ok", "tool_err",
+        ] {
             assert!(
                 dots_js.contains(kind),
                 "Expected trace-dots.js to support '{}' dot",
@@ -305,8 +307,8 @@ mod tests {
         assert!(html.contains("prefers-color-scheme"));
         assert!(html.contains("localStorage"));
 
-        let (_, css_bytes) =
-            load_static_asset(&root, "styles/quick-chat-dialog.css").expect("quick-chat-dialog.css");
+        let (_, css_bytes) = load_static_asset(&root, "styles/quick-chat-dialog.css")
+            .expect("quick-chat-dialog.css");
         let css = String::from_utf8(css_bytes).expect("utf8 css");
         assert!(css.contains("max-height: 190px"));
         assert!(css.contains("overflow-y: auto"));
@@ -325,8 +327,8 @@ mod tests {
         assert!(main_js.contains("已拒绝执行"));
 
         // 4. `memory-adapter-popover.js` & `settings-11pages.js` wire document outlines & personal apps
-        let (_, mem_bytes) =
-            load_static_asset(&root, "js/memory-adapter-popover.js").expect("memory-adapter-popover.js");
+        let (_, mem_bytes) = load_static_asset(&root, "js/memory-adapter-popover.js")
+            .expect("memory-adapter-popover.js");
         let mem_js = String::from_utf8(mem_bytes).expect("utf8 mem_js");
         assert!(mem_js.contains("document_outlines_preview"));
         assert!(mem_js.contains("inspect_document"));
@@ -347,8 +349,8 @@ mod tests {
     fn test_wave4_honest_unverified_dots_and_live_tray_adapter_workbench_contracts() {
         let root = test_repo_root();
 
-        let (_, css_bytes) =
-            load_static_asset(&root, "styles/quick-chat-dialog.css").expect("quick-chat-dialog.css");
+        let (_, css_bytes) = load_static_asset(&root, "styles/quick-chat-dialog.css")
+            .expect("quick-chat-dialog.css");
         let css = String::from_utf8(css_bytes).expect("utf8 css");
         assert!(css.contains(".dot-blue"));
         assert!(css.contains("#38bdf8"));
@@ -363,8 +365,8 @@ mod tests {
         assert!(dots_js.contains("simulated"));
         assert!(dots_js.contains("已发送请求（待桌面响应）"));
 
-        let (_, mem_bytes) =
-            load_static_asset(&root, "js/memory-adapter-popover.js").expect("memory-adapter-popover.js");
+        let (_, mem_bytes) = load_static_asset(&root, "js/memory-adapter-popover.js")
+            .expect("memory-adapter-popover.js");
         let mem_js = String::from_utf8(mem_bytes).expect("utf8 mem_js");
         assert!(mem_js.contains("list_live_tray_apps"));
         assert!(mem_js.contains("inspect_live_app"));
@@ -391,8 +393,8 @@ mod tests {
         assert!(html.contains("id=\"btn-voice-input\""));
         assert!(html.contains("id=\"qc-voice-banner\""));
 
-        let (_, css_bytes) =
-            load_static_asset(&root, "styles/quick-chat-dialog.css").expect("quick-chat-dialog.css");
+        let (_, css_bytes) = load_static_asset(&root, "styles/quick-chat-dialog.css")
+            .expect("quick-chat-dialog.css");
         let css = String::from_utf8(css_bytes).expect("utf8 css");
         assert!(css.contains(".qc-btn-approve:disabled"));
         assert!(css.contains(".qc-btn-scope:disabled"));
@@ -446,8 +448,8 @@ mod tests {
         assert!(cfg_js.contains("cancel_download"));
         assert!(cfg_js.contains("delete_model"));
 
-        let (_, mem_bytes) =
-            load_static_asset(&root, "js/memory-adapter-popover.js").expect("memory-adapter-popover.js");
+        let (_, mem_bytes) = load_static_asset(&root, "js/memory-adapter-popover.js")
+            .expect("memory-adapter-popover.js");
         let mem_js = String::from_utf8(mem_bytes).expect("utf8 mem_js");
         assert!(mem_js.contains("deep_scan_local_software"));
         assert!(mem_js.contains("preview_session_compression"));

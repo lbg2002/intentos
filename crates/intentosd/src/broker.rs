@@ -107,17 +107,21 @@ impl CapabilityBroker {
         self.descriptors.len() + self.aios_tool_specs().len()
     }
 
-    fn is_incognito_task(&self, task_id: &str) -> bool {
-        if task_id.starts_with("incog_") {
-            return true;
+    fn task_privacy_policy(&self, task_id: &str) -> crate::security_guard::PrivacySessionPolicy {
+        if let Some(core) = self.core() {
+            core.task_privacy_policy(task_id)
+        } else {
+            crate::security_guard::PrivacySessionPolicy::from_task_id(task_id)
         }
-        self.core()
-            .is_some_and(|core| core.is_incognito_task(task_id))
+    }
+
+    fn is_incognito_task(&self, task_id: &str) -> bool {
+        !self.task_privacy_policy(task_id).allows_task_persistence()
     }
 
     fn has_live_user_gui(&self) -> bool {
-        let env_gui = std::env::var_os("WAYLAND_DISPLAY").is_some()
-            || std::env::var_os("DISPLAY").is_some();
+        let env_gui =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
         if !env_gui {
             return false;
         }
@@ -222,8 +226,7 @@ impl CapabilityBroker {
             }
             PolicyDecision::PreviewAndApprove { reason }
             | PolicyDecision::ConfirmEach { reason } => {
-                let reversible =
-                    desc.undo != intentos_protocol::UndoStrategy::None && quota_ok;
+                let reversible = desc.undo != intentos_protocol::UndoStrategy::None && quota_ok;
                 let pa = self.policy.issue_pending_approval(
                     &call.task_id,
                     desc,
@@ -402,7 +405,53 @@ impl CapabilityBroker {
         };
         let start = Instant::now();
         let canonical = call.capability_id.trim().replace('.', "_");
-        match crate::memory_hub::execute_memory_tool(&core, &canonical, &call.arguments) {
+        let task_policy = self.task_privacy_policy(&call.task_id);
+        let arg_policy = crate::security_guard::PrivacySessionPolicy::resolve(
+            call.arguments
+                .get("privacy_policy")
+                .and_then(|v| v.as_str())
+                .and_then(crate::security_guard::PrivacySessionPolicy::parse_policy_str),
+            call.arguments
+                .get("incognito")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            call.arguments.get("session_id").and_then(|v| v.as_str()),
+        );
+        let policy_rank = |p: crate::security_guard::PrivacySessionPolicy| match p {
+            crate::security_guard::PrivacySessionPolicy::Standard => 0u8,
+            crate::security_guard::PrivacySessionPolicy::EphemeralReadOnly => 1u8,
+            crate::security_guard::PrivacySessionPolicy::StrictIsolated => 2u8,
+        };
+        let effective_policy = if policy_rank(arg_policy) > policy_rank(task_policy) {
+            arg_policy
+        } else {
+            task_policy
+        };
+        if crate::security_guard::is_memory_write_tool(&canonical)
+            && !effective_policy.allows_memory_write()
+        {
+            return Ok(BrokerDispatchOutcome::Denied {
+                reason: format!(
+                    "隐私策略（{}）禁止写入记忆工具 `{}`",
+                    effective_policy.as_str(),
+                    canonical
+                ),
+            });
+        }
+        if !effective_policy.allows_memory_read() {
+            return Ok(BrokerDispatchOutcome::Denied {
+                reason: format!(
+                    "严格隔离隐私策略（strict_isolated）禁止访问个人记忆工具 `{}`",
+                    canonical
+                ),
+            });
+        }
+        match crate::memory_hub::execute_memory_tool_with_policy(
+            &core,
+            &canonical,
+            &call.arguments,
+            effective_policy,
+        ) {
             Ok(data) => {
                 let msg = if canonical == "memory_inspect_document" {
                     if data.get("found").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -816,12 +865,13 @@ impl CapabilityBroker {
     fn check_backup_quota_for_call(&self, cap_id: &str, args: &Value) -> bool {
         if cap_id == "file.write"
             && let Some(p) = args.get("path").and_then(|v| v.as_str())
-                && let Ok(meta) = std::fs::metadata(p) {
-                    let single_cap = (4u64 * 1024 * 1024 * 1024) / 4;
-                    if meta.len() > single_cap {
-                        return false;
-                    }
-                }
+            && let Ok(meta) = std::fs::metadata(p)
+        {
+            let single_cap = (4u64 * 1024 * 1024 * 1024) / 4;
+            if meta.len() > single_cap {
+                return false;
+            }
+        }
         true
     }
 
@@ -874,7 +924,10 @@ impl CapabilityBroker {
                 for hint in &candidate_hints {
                     if let Some(rec) = self.resources.resolve_best_app(hint) {
                         if Path::new(&rec.source).is_file()
-                            || self.resources.resolve_installed_desktop_app(&rec, hint).is_some()
+                            || self
+                                .resources
+                                .resolve_installed_desktop_app(&rec, hint)
+                                .is_some()
                         {
                             resolved_opt = Some(rec);
                             break;
@@ -930,7 +983,7 @@ impl CapabilityBroker {
                     && Path::new(&rec.source).starts_with(std::env::temp_dir());
                 let has_gui = self.has_live_user_gui() || (env_gui && is_temp_desktop_fixture);
                 if !has_gui {
-                    if !self.is_incognito_task(task_id) {
+                    if self.task_privacy_policy(task_id).allows_habit_learning() {
                         self.index_db
                             .record_frecency(&format!("app:{}", rec.app_id));
                     }
@@ -1034,7 +1087,7 @@ impl CapabilityBroker {
                     });
                 }
 
-                if !self.is_incognito_task(task_id) {
+                if self.task_privacy_policy(task_id).allows_habit_learning() {
                     self.index_db
                         .record_frecency(&format!("app:{}", installed_rec.app_id));
                 }
@@ -1070,9 +1123,7 @@ impl CapabilityBroker {
                     // 1a) Wake via `StatusNotifierItem` + `dbusmenu` ("显示主窗口" + Activate(0,0))
                     let mut tray_wake_val: Option<Value> = None;
                     if !is_temp_desktop_fixture {
-                        let wake_hint = matched_tray_hint
-                            .as_deref()
-                            .unwrap_or(id_stem);
+                        let wake_hint = matched_tray_hint.as_deref().unwrap_or(id_stem);
                         tray_wake_val =
                             crate::app_adapter::sni_dbusmenu::activate_or_show_tray_app(wake_hint)
                                 .await
@@ -1095,12 +1146,9 @@ impl CapabilityBroker {
                         && let Some(gtk_launch) = resolve_trusted_executable("gtk-launch")
                     {
                         launcher_mode = "gtk_launch";
-                        launched_ok = run_clean_desktop_launcher(
-                            &gtk_launch,
-                            &[&installed_rec.app_id],
-                            3000,
-                        )
-                        .await;
+                        launched_ok =
+                            run_clean_desktop_launcher(&gtk_launch, &[&installed_rec.app_id], 3000)
+                                .await;
                     }
 
                     // If running in `/proc` without SNI tray, best-effort focus window via `gui_bridge`
@@ -1215,16 +1263,11 @@ impl CapabilityBroker {
                     )
                     .await;
                 }
-                if !launched_ok
-                    && let Some(gtk_launch) = resolve_trusted_executable("gtk-launch")
-                {
+                if !launched_ok && let Some(gtk_launch) = resolve_trusted_executable("gtk-launch") {
                     launcher_mode = "gtk_launch";
-                    launched_ok = run_clean_desktop_launcher(
-                        &gtk_launch,
-                        &[&installed_rec.app_id],
-                        3000,
-                    )
-                    .await;
+                    launched_ok =
+                        run_clean_desktop_launcher(&gtk_launch, &[&installed_rec.app_id], 3000)
+                            .await;
                 }
 
                 // Poll `/proc` up to ~700ms (100ms intervals) to verify a live process matching `installed_rec` under current UID
@@ -1347,10 +1390,7 @@ impl CapabilityBroker {
                         .get("sort_by")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or(FileSortOrder::RelevanceAndRecent),
-                    limit: args
-                        .get("limit")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(20) as usize,
+                    limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,
                 };
                 let hits = self.resources.search_files(&filter);
                 let list: Vec<Value> = hits
@@ -1424,7 +1464,7 @@ impl CapabilityBroker {
                     });
                 }
 
-                if !self.is_incognito_task(task_id) {
+                if self.task_privacy_policy(task_id).allows_habit_learning() {
                     self.index_db.record_frecency(&format!("file:{}", path_str));
                 }
                 let has_gui = self.has_live_user_gui();
@@ -1437,9 +1477,11 @@ impl CapabilityBroker {
                             self.resources.resolve_installed_desktop_app(&rec, app_hint)
                         && let Some(gio_bin) = resolve_trusted_executable("gio")
                     {
-                        launched_with_app =
-                            spawn_clean_desktop_command(&gio_bin, &["launch", &inst.source, path_str])
-                                .is_ok();
+                        launched_with_app = spawn_clean_desktop_command(
+                            &gio_bin,
+                            &["launch", &inst.source, path_str],
+                        )
+                        .is_ok();
                     }
                     if !launched_with_app {
                         if let Some(gio_bin) = resolve_trusted_executable("gio") {
@@ -1454,7 +1496,10 @@ impl CapabilityBroker {
                 };
 
                 let msg = if handler == "file.open_with" {
-                    let app = args.get("app").and_then(|v| v.as_str()).unwrap_or("默认应用");
+                    let app = args
+                        .get("app")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("默认应用");
                     format!("已请求用 {} 打开 {}", app, path_str)
                 } else {
                     format!("已请求打开 {}", path_str)
@@ -1485,18 +1530,17 @@ impl CapabilityBroker {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let rg_bin = resolve_trusted_executable("rg")
                     .ok_or_else(|| anyhow::anyhow!("未安装 ripgrep (rg)"))?;
-                let mut search_dirs: Vec<PathBuf> = if let Some(d) =
-                    args.get("directory").and_then(|v| v.as_str())
-                {
-                    vec![PathBuf::from(d)]
-                } else {
-                    self.fs_engine
-                        .authorized_roots()
-                        .iter()
-                        .filter(|r| r.exists())
-                        .cloned()
-                        .collect()
-                };
+                let mut search_dirs: Vec<PathBuf> =
+                    if let Some(d) = args.get("directory").and_then(|v| v.as_str()) {
+                        vec![PathBuf::from(d)]
+                    } else {
+                        self.fs_engine
+                            .authorized_roots()
+                            .iter()
+                            .filter(|r| r.exists())
+                            .cloned()
+                            .collect()
+                    };
                 search_dirs.retain(|d| !self.fs_engine.is_forbidden(d));
 
                 let mut matches = Vec::new();
@@ -1802,9 +1846,10 @@ impl CapabilityBroker {
                                 // 0A == TCP_LISTEN
                                 if let Some((_, hex_port)) = cols[1].split_once(':')
                                     && let Ok(port_num) = u16::from_str_radix(hex_port, 16)
-                                        && (target_port.is_none() || target_port == Some(port_num)) {
-                                            lines.push(format!("LISTEN tcp port :{}", port_num));
-                                        }
+                                    && (target_port.is_none() || target_port == Some(port_num))
+                                {
+                                    lines.push(format!("LISTEN tcp port :{}", port_num));
+                                }
                             }
                         }
                     }
@@ -1927,9 +1972,8 @@ impl CapabilityBroker {
                 let has_gui = self.has_live_user_gui();
                 if has_gui {
                     let cfg_dir_opt = self.core().map(|c| c.paths.config_dir.clone());
-                    let reg = crate::app_adapter::registry::AdapterRegistry::load(
-                        cfg_dir_opt.as_deref(),
-                    );
+                    let reg =
+                        crate::app_adapter::registry::AdapterRegistry::load(cfg_dir_opt.as_deref());
                     let (prof, _) = reg.resolve_adapter_and_action(q, "focus_window");
                     let focus_res = crate::app_adapter::gui_bridge::execute_gui_bridge_action(
                         &prof,
@@ -2053,7 +2097,11 @@ impl CapabilityBroker {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .trim();
-                if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
+                if new_name.is_empty()
+                    || new_name.contains('/')
+                    || new_name == "."
+                    || new_name == ".."
+                {
                     anyhow::bail!("非法的新文件名: {}", new_name);
                 }
                 let src_buf = expand_tilde_arg_path(src_str);
@@ -2087,7 +2135,10 @@ impl CapabilityBroker {
                             verification: VerificationReport {
                                 state: VerificationState::Passed,
                                 method: "openat2_renameat2_noreplace".into(),
-                                checks: vec!["sha256_verified".into(), "changeset_persisted".into()],
+                                checks: vec![
+                                    "sha256_verified".into(),
+                                    "changeset_persisted".into(),
+                                ],
                                 details: None,
                             },
                             backend_mode: "e3_openat2".into(),
@@ -2337,7 +2388,11 @@ impl CapabilityBroker {
                 };
                 self.state_db.save_changeset(&cs)?;
                 let _ = self.resources.index_authorized_files();
-                let msg = format!("✓ 已打包生成 {} [变更集 {}，可一键撤销]", out_path.display(), cs_id);
+                let msg = format!(
+                    "✓ 已打包生成 {} [变更集 {}，可一键撤销]",
+                    out_path.display(),
+                    cs_id
+                );
                 Ok(CapabilityResult {
                     request_id: request_id.into(),
                     capability_id: "archive.create".into(),
@@ -2466,7 +2521,12 @@ impl CapabilityBroker {
                     backup_bytes: 0,
                     status: ChangeSetStatus::Applied,
                     undo_expires_at: now + chrono::Duration::days(30),
-                    summary: format!("解压 {} 至 {}（{} 个文件）", arch_path.display(), dest_path.display(), file_cnt),
+                    summary: format!(
+                        "解压 {} 至 {}（{} 个文件）",
+                        arch_path.display(),
+                        dest_path.display(),
+                        file_cnt
+                    ),
                 };
                 self.state_db.save_changeset(&cs)?;
                 let _ = self.resources.index_authorized_files();
@@ -2508,7 +2568,10 @@ impl CapabilityBroker {
                     capability_id: "sound.output.list".into(),
                     status: ExecutionStatus::Exited,
                     exit_code: Some(0),
-                    message: format!("可用音频输出设备：内置扬声器、耳机、HDMI（共 {} 个）", devices.len()),
+                    message: format!(
+                        "可用音频输出设备：内置扬声器、耳机、HDMI（共 {} 个）",
+                        devices.len()
+                    ),
                     data: json!({ "devices": devices }),
                     stdout_preview: "内置扬声器\n耳机\nHDMI / DisplayPort 音频".into(),
                     stderr_preview: String::new(),
@@ -2527,7 +2590,12 @@ impl CapabilityBroker {
             "appearance.font.list" => {
                 let q = args.get("query").and_then(|v| v.as_str());
                 let fonts = self.resources.list_fonts(q);
-                let preview = fonts.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+                let preview = fonts
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Ok(CapabilityResult {
                     request_id: request_id.into(),
                     capability_id: "appearance.font.list".into(),
@@ -2593,7 +2661,9 @@ impl CapabilityBroker {
             "network.status" | "network.ip" => {
                 let mut addrs = Vec::new();
                 if let Some(ip_bin) = resolve_trusted_executable("ip")
-                    && let Ok(out) = Command::new(ip_bin).args(["-o", "-4", "addr", "show"]).output()
+                    && let Ok(out) = Command::new(ip_bin)
+                        .args(["-o", "-4", "addr", "show"])
+                        .output()
                     && out.status.success()
                 {
                     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -2782,12 +2852,19 @@ impl CapabilityBroker {
                 let lines: Vec<String> = procs
                     .iter()
                     .map(|(pid, name, kb)| {
-                        format!("PID {:<6} {:<22} {:.1} MB", pid, name, (*kb as f64) / 1024.0)
+                        format!(
+                            "PID {:<6} {:<22} {:.1} MB",
+                            pid,
+                            name,
+                            (*kb as f64) / 1024.0
+                        )
                     })
                     .collect();
                 let top_summary = procs
                     .first()
-                    .map(|(pid, n, kb)| format!("最高：{} (PID {}, {:.1} MB)", n, pid, (*kb as f64) / 1024.0))
+                    .map(|(pid, n, kb)| {
+                        format!("最高：{} (PID {}, {:.1} MB)", n, pid, (*kb as f64) / 1024.0)
+                    })
                     .unwrap_or_else(|| "无可见进程".into());
                 Ok(CapabilityResult {
                     request_id: request_id.into(),
@@ -2817,10 +2894,10 @@ impl CapabilityBroker {
                 })
             }
             "process.terminate" => {
-                let pid = args
-                    .get("pid")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("missing pid"))? as u32;
+                let pid =
+                    args.get("pid")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| anyhow::anyhow!("missing pid"))? as u32;
                 if pid <= 1 || pid == std::process::id() {
                     anyhow::bail!("安全保护拒绝终止关键进程 PID {}", pid);
                 }
@@ -2830,7 +2907,10 @@ impl CapabilityBroker {
                     .args(["-TERM", &pid.to_string()])
                     .status()?;
                 if !st.success() {
-                    anyhow::bail!("无法向 PID {} 发送 SIGTERM（可能不存在或不属于当前用户）", pid);
+                    anyhow::bail!(
+                        "无法向 PID {} 发送 SIGTERM（可能不存在或不属于当前用户）",
+                        pid
+                    );
                 }
                 let msg = format!("已向进程 PID {} 发送 SIGTERM 终止信号", pid);
                 Ok(CapabilityResult {
@@ -2958,7 +3038,11 @@ impl CapabilityBroker {
                     capability_id: "package.search".into(),
                     status: ExecutionStatus::Exited,
                     exit_code: Some(0),
-                    message: format!("只读查询软件包「{}」：找到 {} 条匹配（安装操作需在终端由用户执行）", q, results.len()),
+                    message: format!(
+                        "只读查询软件包「{}」：找到 {} 条匹配（安装操作需在终端由用户执行）",
+                        q,
+                        results.len()
+                    ),
                     data: json!({ "query": q, "packages": results }),
                     stdout_preview: preview,
                     stderr_preview: String::new(),
@@ -3008,7 +3092,11 @@ impl CapabilityBroker {
                     capability_id: "git.log".into(),
                     status: ExecutionStatus::Exited,
                     exit_code: Some(0),
-                    message: format!("最近 {} 条 Git 提交记录（{}）", commits.len(), repo.display()),
+                    message: format!(
+                        "最近 {} 条 Git 提交记录（{}）",
+                        commits.len(),
+                        repo.display()
+                    ),
                     data: json!({ "repo": repo, "commits": commits }),
                     stdout_preview: commits.join("\n"),
                     stderr_preview: String::new(),
@@ -3259,7 +3347,10 @@ pub fn find_running_app_pids(rec: &AppRecord) -> Vec<u32> {
         }
         needles.iter().any(|n| {
             cand_lc == *n
-                || (allow_comm_trunc && cand_lc.len() == 15 && n.len() > 15 && n.starts_with(&cand_lc))
+                || (allow_comm_trunc
+                    && cand_lc.len() == 15
+                    && n.len() > 15
+                    && n.starts_with(&cand_lc))
         })
     };
 
@@ -3290,7 +3381,10 @@ pub fn find_running_app_pids(rec: &AppRecord) -> Vec<u32> {
                     is_zombie = true;
                 }
             } else if let Some(rest) = line.strip_prefix("Uid:") {
-                proc_uid = rest.split_whitespace().next().and_then(|u| u.parse::<u32>().ok());
+                proc_uid = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|u| u.parse::<u32>().ok());
             }
         }
         if is_zombie {
@@ -3423,8 +3517,7 @@ fn build_verified_app_quit_result(
 }
 
 fn contains_cjk_char(s: &str) -> bool {
-    s.chars()
-        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
 fn format_app_launch_display_label(
@@ -3456,7 +3549,8 @@ fn format_app_launch_display_label(
             .split_whitespace()
             .next()
             .and_then(|t| Path::new(t).file_name().and_then(|s| s.to_str()));
-        for alias in crate::app_adapter::dynamic_profiler::builtin_domestic_app_aliases(stem, exec_bin)
+        for alias in
+            crate::app_adapter::dynamic_profiler::builtin_domestic_app_aliases(stem, exec_bin)
         {
             if contains_cjk_char(alias) {
                 zh_label_opt = Some(alias.to_string());

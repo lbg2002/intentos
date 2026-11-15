@@ -44,25 +44,73 @@ const KNOWN_FILE_EXTENSIONS: &[&str] = &[
 ];
 
 const BUILTIN_APP_PATTERNS: &[(&str, &str, &[&str])] = &[
-    ("code.desktop", "Visual Studio Code", &["vscode", "vs code", "visual studio code"]),
+    (
+        "code.desktop",
+        "Visual Studio Code",
+        &["vscode", "vs code", "visual studio code"],
+    ),
     ("zcode.desktop", "ZCode", &["zcode"]),
-    ("google-chrome.desktop", "Google Chrome", &["google chrome", "chrome", "谷歌浏览器"]),
-    ("firefox.desktop", "Firefox", &["firefox", "火狐浏览器", "火狐"]),
-    ("wps-office-prometheus.desktop", "WPS Office", &["wps office", "wps文字", "wps表格", "wps"]),
-    ("libreoffice-writer.desktop", "LibreOffice", &["libreoffice"]),
+    (
+        "google-chrome.desktop",
+        "Google Chrome",
+        &["google chrome", "chrome", "谷歌浏览器"],
+    ),
+    (
+        "firefox.desktop",
+        "Firefox",
+        &["firefox", "火狐浏览器", "火狐"],
+    ),
+    (
+        "wps-office-prometheus.desktop",
+        "WPS Office",
+        &["wps office", "wps文字", "wps表格", "wps"],
+    ),
+    (
+        "libreoffice-writer.desktop",
+        "LibreOffice",
+        &["libreoffice"],
+    ),
     ("obsidian.desktop", "Obsidian", &["obsidian"]),
-    ("org.gnome.Nautilus.desktop", "文件管理器 (Nautilus)", &["nautilus", "文件管理器"]),
-    ("org.gnome.Evince.desktop", "文档查看器 (Evince)", &["evince", "文档查看器"]),
+    (
+        "org.gnome.Nautilus.desktop",
+        "文件管理器 (Nautilus)",
+        &["nautilus", "文件管理器"],
+    ),
+    (
+        "org.gnome.Evince.desktop",
+        "文档查看器 (Evince)",
+        &["evince", "文档查看器"],
+    ),
     ("org.kde.okular.desktop", "Okular", &["okular"]),
-    ("org.gnome.TextEditor.desktop", "文本编辑器", &["gnome-text-editor", "gedit"]),
-    ("org.gnome.Terminal.desktop", "GNOME 终端", &["gnome-terminal"]),
-    ("org.telegram.desktop.desktop", "Telegram", &["telegram", "电报"]),
+    (
+        "org.gnome.TextEditor.desktop",
+        "文本编辑器",
+        &["gnome-text-editor", "gedit"],
+    ),
+    (
+        "org.gnome.Terminal.desktop",
+        "GNOME 终端",
+        &["gnome-terminal"],
+    ),
+    (
+        "org.telegram.desktop.desktop",
+        "Telegram",
+        &["telegram", "电报"],
+    ),
     ("wechat.desktop", "微信", &["wechat", "微信"]),
     ("qq.desktop", "QQ", &["linuxqq", "腾讯qq", "qq"]),
     ("feishu.desktop", "飞书", &["feishu", "lark", "飞书"]),
-    ("sodam.desktop", "SodaM 音乐", &["sodam", "sodam音乐", "汽水音乐"]),
+    (
+        "sodam.desktop",
+        "SodaM 音乐",
+        &["sodam", "sodam音乐", "汽水音乐"],
+    ),
     ("qqmusic.desktop", "QQ音乐", &["qqmusic", "qq音乐"]),
-    ("netease-cloud-music.desktop", "网易云音乐", &["netease-cloud-music", "网易云音乐", "网易云"]),
+    (
+        "netease-cloud-music.desktop",
+        "网易云音乐",
+        &["netease-cloud-music", "网易云音乐", "网易云"],
+    ),
     ("spotify.desktop", "Spotify", &["spotify"]),
     ("vlc.desktop", "VLC 媒体播放器", &["vlc"]),
     ("gimp.desktop", "GIMP", &["gimp"]),
@@ -161,7 +209,9 @@ fn push_unique_entity(
     seen_keys: &mut HashSet<(String, String)>,
     entity: ExtractedEntity,
 ) {
-    if entity.canonical_value.trim().is_empty() || is_sensitive_credential_path(&entity.canonical_value) {
+    if entity.canonical_value.trim().is_empty()
+        || is_sensitive_credential_path(&entity.canonical_value)
+    {
         return;
     }
     let key = (
@@ -1008,7 +1058,12 @@ pub fn recall_mentioned_entities(
         .filter(|k| !k.is_empty() && *k != "all")
     {
         if kf == "mentioned_files" || kf == "file_like" {
-            all.retain(|e| matches!(e.entity_kind.as_str(), "file" | "directory" | "document_ref"));
+            all.retain(|e| {
+                matches!(
+                    e.entity_kind.as_str(),
+                    "file" | "directory" | "document_ref"
+                )
+            });
         } else {
             all.retain(|e| e.entity_kind == kf);
         }
@@ -1046,14 +1101,20 @@ pub fn recall_mentioned_entities(
     let wants_app = (q_trim.contains("软件") || q_trim.contains("应用") || q_trim.contains("程序"))
         && !q_trim.contains("文件");
     let wants_url = q_trim.contains("网址") || q_trim.contains("链接") || q_lc.contains("url");
-    let wants_file_broad = q_trim.contains("文件") || wants_config || wants_doc || wants_code || wants_sheet;
+    let wants_file_broad =
+        q_trim.contains("文件") || wants_config || wants_doc || wants_code || wants_sheet;
 
-    let wants_edit_verb =
-        q_trim.contains("改") || q_trim.contains("修改") || q_trim.contains("编辑") || q_lc.contains("edit");
-    let wants_open_verb = q_trim.contains("打开") || q_trim.contains("看过") || q_trim.contains("查看");
+    let wants_edit_verb = q_trim.contains("改")
+        || q_trim.contains("修改")
+        || q_trim.contains("编辑")
+        || q_lc.contains("edit");
+    let wants_open_verb =
+        q_trim.contains("打开") || q_trim.contains("看过") || q_trim.contains("查看");
     let wants_move_verb = q_trim.contains("移动") || q_trim.contains("挪");
-    let wants_create_verb = q_trim.contains("新建") || q_trim.contains("创建") || q_trim.contains("生成");
-    let prefers_current_session = q_trim.contains("刚才") || q_trim.contains("刚刚") || q_trim.contains("这轮");
+    let wants_create_verb =
+        q_trim.contains("新建") || q_trim.contains("创建") || q_trim.contains("生成");
+    let prefers_current_session =
+        q_trim.contains("刚才") || q_trim.contains("刚刚") || q_trim.contains("这轮");
 
     let content_keywords = extract_specific_keywords(q_trim);
 
@@ -1073,8 +1134,10 @@ pub fn recall_mentioned_entities(
 
         // 1. Entity kind / category alignment
         if wants_config {
-            if matches!(ext.as_str(), "toml" | "json" | "yaml" | "yml" | "conf" | "ini" | "cfg")
-                || disp_lc.contains("config")
+            if matches!(
+                ext.as_str(),
+                "toml" | "json" | "yaml" | "yml" | "conf" | "ini" | "cfg"
+            ) || disp_lc.contains("config")
                 || item.display_name.contains("配置")
                 || item.context_snippet.contains("配置")
             {
@@ -1087,7 +1150,16 @@ pub fn recall_mentioned_entities(
             if item.entity_kind == "document_ref"
                 || matches!(
                     ext.as_str(),
-                    "pdf" | "doc" | "docx" | "md" | "markdown" | "txt" | "odt" | "ppt" | "pptx" | "rtf"
+                    "pdf"
+                        | "doc"
+                        | "docx"
+                        | "md"
+                        | "markdown"
+                        | "txt"
+                        | "odt"
+                        | "ppt"
+                        | "pptx"
+                        | "rtf"
                 )
             {
                 score += 55.0;
@@ -1320,8 +1392,27 @@ fn extract_specific_keywords(query: &str) -> Vec<String> {
             c.is_whitespace()
                 || matches!(
                     c,
-                    '，' | ',' | '。' | '？' | '?' | '！' | '!' | '：' | ':' | '；' | ';' | '《'
-                        | '》' | '「' | '」' | '"' | '\'' | '(' | ')' | '（' | '）' | '@'
+                    '，' | ','
+                        | '。'
+                        | '？'
+                        | '?'
+                        | '！'
+                        | '!'
+                        | '：'
+                        | ':'
+                        | '；'
+                        | ';'
+                        | '《'
+                        | '》'
+                        | '「'
+                        | '」'
+                        | '"'
+                        | '\''
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | '@'
                 )
         })
         .map(str::trim)

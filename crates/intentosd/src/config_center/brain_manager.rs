@@ -455,10 +455,18 @@ pub fn update_model_profiles(
         };
     }
     if let Some(lim_obj) = payload.get("runtime_limits").and_then(|v| v.as_object()) {
-        apply_runtime_limits_patch(&mut cfg.brain.runtime_limits, &mut cfg.brain.routing, lim_obj);
+        apply_runtime_limits_patch(
+            &mut cfg.brain.runtime_limits,
+            &mut cfg.brain.routing,
+            lim_obj,
+        );
     }
     if let Some(rout_obj) = payload.get("routing").and_then(|v| v.as_object()) {
-        apply_routing_patch(&mut cfg.brain.routing, &mut cfg.brain.runtime_limits, rout_obj);
+        apply_routing_patch(
+            &mut cfg.brain.routing,
+            &mut cfg.brain.runtime_limits,
+            rout_obj,
+        );
     }
 
     cfg.enforce_invariants();

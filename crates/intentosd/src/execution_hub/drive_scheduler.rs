@@ -251,9 +251,8 @@ pub fn upsert_drive_trigger(core: &IntentOsCore, payload: &Value) -> anyhow::Res
     }
 
     let rule_val = payload.get("rule").unwrap_or(payload);
-    let mut rule: DriveTriggerRule = serde_json::from_value(rule_val.clone()).map_err(|e| {
-        anyhow::anyhow!("触发规则格式不合法: {}", e)
-    })?;
+    let mut rule: DriveTriggerRule = serde_json::from_value(rule_val.clone())
+        .map_err(|e| anyhow::anyhow!("触发规则格式不合法: {}", e))?;
 
     if rule.rule_id.trim().is_empty() {
         rule.rule_id = format!("trig_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
@@ -546,17 +545,48 @@ fn score_file_for_binary_prompt(path_str: &str, prompt: &str, gateway_prob: f64)
         .to_ascii_lowercase();
     let prompt_lower = prompt.to_ascii_lowercase();
 
-    if prompt_lower.contains("论文") || prompt_lower.contains("paper") || prompt_lower.contains("academic") {
+    if prompt_lower.contains("论文")
+        || prompt_lower.contains("paper")
+        || prompt_lower.contains("academic")
+    {
         let negative_markers = [
-            "invoice", "receipt", "bill", "statement", "menu", "ticket", "发票", "账单", "收据", "合同",
+            "invoice",
+            "receipt",
+            "bill",
+            "statement",
+            "menu",
+            "ticket",
+            "发票",
+            "账单",
+            "收据",
+            "合同",
         ];
         if negative_markers.iter().any(|m| file_name.contains(m)) {
             return 0.12;
         }
         let positive_markers = [
-            "paper", "arxiv", "ieee", "acm", "neurips", "icml", "iclr", "cvpr", "acl", "thesis",
-            "survey", "llm", "agent", "neural", "transformer", "attention", "study", "journal",
-            "论文", "综述", "研究", "学报",
+            "paper",
+            "arxiv",
+            "ieee",
+            "acm",
+            "neurips",
+            "icml",
+            "iclr",
+            "cvpr",
+            "acl",
+            "thesis",
+            "survey",
+            "llm",
+            "agent",
+            "neural",
+            "transformer",
+            "attention",
+            "study",
+            "journal",
+            "论文",
+            "综述",
+            "研究",
+            "学报",
         ];
         if positive_markers.iter().any(|m| file_name.contains(m))
             || file_name.chars().filter(|c| c.is_ascii_digit()).count() >= 4

@@ -73,7 +73,10 @@ async fn handle_ui_connection(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             if exe_name == "intentos-agent" || exe_path.to_string_lossy().contains("pi-adapter") {
-                tracing::error!(?exe_path, "blocked Agent Worker from connecting to private ui.sock!");
+                tracing::error!(
+                    ?exe_path,
+                    "blocked Agent Worker from connecting to private ui.sock!"
+                );
                 return Ok(());
             }
         }
