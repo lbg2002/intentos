@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod security_guard;
 pub mod settings;
 pub mod speech_hub;
+pub mod terminal_agent;
 pub mod web_shell;
 pub mod web_ui;
 pub mod world_state;

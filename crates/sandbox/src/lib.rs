@@ -679,6 +679,478 @@ fn find_in_path(bin_name: &str) -> Option<String> {
     None
 }
 
+/// Dynamic-linker and runtime code-injection environment keys stripped for controlled terminal calls (`M2-C`).
+pub const DANGEROUS_RUNTIME_INJECTION_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_CONFIG_FILE",
+    "BASH_ENV",
+    "ENV",
+    "PROMPT_COMMAND",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "CDPATH",
+    "IFS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "NODE_OPTIONS",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+];
+
+/// Returns `true` if `key` is either a sensitive host credential variable or a dynamic-linker /
+/// interpreter injection variable that must never be passed into controlled terminal execution.
+pub fn is_unsafe_terminal_env_key(key: &str) -> bool {
+    if is_sensitive_host_env_key(key) {
+        return true;
+    }
+    let upper = key.trim().to_ascii_uppercase();
+    DANGEROUS_RUNTIME_INJECTION_ENV_KEYS.contains(&upper.as_str()) || upper.starts_with("LD_")
+}
+
+/// Return a sanitized copy of `env_vars` with all sensitive host credentials and linker/interpreter
+/// injection variables stripped.
+pub fn sanitize_terminal_env_map(env_vars: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    env_vars
+        .iter()
+        .filter(|(k, _)| !is_unsafe_terminal_env_key(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Scoped OS sandbox specification for `M2-C` Controlled General Terminal (`C0`–`C3`).
+#[derive(Debug, Clone)]
+pub struct TerminalSandboxSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// Mount `/` read-only (`--ro-bind / /`) while masking `$HOME`, `/tmp`, `/var/tmp`, `/root`,
+    /// `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/run/user/<uid>`, and `masked_paths`, then
+    /// selectively re-exposing only `readonly_paths` (`--ro-bind`) and `readwrite_paths` (`--bind`).
+    pub ro_bind_root: bool,
+    pub readonly_paths: Vec<PathBuf>,
+    pub readwrite_paths: Vec<PathBuf>,
+    pub masked_paths: Vec<PathBuf>,
+    pub env_vars: BTreeMap<String, String>,
+    pub work_dir: PathBuf,
+    pub allow_tcp_network: bool,
+}
+
+/// Output of a bounded, process-group-managed sandboxed terminal command (`M2-C`).
+#[derive(Debug, Clone)]
+pub struct SandboxedExecOutput {
+    pub driver: SandboxDriver,
+    pub exit_code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub truncated: bool,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+}
+
+fn append_bwrap_intentos_and_credential_masks(cmd: &mut Command, bound_dir: &Path) {
+    append_bwrap_credential_masks(cmd, bound_dir);
+    if !bound_dir.is_dir() {
+        return;
+    }
+    for rel in [
+        ".config/intentos",
+        ".local/share/intentos",
+        ".local/state/intentos",
+    ] {
+        let candidate = bound_dir.join(rel);
+        if candidate.is_dir() {
+            cmd.arg("--tmpfs").arg(&candidate);
+        } else if candidate.is_file() && Path::new("/dev/null").exists() {
+            cmd.arg("--ro-bind").arg("/dev/null").arg(&candidate);
+        }
+    }
+}
+
+fn path_depth(p: &Path) -> usize {
+    p.components().count()
+}
+
+/// Build an isolated `tokio::process::Command` for `M2-C` controlled terminal execution,
+/// placing the child in a dedicated process group (`setpgid(0, 0)`) for tree-wide signal cleanup.
+pub fn build_terminal_sandbox_command(
+    spec: &TerminalSandboxSpec,
+    probe: &SandboxProbe,
+) -> Result<(Command, SandboxDriver), SandboxError> {
+    let mut clean_env = sanitize_terminal_env_map(&spec.env_vars);
+    clean_env
+        .entry("PATH".to_string())
+        .or_insert_with(|| "/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin".to_string());
+    clean_env
+        .entry("LANG".to_string())
+        .or_insert_with(|| "C.UTF-8".to_string());
+    clean_env
+        .entry("LC_ALL".to_string())
+        .or_insert_with(|| "C.UTF-8".to_string());
+
+    let mut ro_sorted: Vec<PathBuf> = spec
+        .readonly_paths
+        .iter()
+        .filter(|p| p.exists() && !is_forbidden_credential_path(p))
+        .cloned()
+        .collect();
+    ro_sorted.sort_by_key(|p| path_depth(p));
+    ro_sorted.dedup();
+
+    let mut rw_sorted: Vec<PathBuf> = spec
+        .readwrite_paths
+        .iter()
+        .filter(|p| p.exists() && !is_forbidden_credential_path(p))
+        .cloned()
+        .collect();
+    rw_sorted.sort_by_key(|p| path_depth(p));
+    rw_sorted.dedup();
+
+    if probe.selected_driver == SandboxDriver::Bubblewrap
+        && probe.bwrap_userns_ok
+        && let Some(ref bwrap) = probe.bwrap_path
+    {
+        let mut cmd = Command::new(bwrap);
+        cmd.env_clear();
+        cmd.kill_on_drop(true);
+        cmd.arg("--unshare-user")
+            .arg("--unshare-pid")
+            .arg("--unshare-uts")
+            .arg("--unshare-ipc")
+            .arg("--die-with-parent")
+            .arg("--new-session")
+            .arg("--clearenv");
+
+        if !spec.allow_tcp_network {
+            cmd.arg("--unshare-net");
+        }
+
+        let host_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_absolute() && h != Path::new("/") && h.is_dir());
+        // SAFETY: `getuid()` is thread-safe and side-effect-free.
+        let uid = unsafe { libc::getuid() };
+        let run_user_dir = PathBuf::from(format!("/run/user/{}", uid));
+
+        let mut masked_roots = vec![PathBuf::from("/tmp")];
+
+        if spec.ro_bind_root {
+            cmd.arg("--ro-bind")
+                .arg("/")
+                .arg("/")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--tmpfs")
+                .arg("/tmp");
+
+            if Path::new("/var/tmp").is_dir() {
+                cmd.arg("--tmpfs").arg("/var/tmp");
+                masked_roots.push(PathBuf::from("/var/tmp"));
+            }
+            if Path::new("/root").is_dir() {
+                cmd.arg("--tmpfs").arg("/root");
+                masked_roots.push(PathBuf::from("/root"));
+            }
+            if run_user_dir.is_dir() {
+                cmd.arg("--tmpfs").arg(&run_user_dir);
+                masked_roots.push(run_user_dir.clone());
+            }
+            if let Some(ref home_dir) = host_home {
+                cmd.arg("--tmpfs").arg(home_dir);
+                masked_roots.push(home_dir.clone());
+            }
+            if Path::new("/dev/null").exists() {
+                for sys_secret in ["/etc/shadow", "/etc/gshadow", "/etc/sudoers"] {
+                    if Path::new(sys_secret).exists() {
+                        cmd.arg("--ro-bind").arg("/dev/null").arg(sys_secret);
+                    }
+                }
+            }
+        } else {
+            cmd.arg("--proc")
+                .arg("/proc")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--tmpfs")
+                .arg("/tmp");
+
+            for sys_ro in [
+                "/usr",
+                "/bin",
+                "/sbin",
+                "/lib",
+                "/lib64",
+                "/sys",
+                "/etc/passwd",
+                "/etc/group",
+                "/etc/alternatives",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.conf",
+                "/etc/ld.so.conf.d",
+                "/etc/localtime",
+                "/etc/ssl/certs",
+                "/etc/ssl/openssl.cnf",
+                "/etc/ca-certificates",
+                "/etc/pki",
+            ] {
+                if Path::new(sys_ro).exists() {
+                    cmd.arg("--ro-bind").arg(sys_ro).arg(sys_ro);
+                }
+            }
+            if spec.allow_tcp_network {
+                for net_ro in ["/etc/hosts", "/etc/nsswitch.conf"] {
+                    if Path::new(net_ro).exists() {
+                        cmd.arg("--ro-bind").arg(net_ro).arg(net_ro);
+                    }
+                }
+                let resolv = Path::new("/etc/resolv.conf");
+                if let Ok(canon_resolv) = std::fs::canonicalize(resolv)
+                    && canon_resolv.exists()
+                {
+                    cmd.arg("--ro-bind").arg(canon_resolv).arg(resolv);
+                } else if resolv.exists() {
+                    cmd.arg("--ro-bind").arg(resolv).arg(resolv);
+                }
+            }
+        }
+
+        for ro in &ro_sorted {
+            cmd.arg("--ro-bind").arg(ro).arg(ro);
+            append_bwrap_intentos_and_credential_masks(&mut cmd, ro);
+        }
+        for rw in &rw_sorted {
+            cmd.arg("--bind").arg(rw).arg(rw);
+            append_bwrap_intentos_and_credential_masks(&mut cmd, rw);
+        }
+
+        for mp in &spec.masked_paths {
+            let hidden_by_unmounted_mask = masked_roots.iter().any(|mr| mp.starts_with(mr))
+                && !ro_sorted.iter().any(|b| mp.starts_with(b))
+                && !rw_sorted.iter().any(|b| mp.starts_with(b));
+            if hidden_by_unmounted_mask {
+                continue;
+            }
+            if mp.is_dir() {
+                cmd.arg("--tmpfs").arg(mp);
+            } else if mp.exists() && Path::new("/dev/null").exists() {
+                cmd.arg("--ro-bind").arg("/dev/null").arg(mp);
+            }
+        }
+
+        // Dedicated ephemeral scratch directory for tools needing TMPDIR, while locking `/tmp` & `$HOME` read-only!
+        let scratch_tmp = "/tmp/.intentos_scratch";
+        cmd.arg("--tmpfs").arg(scratch_tmp);
+        clean_env.insert("TMPDIR".to_string(), scratch_tmp.to_string());
+
+        if !rw_sorted.iter().any(|p| p == Path::new("/tmp")) {
+            cmd.arg("--remount-ro").arg("/tmp");
+        }
+        if spec.ro_bind_root
+            && Path::new("/var/tmp").is_dir()
+            && !rw_sorted.iter().any(|p| p == Path::new("/var/tmp"))
+        {
+            cmd.arg("--remount-ro").arg("/var/tmp");
+        }
+        if spec.ro_bind_root
+            && let Some(ref home_dir) = host_home
+            && !rw_sorted.iter().any(|p| p == home_dir)
+        {
+            cmd.arg("--remount-ro").arg(home_dir);
+        }
+
+        let effective_chdir = {
+            let hidden_in_mask = masked_roots.iter().any(|mr| spec.work_dir.starts_with(mr))
+                && !ro_sorted.iter().any(|b| spec.work_dir.starts_with(b))
+                && !rw_sorted.iter().any(|b| spec.work_dir.starts_with(b));
+            if !spec.work_dir.is_dir() || hidden_in_mask {
+                PathBuf::from("/")
+            } else {
+                spec.work_dir.clone()
+            }
+        };
+
+        for (k, v) in &clean_env {
+            cmd.arg("--setenv").arg(k).arg(v);
+        }
+        cmd.arg("--chdir").arg(&effective_chdir);
+        cmd.arg("--").arg(&spec.program).args(&spec.args);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // SAFETY: `setpgid(0, 0)` is async-signal-safe and isolates `bwrap` in its own process group.
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
+        return Ok((cmd, SandboxDriver::Bubblewrap));
+    }
+
+    // Fallback to Landlock + PR_SET_NO_NEW_PRIVS + process-group isolation
+    let legacy_spec = SandboxSpec {
+        program: spec.program.clone(),
+        args: spec.args.clone(),
+        readonly_paths: ro_sorted,
+        readwrite_paths: rw_sorted,
+        env_vars: clean_env,
+        work_dir: if spec.work_dir.is_dir() {
+            spec.work_dir.clone()
+        } else {
+            PathBuf::from("/")
+        },
+        allow_tcp_network: spec.allow_tcp_network,
+    };
+    let (mut cmd, driver) = build_sandboxed_command_with_mounts(&legacy_spec, &[], probe)?;
+    cmd.stdin(Stdio::null());
+    Ok((cmd, driver))
+}
+
+struct ProcessGroupKillGuard {
+    pgid: Option<i32>,
+}
+
+impl ProcessGroupKillGuard {
+    fn new(child_pid: Option<u32>) -> Self {
+        let pgid = child_pid.and_then(|pid| {
+            let p = pid as i32;
+            // SAFETY: `getpid()` and `getpgrp()` are side-effect-free queries.
+            let self_pid = unsafe { libc::getpid() };
+            let self_pgrp = unsafe { libc::getpgrp() };
+            if pid > 1 && p != self_pid && p != self_pgrp {
+                Some(p)
+            } else {
+                None
+            }
+        });
+        Self { pgid }
+    }
+
+    fn kill_group_now(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            // SAFETY: `pgid` was verified `> 1` and distinct from our own PID/PGRP.
+            unsafe {
+                let _ = libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        self.kill_group_now();
+    }
+}
+
+/// Spawn and await a sandboxed terminal command with strict wall-clock `timeout`, `max_output_bytes`
+/// stdout/stderr truncation cap, and guaranteed process-group (`SIGKILL`) cleanup on timeout or drop.
+pub async fn execute_terminal_sandbox_bounded(
+    spec: &TerminalSandboxSpec,
+    timeout: std::time::Duration,
+    max_output_bytes: usize,
+    probe: &SandboxProbe,
+) -> Result<SandboxedExecOutput, SandboxError> {
+    use tokio::io::AsyncReadExt;
+
+    let (mut cmd, driver) = build_terminal_sandbox_command(spec, probe)?;
+    let start = std::time::Instant::now();
+    let mut child = cmd.spawn()?;
+    let mut pg_guard = ProcessGroupKillGuard::new(child.id());
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let cap_limit = (max_output_bytes.saturating_add(1)) as u64;
+
+    let read_and_wait = async {
+        let out_fut = async move {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stdout_pipe {
+                let mut limited = pipe.take(cap_limit);
+                let _ = limited.read_to_end(&mut buf).await;
+                // Dropping `limited` closes the pipe read-end if output exceeded `max_output_bytes`,
+                // delivering SIGPIPE/EPIPE to runaway producers rather than buffering unbounded memory.
+            }
+            buf
+        };
+        let err_fut = async move {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stderr_pipe {
+                let mut limited = pipe.take(cap_limit);
+                let _ = limited.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let (out_buf, err_buf) = tokio::join!(out_fut, err_fut);
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, out_buf, err_buf))
+    };
+
+    match tokio::time::timeout(timeout, read_and_wait).await {
+        Ok(Ok((status, mut out_buf, mut err_buf))) => {
+            pg_guard.disarm();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let mut truncated = false;
+            if out_buf.len() > max_output_bytes {
+                out_buf.truncate(max_output_bytes);
+                truncated = true;
+            }
+            if err_buf.len() > max_output_bytes {
+                err_buf.truncate(max_output_bytes);
+                truncated = true;
+            }
+            Ok(SandboxedExecOutput {
+                driver,
+                exit_code: status.code(),
+                stdout: out_buf,
+                stderr: err_buf,
+                truncated,
+                timed_out: false,
+                duration_ms,
+            })
+        }
+        Ok(Err(io_err)) => {
+            pg_guard.kill_group_now();
+            let _ = child.kill().await;
+            Err(SandboxError::Io(io_err))
+        }
+        Err(_) => {
+            pg_guard.kill_group_now();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            Ok(SandboxedExecOutput {
+                driver,
+                exit_code: None,
+                stdout: Vec::new(),
+                stderr: format!(
+                    "command timed out after {} ms and process group was terminated",
+                    timeout.as_millis()
+                )
+                .into_bytes(),
+                truncated: false,
+                timed_out: true,
+                duration_ms,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,5 +1360,75 @@ print("DONE_OK")
         } else {
             let _ = std::fs::remove_file(&host_tmp_probe);
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_sandbox_bounded_enforces_timeout_killpg_and_output_cap() {
+        let probe = probe_sandbox_support();
+        if !probe.has_os_isolation() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("LD_PRELOAD".to_string(), "/tmp/evil_preload.so".to_string());
+        env.insert("SAFE_FLAG".to_string(), "ok".to_string());
+
+        let sanitized = sanitize_terminal_env_map(&env);
+        assert!(!sanitized.contains_key("LD_PRELOAD"));
+        assert_eq!(sanitized.get("SAFE_FLAG").map(String::as_str), Some("ok"));
+
+        // 1) Output cap truncation
+        let spec_cap = TerminalSandboxSpec {
+            program: PathBuf::from("/usr/bin/python3"),
+            args: vec![
+                "-c".to_string(),
+                "import sys; sys.stdout.write('A' * 90000); sys.stdout.flush()".to_string(),
+            ],
+            ro_bind_root: true,
+            readonly_paths: vec![tmp.path().to_path_buf()],
+            readwrite_paths: vec![],
+            masked_paths: vec![],
+            env_vars: env.clone(),
+            work_dir: tmp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let out_cap = execute_terminal_sandbox_bounded(
+            &spec_cap,
+            std::time::Duration::from_secs(5),
+            65536,
+            &probe,
+        )
+        .await
+        .unwrap();
+        assert!(!out_cap.timed_out);
+        assert!(out_cap.truncated);
+        assert_eq!(out_cap.stdout.len(), 65536);
+
+        // 2) Timeout + grandchild process-group cleanup
+        let spec_hang = TerminalSandboxSpec {
+            program: PathBuf::from("/usr/bin/python3"),
+            args: vec![
+                "-c".to_string(),
+                "import subprocess, time; p = subprocess.Popen(['/bin/sleep', '30']); time.sleep(30)"
+                    .to_string(),
+            ],
+            ro_bind_root: true,
+            readonly_paths: vec![tmp.path().to_path_buf()],
+            readwrite_paths: vec![],
+            masked_paths: vec![],
+            env_vars: BTreeMap::new(),
+            work_dir: tmp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let out_hang = execute_terminal_sandbox_bounded(
+            &spec_hang,
+            std::time::Duration::from_millis(400),
+            65536,
+            &probe,
+        )
+        .await
+        .unwrap();
+        assert!(out_hang.timed_out);
+        assert!(out_hang.exit_code.is_none());
     }
 }

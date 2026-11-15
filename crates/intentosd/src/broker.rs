@@ -201,6 +201,16 @@ impl CapabilityBroker {
             });
         }
 
+        // M2-C Controlled General Terminal (`terminal.execute`): multi-factor C0–C4 local risk classifier & OS sandbox
+        if desc.id == crate::terminal_agent::TERMINAL_EXECUTE_CAPABILITY_ID {
+            let Some(core) = self.core() else {
+                return Ok(BrokerDispatchOutcome::Denied {
+                    reason: "terminal.execute 尚未完成 Core 绑定".into(),
+                });
+            };
+            return crate::terminal_agent::dispatch_terminal_capability(&core, call).await;
+        }
+
         // 2. Check backup quota availability if overwriting a file (§9.2)
         let quota_ok = self.check_backup_quota_for_call(&desc.id, &call.arguments);
 
@@ -3323,6 +3333,15 @@ impl CapabilityBroker {
                         "simulated_headless".into()
                     },
                 })
+            }
+            "terminal.execute" => {
+                let core = self
+                    .core()
+                    .ok_or_else(|| anyhow::anyhow!("terminal.execute 尚未完成 Core 绑定"))?;
+                crate::terminal_agent::execute_approved_terminal_call(
+                    &core, request_id, task_id, args,
+                )
+                .await
             }
             other => anyhow::bail!("未实现的内置 handler: {}", other),
         }

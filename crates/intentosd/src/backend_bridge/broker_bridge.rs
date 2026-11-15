@@ -441,7 +441,7 @@ pub fn derive_tool_idempotency_policy(
     canonical_tool: &str,
     parsed_args: &Value,
 ) -> ToolIdempotencyPolicy {
-    let effect = resolve_capability_effect(core, canonical_tool);
+    let effect = resolve_capability_effect_with_args(core, canonical_tool, parsed_args);
     classify_capability_idempotency(canonical_tool, effect, parsed_args)
 }
 
@@ -468,8 +468,26 @@ pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> 
 }
 
 pub fn resolve_capability_effect(core: &IntentOsCore, canonical_tool: &str) -> Effect {
+    resolve_capability_effect_with_args(core, canonical_tool, &json!({}))
+}
+
+pub fn resolve_capability_effect_with_args(
+    core: &IntentOsCore,
+    canonical_tool: &str,
+    args: &Value,
+) -> Effect {
     if crate::meta_tools::is_meta_tool(canonical_tool) {
         return Effect::Observe;
+    }
+    if canonical_tool == crate::terminal_agent::TERMINAL_EXECUTE_CAPABILITY_ID
+        || canonical_tool == "terminal_execute"
+    {
+        if let Ok(prop) =
+            crate::terminal_agent::CommandProposal::from_capability_args(args, Some(core))
+        {
+            return crate::terminal_agent::classify_command_proposal(core, &prop).effective_effect;
+        }
+        return Effect::ExecSandboxed;
     }
     if crate::security_guard::is_memory_write_tool(canonical_tool) {
         return Effect::Setting;
@@ -797,7 +815,7 @@ pub async fn dispatch_broker_call_transactional(
         }
     };
     let canonical_args = canonicalize_json_for_dedup(&trusted_args);
-    let effect = resolve_capability_effect(core, &canonical_tool);
+    let effect = resolve_capability_effect_with_args(core, &canonical_tool, &trusted_args);
     let policy = classify_capability_idempotency(&canonical_tool, effect, &trusted_args);
     let mut trusted_call = call.clone();
     trusted_call.capability_id = canonical_tool.clone();
@@ -1487,7 +1505,7 @@ where
     };
     let sanitized_input_args = effective_args.clone();
     let canonical_args = canonicalize_json_for_dedup(&sanitized_input_args);
-    let effect = resolve_capability_effect(core, &canonical_tool);
+    let effect = resolve_capability_effect_with_args(core, &canonical_tool, &sanitized_input_args);
     let policy = classify_capability_idempotency(&canonical_tool, effect, &sanitized_input_args);
     let attempt_id = if step_ctx.attempt_id.trim().is_empty() {
         "attempt_1".to_string()
@@ -2329,7 +2347,7 @@ pub fn record_approved_step_into_ledger(
         .unwrap_or_else(|| effect_ledger.next_step_id());
     let sanitized_args = strip_untrusted_step_meta_fields(paused_args_val);
     let canonical_args = canonicalize_json_for_dedup(&sanitized_args);
-    let effect = resolve_capability_effect(core, &step.capability_id);
+    let effect = resolve_capability_effect_with_args(core, &step.capability_id, &sanitized_args);
     let policy = classify_capability_idempotency(&step.capability_id, effect, &sanitized_args);
     // Always advance `state_epoch` on user approval (new scope/grant or state mutation)!
     let pre_epoch = effect_ledger.state_epoch();

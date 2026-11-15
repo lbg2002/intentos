@@ -1,0 +1,58 @@
+id: terminal.execute
+version: 1
+summary: 在受控 OS 沙箱（bwrap/Landlock）内按 C0–C4 多因子风险分级执行结构化 CommandProposal（仅限 argv 参数数组，严禁 Shell 拼接）
+category: devtools
+aliases: ["受控终端执行", "沙箱命令执行", "controlled terminal", "command proposal"]
+l0_patterns: []
+input_schema:
+  type: object
+  required: [program]
+  properties:
+    program:
+      type: string
+      maxLength: 512
+    argv:
+      type: array
+      maxItems: 64
+      items:
+        type: string
+    cwd:
+      type: string
+      maxLength: 1024
+    purpose:
+      type: string
+      maxLength: 1024
+    expected_effect:
+      type: string
+      enum:
+        - observe
+        - ui
+        - setting
+        - exec.sandboxed
+        - write.reversible
+        - egress
+        - process.control
+        - write.destructive
+        - external.commit
+        - system.admin
+    required_paths:
+      type: array
+      maxItems: 32
+      items:
+        type: string
+    network_access:
+      type: boolean
+    timeout_seconds:
+      type: integer
+      minimum: 0
+      maximum: 3600
+effects: [exec.sandboxed]
+idempotent: false
+execution:
+  type: builtin
+  handler: terminal.execute
+undo: changeset
+verification:
+  kind: structured_output
+dependencies: [bwrap]
+feedback: "已完成受控终端命令沙箱执行与校验"
