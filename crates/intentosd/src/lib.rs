@@ -3,6 +3,7 @@
 pub mod app_adapter;
 pub mod backend_bridge;
 pub mod broker;
+pub mod capability_snapshot;
 pub mod config;
 pub mod config_center;
 pub mod core;

@@ -17,7 +17,7 @@ use crate::backend_bridge::broker_bridge::{
     prepare_turn_context_blocks, synthesize_rich_approved_step_markdown,
 };
 use crate::backend_bridge::detector::{
-    ActiveBackendSelection, BackendsCatalog, DiscoveryOptions, discover_backends_catalog,
+    ActiveBackendSelection, BackendsCatalog, DiscoveryOptions, discover_backends_catalog_fast,
     is_anthropic_endpoint, lookup_ephemeral_backend_key,
 };
 use crate::backend_bridge::turn_checkpoint::{
@@ -1151,7 +1151,7 @@ pub async fn continue_resumed_openai_turn(
         }
     }
 
-    let catalog = discover_backends_catalog(core, eff_opts).await;
+    let catalog = discover_backends_catalog_fast(core, eff_opts).await;
     let maybe_transport = resolve_upstream_transport(
         core,
         eff_opts,

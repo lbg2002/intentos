@@ -735,9 +735,17 @@ impl IntentOsCore {
             return Ok(task);
         }
 
+        let stage0_speech = crate::intent_engine::parse_structured_intent(&resolved_text, &[]);
+        let is_procedural_question = stage0_speech.speech_act
+            == crate::intent_engine::goal_schema::SpeechActModality::ProceduralOrExplanatory;
+
         let routed = if is_aios_memory_or_adapter_query || is_doc_chapter_query {
             RoutedIntent::EscalateL2 {
                 reason: "AIOS 个人记忆、文档章节大纲定位或软件指令转译查询升级至 L2 智能体".into(),
+            }
+        } else if is_procedural_question {
+            RoutedIntent::EscalateL2 {
+                reason: stage0_speech.escalation_summary(),
             }
         } else if privacy.allows_memory_read() {
             self.router
@@ -1020,7 +1028,8 @@ impl IntentOsCore {
                 Ok(task)
             }
             RoutedIntent::EscalateL2 { .. } => {
-                // Stage 2 (`v0.1`): Run L1 Typed Decision Adapter before escalating to L2 unless `effective_force_agent` or AIOS memory/chapter/adapter query!
+                let mut progressive_goal: Option<crate::intent_engine::StructuredIntent> = None;
+                // Stage 2 (`v0.1` + `H08` + `H09`): Run Progressive L1 Typed Decision Adapter before escalating to L2 unless `effective_force_agent` or AIOS memory/chapter/adapter query!
                 if !effective_force_agent
                     && !is_aios_memory_or_adapter_query
                     && !is_doc_chapter_query
@@ -1040,11 +1049,29 @@ impl IntentOsCore {
                             extra_taint,
                         }
                     } else if privacy.allows_memory_write() {
-                        self.decision
-                            .classify_colloquial_intent(&resolved_text, &descriptors)
+                        let (out, prog) = self
+                            .decision
+                            .classify_colloquial_intent_progressive(
+                                &resolved_text,
+                                &descriptors,
+                                req.cwd.as_deref(),
+                            )
+                            .await;
+                        progressive_goal = Some(prog);
+                        out
                     } else {
-                        DecisionAdapter::new(self.gateway.clone(), self.ephemeral_state_db.clone())
-                            .classify_colloquial_intent(&resolved_text, &descriptors)
+                        let (out, prog) = DecisionAdapter::new(
+                            self.gateway.clone(),
+                            self.ephemeral_state_db.clone(),
+                        )
+                        .classify_colloquial_intent_progressive(
+                            &resolved_text,
+                            &descriptors,
+                            req.cwd.as_deref(),
+                        )
+                        .await;
+                        progressive_goal = Some(prog);
+                        out
                     };
                     match l1_outcome {
                         L1DecisionOutcome::Execute {
@@ -1058,14 +1085,18 @@ impl IntentOsCore {
                             {
                                 taints.push(et);
                             }
+                            let prereq_obs = progressive_goal
+                                .as_ref()
+                                .and_then(|g| g.prerequisite_observe_capability.as_deref());
                             return self
-                                .execute_single_capability_task(
+                                .execute_single_capability_task_with_observe(
                                     task_id,
                                     &session.session_id,
                                     &resolved_text,
                                     RouteLayer::L1,
                                     &capability_id,
                                     arguments,
+                                    prereq_obs,
                                     InvocationOrigin::L1Inferred,
                                     taints,
                                     data_class,
@@ -1128,10 +1159,9 @@ impl IntentOsCore {
                             if !taints.contains(&Taint::LocalUntrusted)
                                 && !taints.contains(&Taint::RemoteUntrusted)
                             {
-                                let compiler =
-                                    crate::intent_engine::PatternCompiler::compile_from_descriptors(
-                                        &descriptors,
-                                    );
+                                let cap_snap =
+                                    crate::capability_snapshot::capability_snapshot_for_core(self);
+                                let compiler = cap_snap.pattern_compiler.clone();
                                 let compound = crate::intent_engine::split_compound_intent(
                                     self,
                                     &resolved_text,
@@ -1426,6 +1456,46 @@ impl IntentOsCore {
                     }
                 }
 
+                let structured_for_l2 = match progressive_goal {
+                    Some(g) => g,
+                    None => {
+                        let cap_snap =
+                            crate::capability_snapshot::capability_snapshot_for_core(self);
+                        let cal_db = if privacy.allows_memory_read() {
+                            Some(self.state_db.as_ref())
+                        } else {
+                            None
+                        };
+                        crate::intent_engine::resolve_progressive_intent(
+                            &self.gateway,
+                            cal_db,
+                            &resolved_text,
+                            req.cwd.as_deref(),
+                            cap_snap.descriptors_slice(),
+                        )
+                        .await
+                    }
+                };
+                if (matches!(
+                    structured_for_l2.intent_type,
+                    crate::intent_engine::CognitiveIntentKind::GoalWorkspace
+                        | crate::intent_engine::CognitiveIntentKind::SystemDiagnosis
+                        | crate::intent_engine::CognitiveIntentKind::CompoundTask
+                        | crate::intent_engine::CognitiveIntentKind::ProceduralOrKnowledge
+                ) || structured_for_l2.requires_context_resolution)
+                    && !injected_context
+                        .iter()
+                        .any(|b| b.label == "cognitive_goal_analysis")
+                {
+                    injected_context.push(ContextBlock {
+                        id: "cognitive_goal_hint".into(),
+                        label: "cognitive_goal_analysis".into(),
+                        content: structured_for_l2.to_agent_prompt_hint(),
+                        taint: Taint::System,
+                        data_class: DataClass::Public,
+                    });
+                }
+
                 // Automatically inject Personal OS Memory RAG context before L2 LLM inference (when privacy policy permits)
                 if privacy.allows_memory_read()
                     && self.gateway.has_usable_credentials()
@@ -1629,17 +1699,38 @@ impl IntentOsCore {
         data_class: DataClass,
         incognito: bool,
     ) -> anyhow::Result<Task> {
-        let now = Utc::now();
-        let call_id = format!("step_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let call = CapabilityCall {
-            request_id: call_id.clone(),
-            task_id: task_id.clone(),
-            capability_id: capability_id.to_string(),
-            arguments: arguments.clone(),
+        self.execute_single_capability_task_with_observe(
+            task_id,
+            session_id,
+            goal,
+            route,
+            capability_id,
+            arguments,
+            None,
             origin,
-            taints: taints.clone(),
-        };
+            taints,
+            data_class,
+            incognito,
+        )
+        .await
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_single_capability_task_with_observe(
+        &self,
+        task_id: String,
+        session_id: &str,
+        goal: &str,
+        route: RouteLayer,
+        capability_id: &str,
+        mut arguments: Value,
+        prerequisite_observe_capability: Option<&str>,
+        origin: InvocationOrigin,
+        taints: Vec<Taint>,
+        data_class: DataClass,
+        incognito: bool,
+    ) -> anyhow::Result<Task> {
+        let now = Utc::now();
         let task_privacy = if incognito {
             PrivacySessionPolicy::StrictIsolated
         } else {
@@ -1660,7 +1751,7 @@ impl IntentOsCore {
             assistant_message: None,
             result_summary: None,
             handoff_command: None,
-            taint: taints,
+            taint: taints.clone(),
             data_class,
             budget: TaskBudget::default(),
             created_at: now,
@@ -1679,6 +1770,88 @@ impl IntentOsCore {
             session_id.to_string(),
             task_privacy,
         );
+
+        let mut observed_summary: Option<String> = None;
+        if let Some(obs_cap) = prerequisite_observe_capability
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != capability_id)
+            && self
+                .broker
+                .get_descriptor(obs_cap)
+                .is_some_and(|d| d.max_effect() == intentos_protocol::Effect::Observe)
+        {
+            let obs_call_id = format!(
+                "step_obs_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let obs_call = CapabilityCall {
+                request_id: obs_call_id.clone(),
+                task_id: task_id.clone(),
+                capability_id: obs_cap.to_string(),
+                arguments: json!({}),
+                origin,
+                taints: taints.clone(),
+            };
+            if let Ok(BrokerDispatchOutcome::Executed(obs_res)) =
+                crate::backend_bridge::broker_bridge::dispatch_broker_call_transactional(
+                    self,
+                    session_id,
+                    task_privacy,
+                    crate::backend_bridge::turn_checkpoint::StepInvocationContext::new_call(
+                        &obs_call_id,
+                    ),
+                    &obs_call,
+                    &mut step_ledger,
+                )
+                .await
+            {
+                let observed_val = obs_res
+                    .data
+                    .get("value")
+                    .or_else(|| obs_res.data.get("current"))
+                    .or_else(|| obs_res.data.get("after"))
+                    .and_then(|v| v.as_f64());
+                if let Some(curr) = observed_val
+                    && arguments.get("value").is_none()
+                    && let Some(rel) = arguments.get("relative").and_then(|v| v.as_str())
+                {
+                    if rel == "down" && curr >= 80.0 {
+                        let target = (curr * 0.75).round().clamp(10.0, 100.0);
+                        arguments = json!({ "value": target });
+                    } else if rel == "up" && curr <= 25.0 {
+                        let min_floor = if capability_id.starts_with("display.") {
+                            35.0
+                        } else {
+                            45.0
+                        };
+                        let target = (curr + 20.0).max(min_floor).clamp(1.0, 100.0);
+                        arguments = json!({ "value": target });
+                    }
+                }
+                observed_summary = Some(obs_res.message.clone());
+                task.steps.push(TaskStep {
+                    step_id: obs_call_id,
+                    capability_id: obs_cap.to_string(),
+                    arguments_summary: "{}".to_string(),
+                    status: obs_res.status,
+                    verification: obs_res.verification,
+                    changeset_id: obs_res.changeset_id,
+                    message: obs_res.message,
+                    data: obs_res.data,
+                    duration_ms: obs_res.duration_ms,
+                });
+            }
+        }
+
+        let call_id = format!("step_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let call = CapabilityCall {
+            request_id: call_id.clone(),
+            task_id: task_id.clone(),
+            capability_id: capability_id.to_string(),
+            arguments: arguments.clone(),
+            origin,
+            taints,
+        };
 
         let dispatch_outcome =
             match crate::backend_bridge::broker_bridge::dispatch_broker_call_transactional(
@@ -1750,13 +1923,19 @@ impl IntentOsCore {
                 } else {
                     TaskStatus::Failed
                 };
+                let final_msg = match observed_summary {
+                    Some(obs) if !obs.trim().is_empty() => {
+                        format!("（已先读取状态：{}）{}", obs, res.message)
+                    }
+                    _ => res.message.clone(),
+                };
                 UnifiedTaskStateMachine::transition_task(
                     &mut task,
                     final_status,
-                    Some(&res.message),
+                    Some(&final_msg),
                 )?;
-                task.assistant_message = Some(res.message.clone());
-                task.result_summary = Some(res.message.clone());
+                task.assistant_message = Some(final_msg.clone());
+                task.result_summary = Some(final_msg);
                 task.steps.push(TaskStep {
                     step_id: call_id,
                     capability_id: capability_id.to_string(),

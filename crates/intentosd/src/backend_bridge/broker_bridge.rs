@@ -17,18 +17,16 @@ use crate::backend_bridge::turn_checkpoint::{
 use crate::broker::BrokerDispatchOutcome;
 use crate::core::IntentOsCore;
 use crate::db::StepExecutionLogRow;
-use crate::intent_engine::PatternCompiler;
 use crate::intent_engine::cognitive_parser::parse_structured_intent;
 use crate::intent_engine::compound_splitter::split_compound_intent;
 use crate::intent_engine::goal_schema::CognitiveIntentKind;
 use crate::runtime::{SessionState, build_context_blocks};
 use crate::security_guard::PrivacySessionPolicy;
 use chrono::Utc;
-use intentos_capability_sdk::descriptor_to_tool_spec;
 use intentos_protocol::{
     CapabilityCall, CapabilityResult, ContextBlock, DataClass, Effect, ExecutionStatus,
     InvocationOrigin, PendingApproval, RouteLayer, Taint, Task, TaskStatus, TaskStep, TaskTrigger,
-    ToolSpec, VerificationReport, VerificationState,
+    VerificationReport, VerificationState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -442,13 +440,9 @@ pub fn resolve_tool_name_to_capability(tool_name: &str, core: &IntentOsCore) -> 
     if crate::memory_hub::is_memory_tool(trimmed) || crate::app_adapter::is_adapter_tool(trimmed) {
         return trimmed.replace('.', "_");
     }
-    if core.broker.get_descriptor(trimmed).is_some() {
-        return trimmed.to_string();
-    }
-    for d in core.broker.descriptors() {
-        if d.id.replace('.', "_") == trimmed {
-            return d.id.clone();
-        }
+    let snap = crate::capability_snapshot::capability_snapshot_for_core(core);
+    if let Some(canonical) = snap.resolve_canonical_id(trimmed) {
+        return canonical.to_string();
     }
     trimmed.replace('_', ".")
 }
@@ -478,7 +472,8 @@ pub fn build_quick_chat_openai_tools(core: &IntentOsCore, user_text: &str) -> Ve
     build_quick_chat_openai_tools_with_policy(core, user_text, PrivacySessionPolicy::Standard)
 }
 
-/// Build the OpenAI `tools` spec array respecting `PrivacySessionPolicy` (`H05`):
+/// Build the OpenAI `tools` spec array respecting `PrivacySessionPolicy` (`H05` & `H09.1`):
+/// - Uses the shared versioned `CapabilitySnapshotCache` (`< 0.5 ms` warm vs `~23.7 ms` cold).
 /// - `StrictIsolated` (`!allows_memory_read()`) omits `memory_*` tools completely.
 /// - `!allows_memory_write()` omits any memory-mutating tools.
 pub fn build_quick_chat_openai_tools_with_policy(
@@ -486,99 +481,8 @@ pub fn build_quick_chat_openai_tools_with_policy(
     user_text: &str,
     privacy: PrivacySessionPolicy,
 ) -> Vec<Value> {
-    let descriptors = core.broker.descriptors();
-    let all_cap_specs: Vec<ToolSpec> = descriptors
-        .iter()
-        .cloned()
-        .filter(|d| {
-            privacy.allows_memory_write() || !crate::security_guard::is_memory_write_tool(&d.id)
-        })
-        .map(descriptor_to_tool_spec)
-        .collect();
-
-    let selected_caps: Vec<&ToolSpec> = if all_cap_specs.len() <= 20 {
-        all_cap_specs.iter().collect()
-    } else {
-        let compiler =
-            crate::intent_engine::PatternCompiler::compile_from_descriptors(&descriptors);
-        let ranked = crate::intent_engine::rank_capabilities(user_text, &compiler, None, 12);
-        let mut chosen_names: Vec<String> = ranked
-            .into_iter()
-            .map(|r| r.capability_id.replace('.', "_"))
-            .collect();
-        for ess in [
-            "file_open",
-            "file_write",
-            "app_launch",
-            "app_quit",
-            "window_focus",
-            "window_list",
-            "media_control",
-            "display_brightness_set",
-            "display_night_light_set",
-            "sound_volume_set",
-            "sound_mute_set",
-            "appearance_color_scheme_set",
-            "scene_apply",
-            "file_search",
-            "file_recent",
-            "file_move",
-            "file_copy",
-            "file_trash",
-            "disk_usage",
-            "network_status",
-        ] {
-            if chosen_names.len() >= 25 {
-                break;
-            }
-            if !chosen_names.iter().any(|n| n == ess) {
-                chosen_names.push(ess.to_string());
-            }
-        }
-        all_cap_specs
-            .iter()
-            .filter(|t| chosen_names.iter().any(|n| n == &t.name))
-            .collect()
-    };
-
-    let mut tools: Vec<Value> = selected_caps
-        .into_iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
-            })
-        })
-        .collect();
-
-    let mem_specs = if privacy.allows_memory_read() {
-        crate::memory_hub::memory_tool_specs()
-    } else {
-        Vec::new()
-    };
-    for spec in mem_specs
-        .into_iter()
-        .chain(crate::app_adapter::adapter_tool_specs())
-    {
-        if !privacy.allows_memory_write() && crate::security_guard::is_memory_write_tool(&spec.name)
-        {
-            continue;
-        }
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": spec.name,
-                "description": spec.description,
-                "parameters": spec.parameters,
-            }
-        }));
-    }
-
-    tools
+    let snap = crate::capability_snapshot::capability_snapshot_for_core(core);
+    snap.build_quick_chat_openai_tools(user_text, Some(&core.index_db), privacy)
 }
 
 pub fn build_quick_chat_anthropic_tools(openai_tools: &[Value]) -> Vec<Value> {
@@ -2871,12 +2775,9 @@ pub fn evaluate_turn_goal_evidence(
 
     let trimmed_user = user_text.trim();
     if !trimmed_user.is_empty() && !trimmed_user.starts_with('$') {
-        let desc_refs = core.broker.descriptors();
-        let owned_descs: Vec<intentos_protocol::CapabilityDescriptor> =
-            desc_refs.iter().copied().cloned().collect();
-        let structured = parse_structured_intent(trimmed_user, &owned_descs);
-        let compiler = PatternCompiler::compile_from_descriptors(&desc_refs);
-        let compound = split_compound_intent(core, trimmed_user, &compiler);
+        let snap = crate::capability_snapshot::capability_snapshot_for_core(core);
+        let structured = parse_structured_intent(trimmed_user, snap.descriptors_slice());
+        let compound = split_compound_intent(core, trimmed_user, &snap.pattern_compiler);
         let succeeded_caps: Vec<&str> = records
             .iter()
             .filter(|r| r.succeeded)
@@ -2942,7 +2843,7 @@ pub fn evaluate_turn_goal_evidence(
                 && structured
                     .required_capabilities
                     .iter()
-                    .any(|cap| owned_descs.iter().any(|d| &d.id == cap))
+                    .any(|cap| snap.get_descriptor(cap).is_some())
             {
                 if !structured.sub_goals.is_empty() {
                     for sg in &structured.sub_goals {

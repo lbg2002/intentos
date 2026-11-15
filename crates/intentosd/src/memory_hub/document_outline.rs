@@ -17,6 +17,7 @@ use crate::memory_hub::schema_and_db::{
 };
 use crate::resource::to_pinyin_pair;
 use chrono::Utc;
+use futures_util::future::join_all;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -24,11 +25,14 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 pub const MAX_DOC_FILE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
+/// Maximum concurrent `spawn_blocking` workers for `.docx`/`.pdf` parsing (`H09.3`).
+pub const MAX_DOC_OUTLINE_WORKERS: usize = 2;
 const MAX_UNZIP_XML_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
 const MAX_TEXT_READ_BYTES: u64 = 256 * 1024; // 256 KiB
 const MAX_LAZY_DOCS_PER_PASS: usize = 120;
@@ -143,6 +147,176 @@ pub fn index_document_file(
         return Ok(Some(rec));
     }
     Ok(None)
+}
+
+static DOC_OUTLINE_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+static ACTIVE_OFFLOADED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+static PEAK_OFFLOADED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+fn doc_outline_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
+    DOC_OUTLINE_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_DOC_OUTLINE_WORKERS)))
+}
+
+struct BlockingWorkerGuard;
+
+impl BlockingWorkerGuard {
+    fn enter() -> Self {
+        let cur = ACTIVE_OFFLOADED_WORKERS.fetch_add(1, Ordering::AcqRel) + 1;
+        PEAK_OFFLOADED_WORKERS.fetch_max(cur, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for BlockingWorkerGuard {
+    fn drop(&mut self) {
+        ACTIVE_OFFLOADED_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Return the peak number of concurrent `spawn_blocking` document parsers observed (`<= MAX_DOC_OUTLINE_WORKERS`).
+pub fn peak_offloaded_doc_workers() -> usize {
+    PEAK_OFFLOADED_WORKERS.load(Ordering::Acquire)
+}
+
+enum OffloadDocSlot {
+    Parsed(DocumentOutlineRecord),
+    Unchanged(String),
+    Missing(String),
+    Skipped,
+}
+
+/// Offload `.docx`, `.pdf`, and markup document outline parsing onto `tokio::task::spawn_blocking`
+/// bounded by a global `Semaphore` (`MAX_DOC_OUTLINE_WORKERS = 2`) so heavy ZIP/PDF I/O never blocks
+/// Tokio async worker threads (`H09.3`).
+pub async fn index_documents_offloaded(
+    core: &IntentOsCore,
+    db: &MemoryHubDb,
+    paths: &[PathBuf],
+) -> anyhow::Result<Vec<DocumentOutlineRecord>> {
+    let mut filtered_paths: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for p in paths {
+        let p_str = p.to_string_lossy();
+        if core.fs_engine.is_forbidden(p) || is_sensitive_credential_path(&p_str) {
+            continue;
+        }
+        if !is_supported_document_path(p) {
+            continue;
+        }
+        if seen.insert(p.clone()) {
+            filtered_paths.push(p.clone());
+        }
+    }
+
+    if filtered_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let existing_meta = Arc::new(load_indexed_mtime_size_map(db));
+    let now_epoch = Utc::now().timestamp();
+    let sem = Arc::clone(doc_outline_semaphore());
+
+    let jobs = filtered_paths.into_iter().map(|path_owned| {
+        let sem_clone = Arc::clone(&sem);
+        let meta_map = Arc::clone(&existing_meta);
+        async move {
+            let permit = sem_clone
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("doc outline semaphore closed: {}", e))?;
+            let slot = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _worker_guard = BlockingWorkerGuard::enter();
+                let path_str = path_owned.to_string_lossy().to_string();
+                let Ok(meta) = std::fs::metadata(&path_owned) else {
+                    return OffloadDocSlot::Missing(path_str);
+                };
+                if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_DOC_FILE_BYTES {
+                    return OffloadDocSlot::Skipped;
+                }
+                let mtime_epoch = file_mtime_epoch(&meta);
+                let size_bytes = meta.len();
+                if let Some(&(prev_mtime, prev_size)) = meta_map.get(&path_str)
+                    && prev_mtime == mtime_epoch
+                    && prev_size == size_bytes
+                {
+                    return OffloadDocSlot::Unchanged(path_str);
+                }
+                match extract_document_outline(&path_owned, mtime_epoch, size_bytes, now_epoch) {
+                    Some(rec) => OffloadDocSlot::Parsed(rec),
+                    None => OffloadDocSlot::Skipped,
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("doc outline spawn_blocking join error: {}", e))?;
+            Ok::<OffloadDocSlot, anyhow::Error>(slot)
+        }
+    });
+
+    let outcomes = join_all(jobs).await;
+    let mut newly_parsed: Vec<DocumentOutlineRecord> = Vec::new();
+    let mut ordered_slots: Vec<OffloadDocSlot> = Vec::with_capacity(outcomes.len());
+    for res in outcomes {
+        let slot = res?;
+        if let OffloadDocSlot::Parsed(ref rec) = slot {
+            newly_parsed.push(rec.clone());
+        }
+        ordered_slots.push(slot);
+    }
+
+    if !newly_parsed.is_empty() {
+        upsert_document_outlines(db, &newly_parsed)?;
+    }
+
+    let mut records = Vec::with_capacity(ordered_slots.len());
+    for slot in ordered_slots {
+        match slot {
+            OffloadDocSlot::Parsed(rec) => records.push(rec),
+            OffloadDocSlot::Unchanged(path_str) | OffloadDocSlot::Missing(path_str) => {
+                if let Some(existing) = get_document_outline_by_path(db, &path_str)? {
+                    records.push(existing);
+                }
+            }
+            OffloadDocSlot::Skipped => {}
+        }
+    }
+
+    Ok(records)
+}
+
+/// Asynchronous counterpart to [`sync_document_outlines_with_extra_paths`] that offloads `.docx`/`.pdf`
+/// extraction onto `spawn_blocking` bounded by `MAX_DOC_OUTLINE_WORKERS` (`2`).
+pub async fn sync_document_outlines_offloaded(
+    core: &IntentOsCore,
+    db: &MemoryHubDb,
+    extra_paths: &[PathBuf],
+) -> anyhow::Result<usize> {
+    let existing_meta = load_indexed_mtime_size_map(db);
+    let candidates = collect_candidate_documents(core, db, extra_paths);
+
+    let mut to_parse_paths: Vec<(PathBuf, i64)> = Vec::new();
+    for (path, mtime_epoch, size_bytes) in candidates {
+        let key = path.to_string_lossy().to_string();
+        if let Some(&(prev_mtime, prev_size)) = existing_meta.get(&key)
+            && prev_mtime == mtime_epoch
+            && prev_size == size_bytes
+        {
+            continue;
+        }
+        to_parse_paths.push((path, mtime_epoch));
+    }
+
+    if to_parse_paths.is_empty() {
+        return Ok(0);
+    }
+
+    to_parse_paths.sort_by_key(|b| std::cmp::Reverse(b.1));
+    to_parse_paths.truncate(MAX_LAZY_DOCS_PER_PASS);
+    let batch: Vec<PathBuf> = to_parse_paths.into_iter().map(|(p, _)| p).collect();
+
+    let indexed = index_documents_offloaded(core, db, &batch).await?;
+    Ok(indexed.len())
 }
 
 /// Fetch a single `DocumentOutlineRecord` by exact path from `document_outlines`.
@@ -2175,5 +2349,88 @@ fn truncate_clean(s: &str, max_chars: usize) -> String {
         let mut out: String = clean.chars().take(max_chars).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn h09_index_documents_offloaded_bounds_concurrency_to_two_and_caches_unchanged() {
+        PEAK_OFFLOADED_WORKERS.store(0, Ordering::Release);
+
+        let tmp = tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        let docs_dir = base.join("Documents");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let core = IntentOsCore::initialize(Some(&base), repo_root).expect("init core");
+        let db = MemoryHubDb::open_for_core(&core).expect("open MemoryHubDb");
+
+        // Create 6 `.docx` & `.md` documents plus a sensitive path that must be rejected.
+        let mut batch: Vec<PathBuf> = Vec::new();
+        for idx in 0..4 {
+            let docx_path = docs_dir.join(format!("architecture_spec_{}.docx", idx));
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body>
+                    <w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>IntentOS H09 性能白皮书 #{idx}</w:t></w:r></w:p>
+                    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第一章 快照缓存架构</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>通过 CapabilitySnapshot 消除每轮正则重编译与 JSON Schema 重复序列化开销。</w:t></w:r></w:p>
+                    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第二章 异步并发限流</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>使用 Semaphore(2) 限制 spawn_blocking 解析器并发度。</w:t></w:r></w:p>
+                  </w:body>
+                </w:document>"#
+            );
+            let zip_bytes = build_stored_zip_archive(&[("word/document.xml", xml.as_bytes())]);
+            std::fs::write(&docx_path, zip_bytes).unwrap();
+            batch.push(docx_path);
+        }
+        for idx in 0..2 {
+            let md_path = docs_dir.join(format!("notes_{}.md", idx));
+            std::fs::write(
+                &md_path,
+                format!(
+                    "# 研发纪要 {idx}\n\n## 第一节 目标\n验证 spawn_blocking 离线解析不阻塞 Tokio 异步线程。\n"
+                ),
+            )
+            .unwrap();
+            batch.push(md_path);
+        }
+        let forbidden_ssh = base.join(".ssh/id_rsa.md");
+        std::fs::create_dir_all(forbidden_ssh.parent().unwrap()).unwrap();
+        std::fs::write(&forbidden_ssh, "# Forbidden Secret\n").unwrap();
+        batch.push(forbidden_ssh);
+
+        let records = index_documents_offloaded(&core, &db, &batch)
+            .await
+            .expect("index_documents_offloaded");
+        assert_eq!(records.len(), 6, "6 valid docs indexed, .ssh rejected");
+
+        let peak = peak_offloaded_doc_workers();
+        assert!(
+            (1..=MAX_DOC_OUTLINE_WORKERS).contains(&peak),
+            "peak blocking workers must be between 1 and {} (got {})",
+            MAX_DOC_OUTLINE_WORKERS,
+            peak
+        );
+
+        // Warm call on unchanged files returns all 6 cached records immediately.
+        let synced_again = sync_document_outlines_offloaded(&core, &db, &batch)
+            .await
+            .expect("sync_document_outlines_offloaded");
+        assert_eq!(synced_again, 0, "unchanged files must cost 0 re-parses");
+
+        let hits = search_document_outlines(&db, "性能白皮书 第二章", None, 3).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].record.doc_title.contains("性能白皮书"));
     }
 }

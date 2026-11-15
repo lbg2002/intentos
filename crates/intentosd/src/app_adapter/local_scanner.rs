@@ -32,13 +32,16 @@ use chrono::Utc;
 use intentos_protocol::{VerificationReport, VerificationState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
@@ -396,15 +399,125 @@ pub struct DeepScanCatalog {
     pub cached: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScanCacheKey {
+    dirs_list: Vec<(PathBuf, &'static str)>,
+    include_hidden: bool,
+}
+
 struct CachedScanState {
     created_at: Instant,
-    include_hidden: bool,
+    dirs_fingerprint: u64,
     catalog: DeepScanCatalog,
 }
 
-static DEEP_SCAN_CACHE: OnceLock<Mutex<Option<CachedScanState>>> = OnceLock::new();
+static DEEP_SCAN_CACHE: OnceLock<Mutex<HashMap<ScanCacheKey, CachedScanState>>> = OnceLock::new();
+static DEEP_SCAN_SINGLEFLIGHT: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static DEEP_SCAN_EXECUTION_COUNT: AtomicU64 = AtomicU64::new(0);
 
-const SCAN_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Warm TTL (`120s`) for `deep_scan_local_software` directory-mtime snapshot cache (`H09.3`).
+pub const SCAN_CACHE_TTL: Duration = Duration::from_secs(120);
+
+fn deep_scan_cache() -> &'static Mutex<HashMap<ScanCacheKey, CachedScanState>> {
+    DEEP_SCAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn deep_scan_singleflight() -> &'static tokio::sync::Mutex<()> {
+    DEEP_SCAN_SINGLEFLIGHT.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Monotonic count of full `.desktop` + runtime scans executed since daemon start (`H09.3`).
+pub fn deep_scan_execution_count() -> u64 {
+    DEEP_SCAN_EXECUTION_COUNT.load(Ordering::Acquire)
+}
+
+/// Compute a fast (`< 80 µs`) directory-mtime + `.desktop` entry fingerprint across all scan sources.
+fn compute_scan_dirs_fingerprint(
+    scan_dirs: &[(PathBuf, &'static str)],
+    registry: &AdapterRegistry,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let profiles = registry.all_profiles();
+    profiles.len().hash(&mut hasher);
+    for prof in &profiles {
+        prof.id.hash(&mut hasher);
+    }
+
+    scan_dirs.len().hash(&mut hasher);
+    for (dir, kind) in scan_dirs {
+        dir.hash(&mut hasher);
+        kind.hash(&mut hasher);
+
+        let Ok(meta) = fs::metadata(dir) else {
+            0u8.hash(&mut hasher);
+            continue;
+        };
+        if !meta.is_dir() {
+            0u8.hash(&mut hasher);
+            continue;
+        }
+        1u8.hash(&mut hasher);
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified()
+            && let Ok(dur) = modified.duration_since(UNIX_EPOCH)
+        {
+            dur.as_secs().hash(&mut hasher);
+            dur.subsec_nanos().hash(&mut hasher);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino().hash(&mut hasher);
+            meta.ctime().hash(&mut hasher);
+            meta.ctime_nsec().hash(&mut hasher);
+        }
+
+        if let Ok(rd) = fs::read_dir(dir) {
+            let mut desktop_entries: Vec<(String, u64, PathBuf)> = Vec::new();
+            for entry in rd.flatten() {
+                let fname = entry.file_name();
+                let Some(fname_str) = fname.to_str() else {
+                    continue;
+                };
+                if !fname_str.ends_with(".desktop") {
+                    continue;
+                }
+                #[cfg(unix)]
+                let ino = {
+                    use std::os::unix::fs::DirEntryExt;
+                    entry.ino()
+                };
+                #[cfg(not(unix))]
+                let ino = 0u64;
+                desktop_entries.push((fname_str.to_string(), ino, entry.path()));
+            }
+            desktop_entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            desktop_entries.len().hash(&mut hasher);
+
+            let inspect_files = desktop_entries.len() <= 32;
+            for (name, ino, path) in desktop_entries {
+                name.hash(&mut hasher);
+                ino.hash(&mut hasher);
+                if inspect_files && let Ok(fmeta) = fs::metadata(&path) {
+                    fmeta.len().hash(&mut hasher);
+                    if let Ok(fmod) = fmeta.modified()
+                        && let Ok(fdur) = fmod.duration_since(UNIX_EPOCH)
+                    {
+                        fdur.as_secs().hash(&mut hasher);
+                        fdur.subsec_nanos().hash(&mut hasher);
+                    }
+                    if fmeta.len() <= 16_384
+                        && let Ok(bytes) = fs::read(&path)
+                    {
+                        bytes.hash(&mut hasher);
+                    }
+                }
+            }
+        }
+    }
+
+    hasher.finish()
+}
 
 /// Intermediate parsed representation of a single `.desktop` file before override merging & runtime correlation.
 #[derive(Debug, Clone)]
@@ -1856,43 +1969,54 @@ fn filter_catalog(
     catalog
 }
 
-/// Clear the global 30s deep-scan cache (useful in tests or when custom adapters change).
+/// Clear the global 120s deep-scan cache (useful in tests or when custom adapters change).
 pub fn clear_deep_scan_cache() {
-    if let Some(lock) = DEEP_SCAN_CACHE.get()
-        && let Ok(mut g) = lock.lock()
-    {
-        *g = None;
+    if let Ok(mut g) = deep_scan_cache().lock() {
+        g.clear();
     }
 }
 
 /// Perform a deep multi-source scan of all local software, classify into the 9 AIOS categories,
 /// correlate live runtime state (SNI + MPRIS + `/proc`), and synthesize rich executable interfaces.
+///
+/// Uses a directory-mtime + `120s` TTL cache and an async single-flight coalescing mutex (`H09.3`)
+/// so repeated or concurrent calls never launch duplicate full `/usr/share/applications` + Snap + Flatpak scans.
 pub async fn deep_scan_local_software(
     config_dir: Option<&Path>,
     registry: &AdapterRegistry,
     options: &LocalScanOptions,
 ) -> DeepScanCatalog {
-    let has_custom_cfg_apps = config_dir.is_some_and(|cfg| {
-        cfg.join("applications").is_dir()
-            || cfg
-                .parent()
-                .is_some_and(|p| p.join("applications").is_dir())
-    });
-    let use_global_cache =
-        options.scan_dirs.is_empty() && options.extra_dirs.is_empty() && !has_custom_cfg_apps;
-    let cache_lock = DEEP_SCAN_CACHE.get_or_init(|| Mutex::new(None));
+    let request_started_at = Instant::now();
+    let scan_dirs = collect_scan_directories(config_dir, options);
+    let cache_key = ScanCacheKey {
+        dirs_list: scan_dirs.clone(),
+        include_hidden: options.include_hidden,
+    };
 
-    if use_global_cache
-        && !options.force_refresh
-        && let Ok(guard) = cache_lock.lock()
-        && let Some(ref state) = *guard
-        && state.include_hidden == options.include_hidden
-        && state.created_at.elapsed() < SCAN_CACHE_TTL
+    if !options.force_refresh {
+        let fast_fp = compute_scan_dirs_fingerprint(&scan_dirs, registry);
+        if let Ok(guard) = deep_scan_cache().lock()
+            && let Some(state) = guard.get(&cache_key)
+            && state.dirs_fingerprint == fast_fp
+            && state.created_at.elapsed() < SCAN_CACHE_TTL
+        {
+            return filter_catalog(state.catalog.clone(), options, true);
+        }
+    }
+
+    // Single-flight coalescing guard: serialize full scans so concurrent callers coalesce onto one pass.
+    let _singleflight_guard = deep_scan_singleflight().lock().await;
+    let dirs_fingerprint = compute_scan_dirs_fingerprint(&scan_dirs, registry);
+    if let Ok(guard) = deep_scan_cache().lock()
+        && let Some(state) = guard.get(&cache_key)
+        && state.dirs_fingerprint == dirs_fingerprint
+        && ((!options.force_refresh && state.created_at.elapsed() < SCAN_CACHE_TTL)
+            || state.created_at >= request_started_at)
     {
         return filter_catalog(state.catalog.clone(), options, true);
     }
 
-    let scan_dirs = collect_scan_directories(config_dir, options);
+    DEEP_SCAN_EXECUTION_COUNT.fetch_add(1, Ordering::AcqRel);
 
     // 1. Read & parse `.desktop` entries across all configured sources; higher-priority dirs override lower-priority dirs while merging metadata.
     let mut merged_by_id: BTreeMap<String, RawDesktopRecord> = BTreeMap::new();
@@ -2152,12 +2276,24 @@ pub async fn deep_scan_local_software(
         cached: false,
     };
 
-    if use_global_cache && let Ok(mut guard) = cache_lock.lock() {
-        *guard = Some(CachedScanState {
-            created_at: Instant::now(),
-            include_hidden: options.include_hidden,
-            catalog: full_catalog.clone(),
-        });
+    if let Ok(mut guard) = deep_scan_cache().lock() {
+        if guard.len() >= 16
+            && !guard.contains_key(&cache_key)
+            && let Some(oldest_key) = guard
+                .iter()
+                .min_by_key(|(_, s)| s.created_at)
+                .map(|(k, _)| k.clone())
+        {
+            guard.remove(&oldest_key);
+        }
+        guard.insert(
+            cache_key,
+            CachedScanState {
+                created_at: Instant::now(),
+                dirs_fingerprint,
+                catalog: full_catalog.clone(),
+            },
+        );
     }
 
     filter_catalog(full_catalog, options, false)
@@ -5506,5 +5642,75 @@ mod tests {
         assert!(catalog.total_scanned >= 10);
         assert_eq!(catalog.categories.len(), 9);
         assert!(catalog.total_interfaces >= catalog.total_scanned * 3);
+    }
+
+    #[tokio::test]
+    async fn h09_local_scanner_mtime_120s_ttl_singleflight_and_invalidation() {
+        use std::sync::Arc;
+
+        assert_eq!(SCAN_CACHE_TTL, Duration::from_secs(120));
+        clear_deep_scan_cache();
+
+        let tmp = tempdir().expect("tempdir");
+        let apps_dir = tmp.path().join("applications");
+        fs::create_dir_all(&apps_dir).unwrap();
+        fs::write(
+            apps_dir.join("code.desktop"),
+            "[Desktop Entry]\nType=Application\nName=VS Code\nExec=/usr/bin/code %F\n",
+        )
+        .unwrap();
+
+        let reg = Arc::new(AdapterRegistry::builtin_only());
+        let opts = LocalScanOptions {
+            force_refresh: false,
+            scan_dirs: vec![apps_dir.clone()],
+            ..Default::default()
+        };
+
+        let before_scans = deep_scan_execution_count();
+
+        // 1. 10 concurrent cold callers coalesce via the single-flight mutex into 1 scan pass.
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let r = Arc::clone(&reg);
+            let o = opts.clone();
+            tasks.push(tokio::spawn(async move {
+                deep_scan_local_software(None, &r, &o).await
+            }));
+        }
+        for t in tasks {
+            let cat = t.await.expect("join concurrent scan");
+            assert_eq!(cat.total_scanned, 1);
+        }
+        assert_eq!(
+            deep_scan_execution_count() - before_scans,
+            1,
+            "10 concurrent scans must coalesce into exactly 1 execution"
+        );
+
+        // 2. Warm 120s TTL hit returns `cached == true` in < 1 ms with zero extra scans.
+        let warm_start = Instant::now();
+        let warm_cat = deep_scan_local_software(None, &reg, &opts).await;
+        let warm_elapsed = warm_start.elapsed();
+        assert!(warm_cat.cached);
+        assert_eq!(warm_cat.total_scanned, 1);
+        assert!(
+            warm_elapsed < Duration::from_millis(2),
+            "warm deep_scan_local_software hit took {:?}",
+            warm_elapsed
+        );
+        assert_eq!(deep_scan_execution_count() - before_scans, 1);
+
+        // 3. Adding a new `.desktop` file invalidates directory fingerprint immediately without force_refresh!
+        fs::write(
+            apps_dir.join("vlc.desktop"),
+            "[Desktop Entry]\nType=Application\nName=VLC\nExec=/usr/bin/vlc %U\n",
+        )
+        .unwrap();
+
+        let invalidated_cat = deep_scan_local_software(None, &reg, &opts).await;
+        assert!(!invalidated_cat.cached);
+        assert_eq!(invalidated_cat.total_scanned, 2);
+        assert_eq!(deep_scan_execution_count() - before_scans, 2);
     }
 }

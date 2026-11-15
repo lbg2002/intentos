@@ -18,8 +18,9 @@ pub mod turn_engine;
 
 pub use detector::{
     ActiveBackendSelection, BackendsCatalog, CatalogBackends, DiscoveredBackend,
-    DiscoveredProvider, DiscoveryOptions, clear_live_models_cache, discover_backends_catalog,
-    is_non_chat_utility_model, normalize_reasoning_effort, scrub_json_secrets,
+    DiscoveredProvider, DiscoveryOptions, clear_backends_catalog_cache, clear_live_models_cache,
+    discover_backends_catalog, discover_backends_catalog_fast, is_non_chat_utility_model,
+    normalize_reasoning_effort, scrub_json_secrets,
 };
 pub use turn_engine::{
     ActiveTurnHandle, BackendExecutionMode, PersistedQuickChatBackend, ScopedZcodeRuntimeOverride,
@@ -73,7 +74,7 @@ pub async fn handle_module_rpc(
 
         "get_backends_catalog" => {
             let opts = build_rpc_discovery_options(core, &payload, false);
-            let catalog = discover_backends_catalog(core, &opts).await;
+            let catalog = discover_backends_catalog_fast(core, &opts).await;
             let mut val = serde_json::to_value(catalog)?;
             scrub_json_secrets(&mut val);
             Ok(val)
@@ -81,7 +82,7 @@ pub async fn handle_module_rpc(
 
         "refresh_models" => {
             let opts = build_rpc_discovery_options(core, &payload, true);
-            let catalog = discover_backends_catalog(core, &opts).await;
+            let catalog = discover_backends_catalog_fast(core, &opts).await;
             let mut val = serde_json::to_value(catalog)?;
             scrub_json_secrets(&mut val);
             Ok(val)

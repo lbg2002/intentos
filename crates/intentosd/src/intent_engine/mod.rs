@@ -19,7 +19,9 @@ pub mod grouped_candidates;
 pub mod pattern_compiler;
 pub mod slot_extractor;
 
-pub use cognitive_parser::{parse_structured_intent, parse_structured_intent_with_llm};
+pub use cognitive_parser::{
+    parse_structured_intent, parse_structured_intent_with_llm, resolve_progressive_intent,
+};
 pub use compound_splitter::{
     CompoundExecutionReport, CompoundPlan, PlannedStep, StepExecutionOutcome, execute_compound,
     execute_compound_with_policy, split_compound_intent, split_into_clauses,
@@ -48,7 +50,6 @@ pub use slot_extractor::{
 
 use crate::core::IntentOsCore;
 use crate::db::IndexDb;
-use intentos_protocol::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -107,9 +108,8 @@ pub fn analyze_intent_full(
     let colloquial = analyze_colloquial_input(&effective_text);
     let universal_slots = extract_universal_slots(&effective_text, &core.resources);
     let compound_plan = split_compound_intent(core, &effective_text, compiler);
-    let owned_descriptors: Vec<CapabilityDescriptor> =
-        core.broker.descriptors().into_iter().cloned().collect();
-    let structured_intent = parse_structured_intent(&effective_text, &owned_descriptors);
+    let snap = crate::capability_snapshot::capability_snapshot_for_core(core);
+    let structured_intent = parse_structured_intent(&effective_text, snap.descriptors_slice());
     let top_capabilities = rank_capabilities(&effective_text, compiler, Some(&core.index_db), 5);
 
     let (recommended_capability_id, recommended_arguments, confidence, routing_tier) =
@@ -198,8 +198,8 @@ pub async fn handle_module_rpc(
     action: &str,
     payload: Value,
 ) -> anyhow::Result<Value> {
-    let descriptors = core.broker.descriptors();
-    let compiler = PatternCompiler::compile_from_descriptors(&descriptors);
+    let snap = crate::capability_snapshot::capability_snapshot_for_core(core);
+    let compiler = snap.pattern_compiler.as_ref();
 
     match action {
         "ping" => {
@@ -212,7 +212,8 @@ pub async fn handle_module_rpc(
                 "ok": true,
                 "module": "intent_engine",
                 "status": "ready",
-                "descriptor_count": descriptors.len(),
+                "descriptor_count": snap.len(),
+                "snapshot_version": snap.version,
                 "compiled_pattern_count": pattern_count,
                 "supported_actions": [
                     "ping",
@@ -220,6 +221,7 @@ pub async fn handle_module_rpc(
                     "get_candidate_actions",
                     "analyze_intent",
                     "parse_structured_intent",
+                    "resolve_progressive_intent",
                     "execute_compound",
                     "record_candidate_feedback"
                 ]
@@ -250,7 +252,7 @@ pub async fn handle_module_rpc(
             );
             let effective_query = ctx_res.effective_text();
 
-            let resp = query_grouped_candidates(core, effective_query, category_filter, &compiler);
+            let resp = query_grouped_candidates(core, effective_query, category_filter, compiler);
             let mut val = serde_json::to_value(resp)?;
             if let Some(obj) = val.as_object_mut() {
                 obj.insert(
@@ -299,11 +301,11 @@ pub async fn handle_module_rpc(
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
 
             let report =
-                analyze_intent_full(core, text, session_id, desktop_ctx.as_ref(), &compiler);
+                analyze_intent_full(core, text, session_id, desktop_ctx.as_ref(), compiler);
             Ok(serde_json::to_value(report)?)
         }
 
-        "parse_structured_intent" => {
+        "parse_structured_intent" | "resolve_progressive_intent" => {
             let raw_text = payload
                 .get("text")
                 .or_else(|| payload.get("query"))
@@ -318,6 +320,11 @@ pub async fn handle_module_rpc(
                 .get("use_llm")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let use_progressive = action == "resolve_progressive_intent"
+                || payload
+                    .get("progressive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
             let session = session_id.map(|sid| core.sessions.get_or_create(Some(sid)));
             let ctx_res = resolve_context_references(
@@ -327,19 +334,26 @@ pub async fn handle_module_rpc(
                 desktop_ctx.as_ref(),
             );
             let effective_text = ctx_res.effective_text();
-            let owned_descriptors: Vec<CapabilityDescriptor> =
-                descriptors.into_iter().cloned().collect();
 
-            let structured = if use_llm {
+            let structured = if use_progressive {
+                resolve_progressive_intent(
+                    &core.gateway,
+                    Some(&core.state_db),
+                    effective_text,
+                    desktop_state_hint,
+                    snap.descriptors_slice(),
+                )
+                .await
+            } else if use_llm {
                 parse_structured_intent_with_llm(
                     &core.gateway,
                     effective_text,
                     desktop_state_hint,
-                    &owned_descriptors,
+                    snap.descriptors_slice(),
                 )
                 .await
             } else {
-                parse_structured_intent(effective_text, &owned_descriptors)
+                parse_structured_intent(effective_text, snap.descriptors_slice())
             };
             Ok(serde_json::to_value(structured)?)
         }
@@ -377,7 +391,7 @@ pub async fn handle_module_rpc(
                 steps_override,
                 session_id,
                 incognito,
-                &compiler,
+                compiler,
             )
             .await?;
             Ok(serde_json::to_value(report)?)

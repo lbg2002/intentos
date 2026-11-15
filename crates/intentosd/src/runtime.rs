@@ -840,11 +840,13 @@ impl AgentCoordinator {
         let selected_tools: Vec<&ToolSpec> = if req.tools.len() <= 36 {
             req.tools.iter().collect()
         } else {
-            let descriptors = self.broker.descriptors();
-            let compiler =
-                crate::intent_engine::PatternCompiler::compile_from_descriptors(&descriptors);
-            let ranked =
-                crate::intent_engine::rank_capabilities(&req.input.content, &compiler, None, 14);
+            let snap = crate::capability_snapshot::capability_snapshot_for_broker(&self.broker);
+            let ranked = crate::intent_engine::rank_capabilities(
+                &req.input.content,
+                &snap.pattern_compiler,
+                None,
+                14,
+            );
             let mut chosen_names: Vec<String> = ranked
                 .into_iter()
                 .map(|r| r.capability_id.replace('.', "_"))

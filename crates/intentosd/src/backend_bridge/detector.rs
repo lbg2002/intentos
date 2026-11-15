@@ -21,12 +21,17 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const LIVE_MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Warm TTL (`60s`) for `discover_backends_catalog_fast` (`H09.2`).
+pub const BACKEND_CATALOG_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 struct CachedLiveModels {
@@ -420,6 +425,11 @@ impl DiscoveryOptions {
             probe_remote_models: false,
             force_refresh_models: false,
         }
+    }
+
+    /// Whether the caller explicitly requested bypassing warm discovery caches.
+    pub fn force_refresh(&self) -> bool {
+        self.force_refresh_models
     }
 }
 
@@ -1758,11 +1768,12 @@ pub async fn probe_ollama_models(tags_url: &str, timeout_ms: u64) -> Option<Vec<
     Some(models)
 }
 
-/// Discover OpenAI-compatible & Ollama providers from `config_center`, `0600` vault, env vars, and Ollama probe.
-pub async fn discover_openai_backend(
+/// Discover local/static OpenAI-compatible providers from `config_center`, `0600` vault, and env vars
+/// without issuing any network probe (`< 50 µs`).
+fn discover_openai_backend_local(
     core: &IntentOsCore,
     opts: &DiscoveryOptions,
-) -> DiscoveredBackend {
+) -> (DiscoveredBackend, Option<String>, Option<String>) {
     let mut providers: Vec<DiscoveredProvider> = Vec::new();
     let mut main_provider_id: Option<String> = None;
     let mut main_model_id: Option<String> = None;
@@ -1818,64 +1829,51 @@ pub async fn discover_openai_backend(
         }
     }
 
-    // Probe local Ollama (`http://127.0.0.1:11434/api/tags`) with 400ms timeout
-    if let Some(ref tags_url) = opts.ollama_tags_url
-        && let Some(ollama_models) = probe_ollama_models(tags_url, opts.ollama_timeout_ms).await
-        && !ollama_models.is_empty()
-    {
-        let ollama_v1 = tags_url
-            .strip_suffix("/api/tags")
-            .map(|prefix| format!("{}/v1", prefix.trim_end_matches('/')))
-            .and_then(|u| sanitize_url_no_secrets(&u))
-            .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+    let mut backend = DiscoveredBackend {
+        id: "openai".to_string(),
+        name: "OpenAI API".to_string(),
+        label: "OpenAI API".to_string(),
+        available: false,
+        installed: true,
+        binary_path: None,
+        runner_program: None,
+        default_provider: None,
+        default_model: None,
+        default_reasoning_effort: main_effort,
+        models: Vec::new(),
+        providers,
+    };
+    finalize_openai_backend_defaults(
+        &mut backend,
+        main_provider_id.clone(),
+        main_model_id.clone(),
+    );
+    (backend, main_provider_id, main_model_id)
+}
 
-        if let Some(existing) = providers
-            .iter_mut()
-            .find(|p| p.id == "ollama-local" || p.kind == "ollama-local")
-        {
-            for m in ollama_models {
-                push_dedup(&mut existing.models, m);
-            }
-            existing.default_model = existing.models.first().cloned();
-            existing.has_api_key = true;
-            existing.enabled = true;
-            existing.direct_openai_compatible = true;
-            existing.live_models_fetched = true;
-            existing.base_url = Some(ollama_v1);
-        } else {
-            providers.push(DiscoveredProvider {
-                id: "ollama-local".to_string(),
-                name: "Ollama (Local)".to_string(),
-                kind: "ollama-local".to_string(),
-                base_url: Some(ollama_v1),
-                default_model: ollama_models.first().cloned(),
-                models: ollama_models,
-                enabled: true,
-                has_api_key: true,
-                direct_openai_compatible: true,
-                live_models_fetched: true,
-                source: "ollama:11434".to_string(),
-            });
-        }
-    }
-
+fn finalize_openai_backend_defaults(
+    backend: &mut DiscoveredBackend,
+    main_provider_id: Option<String>,
+    main_model_id: Option<String>,
+) {
     let mut all_models = Vec::new();
-    for p in providers.iter().filter(|p| p.enabled) {
+    for p in backend.providers.iter().filter(|p| p.enabled) {
         for m in &p.models {
             push_dedup(&mut all_models, m);
         }
     }
 
-    let default_provider = providers
+    let default_provider = backend
+        .providers
         .iter()
         .find(|p| p.enabled && p.has_api_key && !p.models.is_empty())
         .map(|p| p.id.clone())
         .or(main_provider_id)
-        .or_else(|| providers.first().map(|p| p.id.clone()));
+        .or_else(|| backend.providers.first().map(|p| p.id.clone()));
 
     let default_model = default_provider
         .as_ref()
-        .and_then(|pid| providers.iter().find(|p| &p.id == pid))
+        .and_then(|pid| backend.providers.iter().find(|p| &p.id == pid))
         .and_then(|p| {
             if main_model_id
                 .as_ref()
@@ -1891,24 +1889,73 @@ pub async fn discover_openai_backend(
         .or(main_model_id)
         .or_else(|| all_models.first().cloned());
 
-    let available = providers
+    backend.available = backend
+        .providers
         .iter()
         .any(|p| p.enabled && p.has_api_key && !p.models.is_empty());
+    backend.default_provider = default_provider;
+    backend.default_model = default_model;
+    backend.models = all_models;
+}
 
-    DiscoveredBackend {
-        id: "openai".to_string(),
-        name: "OpenAI API".to_string(),
-        label: "OpenAI API".to_string(),
-        available,
-        installed: true,
-        binary_path: None,
-        runner_program: None,
-        default_provider,
-        default_model,
-        default_reasoning_effort: main_effort,
-        models: all_models,
-        providers,
+async fn probe_and_merge_ollama_into_openai(
+    backend: &mut DiscoveredBackend,
+    opts: &DiscoveryOptions,
+    main_provider_id: Option<String>,
+    main_model_id: Option<String>,
+) {
+    // Probe local Ollama (`http://127.0.0.1:11434/api/tags`) with 400ms timeout
+    if let Some(ref tags_url) = opts.ollama_tags_url
+        && let Some(ollama_models) = probe_ollama_models(tags_url, opts.ollama_timeout_ms).await
+        && !ollama_models.is_empty()
+    {
+        let ollama_v1 = tags_url
+            .strip_suffix("/api/tags")
+            .map(|prefix| format!("{}/v1", prefix.trim_end_matches('/')))
+            .and_then(|u| sanitize_url_no_secrets(&u))
+            .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+
+        if let Some(existing) = backend
+            .providers
+            .iter_mut()
+            .find(|p| p.id == "ollama-local" || p.kind == "ollama-local")
+        {
+            for m in ollama_models {
+                push_dedup(&mut existing.models, m);
+            }
+            existing.default_model = existing.models.first().cloned();
+            existing.has_api_key = true;
+            existing.enabled = true;
+            existing.direct_openai_compatible = true;
+            existing.live_models_fetched = true;
+            existing.base_url = Some(ollama_v1);
+        } else {
+            backend.providers.push(DiscoveredProvider {
+                id: "ollama-local".to_string(),
+                name: "Ollama (Local)".to_string(),
+                kind: "ollama-local".to_string(),
+                base_url: Some(ollama_v1),
+                default_model: ollama_models.first().cloned(),
+                models: ollama_models,
+                enabled: true,
+                has_api_key: true,
+                direct_openai_compatible: true,
+                live_models_fetched: true,
+                source: "ollama:11434".to_string(),
+            });
+        }
+        finalize_openai_backend_defaults(backend, main_provider_id, main_model_id);
     }
+}
+
+/// Discover OpenAI-compatible & Ollama providers from `config_center`, `0600` vault, env vars, and Ollama probe.
+pub async fn discover_openai_backend(
+    core: &IntentOsCore,
+    opts: &DiscoveryOptions,
+) -> DiscoveredBackend {
+    let (mut backend, main_provider_id, main_model_id) = discover_openai_backend_local(core, opts);
+    probe_and_merge_ollama_into_openai(&mut backend, opts, main_provider_id, main_model_id).await;
+    backend
 }
 
 /// Auto-select the best working `(backend, provider, model, reasoning_effort)` out of the box!
@@ -2210,6 +2257,14 @@ async fn enrich_backends_with_live_models_and_proxy_sharing(
     core: &IntentOsCore,
     opts: &DiscoveryOptions,
 ) {
+    enrich_backends_with_live_models_and_proxy_sharing_by_paths(backends, &core.paths, opts).await;
+}
+
+async fn enrich_backends_with_live_models_and_proxy_sharing_by_paths(
+    backends: &mut CatalogBackends,
+    paths: &XdgPaths,
+    opts: &DiscoveryOptions,
+) {
     if opts.probe_remote_models {
         struct ProbeJob {
             backend_id: &'static str,
@@ -2238,8 +2293,7 @@ async fn enrich_backends_with_live_models_and_proxy_sharing(
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     continue;
                 }
-                let api_key =
-                    lookup_ephemeral_backend_key(&core.paths, bid, &p.id, opts.allow_env_keys);
+                let api_key = lookup_ephemeral_backend_key(paths, bid, &p.id, opts.allow_env_keys);
                 let should_probe = p.has_api_key || api_key.is_some() || is_local_url(url);
                 if !should_probe {
                     continue;
@@ -2356,7 +2410,7 @@ async fn enrich_backends_with_live_models_and_proxy_sharing(
             };
 
             if let Some(k) = lookup_ephemeral_backend_key(
-                &core.paths,
+                paths,
                 src_backend,
                 &proxy_prov.id,
                 opts.allow_env_keys,
@@ -2395,6 +2449,107 @@ async fn enrich_backends_with_live_models_and_proxy_sharing(
     recompute_backend_rollup(&mut backends.openai);
 }
 
+fn assemble_backends_catalog(
+    active: ActiveBackendSelection,
+    backends: CatalogBackends,
+) -> BackendsCatalog {
+    BackendsCatalog {
+        active,
+        backend_order: vec![
+            "zcode".to_string(),
+            "codex".to_string(),
+            "pi".to_string(),
+            "openai".to_string(),
+        ],
+        reasoning_efforts: vec![
+            json!({ "id": "default", "label": "默认" }),
+            json!({ "id": "fast", "label": "快" }),
+            json!({ "id": "medium", "label": "标准" }),
+            json!({ "id": "high", "label": "深入" }),
+        ],
+        backends,
+    }
+}
+
+fn resolve_active_selection_from_paths(
+    paths: &XdgPaths,
+    backends: &CatalogBackends,
+) -> ActiveBackendSelection {
+    let persisted_path = paths.config_dir.join("quick_chat_backend.json");
+    if let Ok(raw) = std::fs::read_to_string(persisted_path)
+        && let Ok(saved) = serde_json::from_str::<
+            crate::backend_bridge::turn_engine::PersistedQuickChatBackend,
+        >(&raw)
+    {
+        let effort = normalize_reasoning_effort(Some(&saved.reasoning_effort));
+        if saved.pinned && matches!(saved.backend.as_str(), "zcode" | "codex" | "pi" | "openai") {
+            let disc_backend = backends.get(&saved.backend);
+            let matched_prov = disc_backend.and_then(|b| {
+                b.providers
+                    .iter()
+                    .find(|p| p.id == saved.provider)
+                    .or_else(|| b.providers.first())
+            });
+            let resolved_provider = if !saved.provider.trim().is_empty() {
+                saved.provider.clone()
+            } else {
+                matched_prov
+                    .map(|p| p.id.clone())
+                    .unwrap_or_else(|| "default".to_string())
+            };
+            let resolved_model = if !saved.model.trim().is_empty() {
+                saved.model.clone()
+            } else {
+                matched_prov
+                    .and_then(|p| {
+                        p.default_model
+                            .clone()
+                            .or_else(|| p.models.first().cloned())
+                    })
+                    .or_else(|| disc_backend.and_then(|b| b.default_model.clone()))
+                    .unwrap_or_else(|| "gpt-4o-mini".to_string())
+            };
+            let resolved_url = saved
+                .base_url
+                .as_deref()
+                .and_then(sanitize_url_no_secrets)
+                .or_else(|| matched_prov.and_then(|p| p.base_url.clone()));
+            let has_saved_key =
+                lookup_ephemeral_backend_key(paths, &saved.backend, &resolved_provider, false)
+                    .is_some();
+            let direct_http = matched_prov.is_some_and(|p| {
+                p.direct_openai_compatible
+                    || (p.has_api_key && is_direct_http_endpoint(&p.kind, p.base_url.as_deref()))
+            }) || (resolved_url.is_some()
+                && (has_saved_key
+                    || resolved_url
+                        .as_deref()
+                        .is_some_and(|u| u.contains("127.0.0.1") || u.contains("localhost"))));
+
+            return ActiveBackendSelection {
+                backend: saved.backend,
+                provider: resolved_provider,
+                model: resolved_model,
+                reasoning_effort: effort,
+                base_url: resolved_url,
+                pinned: true,
+                auto_selected: false,
+                direct_http_capable: direct_http,
+                pill_label: String::new(),
+            }
+            .with_computed_label();
+        }
+
+        let mut auto = auto_select_best_backend(backends);
+        if effort != "default" {
+            auto.reasoning_effort = effort;
+        }
+        return auto;
+    }
+
+    auto_select_best_backend(backends)
+}
+
 /// Discover the complete multi-backend catalog and resolve active selection.
 pub async fn discover_backends_catalog(
     core: &IntentOsCore,
@@ -2416,21 +2571,601 @@ pub async fn discover_backends_catalog(
     enrich_backends_with_live_models_and_proxy_sharing(&mut backends, core, opts).await;
 
     let active = crate::backend_bridge::turn_engine::resolve_active_selection(core, &backends);
+    assemble_backends_catalog(active, backends)
+}
 
-    BackendsCatalog {
-        active,
-        backend_order: vec![
-            "zcode".to_string(),
-            "codex".to_string(),
-            "pi".to_string(),
-            "openai".to_string(),
-        ],
-        reasoning_efforts: vec![
-            json!({ "id": "default", "label": "默认" }),
-            json!({ "id": "fast", "label": "快" }),
-            json!({ "id": "medium", "label": "标准" }),
-            json!({ "id": "high", "label": "深入" }),
-        ],
-        backends,
+// =============================================================================
+// Non-Blocking `BackendsCatalog` Snapshot Cache & Probe Coalescer (`H09.2`)
+// =============================================================================
+
+/// Composite cache key for [`discover_backends_catalog_fast`]:
+/// `(home_dir, config_files_mtime_fingerprint, persisted_active_mtime)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackendCatalogCacheKey {
+    pub home_dir: PathBuf,
+    pub config_files_mtime_fingerprint: u64,
+    pub persisted_active_mtime: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedBackendsCatalog {
+    config_dir: PathBuf,
+    catalog: BackendsCatalog,
+    fetched_at: Instant,
+}
+
+struct InFlightRefreshSlot {
+    in_flight: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+struct AtomicBoolResetGuard<'a>(&'a AtomicBool);
+
+impl Drop for AtomicBoolResetGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct SlotResetGuard {
+    slot: Arc<InFlightRefreshSlot>,
+}
+
+impl Drop for SlotResetGuard {
+    fn drop(&mut self) {
+        self.slot.in_flight.store(false, Ordering::Release);
+        self.slot.notify.notify_waiters();
+    }
+}
+
+type CatalogCacheMap = HashMap<BackendCatalogCacheKey, CachedBackendsCatalog>;
+type RefreshSlotMap = HashMap<(PathBuf, PathBuf), Arc<InFlightRefreshSlot>>;
+
+static BACKEND_CATALOG_CACHE: OnceLock<Mutex<CatalogCacheMap>> = OnceLock::new();
+static FOREGROUND_REFRESH_SLOTS: OnceLock<Mutex<RefreshSlotMap>> = OnceLock::new();
+static BACKGROUND_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn backend_catalog_cache() -> &'static Mutex<CatalogCacheMap> {
+    BACKEND_CATALOG_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn foreground_refresh_slot(home_dir: &Path, config_dir: &Path) -> Arc<InFlightRefreshSlot> {
+    let map_lock = FOREGROUND_REFRESH_SLOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map_lock.lock().unwrap();
+    if guard.len() > 32 {
+        guard.retain(|_, v| v.in_flight.load(Ordering::Acquire));
+    }
+    guard
+        .entry((home_dir.to_path_buf(), config_dir.to_path_buf()))
+        .or_insert_with(|| {
+            Arc::new(InFlightRefreshSlot {
+                in_flight: AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            })
+        })
+        .clone()
+}
+
+/// Clear the in-memory `BackendsCatalog` snapshot cache (`H09.2`, useful for isolated tests).
+pub fn clear_backends_catalog_cache() {
+    backend_catalog_cache().lock().unwrap().clear();
+}
+
+/// Check whether a detached background `/v1/models` catalog refresh is currently in flight.
+pub fn is_background_catalog_refresh_in_flight() -> bool {
+    BACKGROUND_REFRESH_IN_FLIGHT.load(Ordering::Acquire)
+}
+
+fn hash_tracked_file_fingerprint(path: &Path, hasher: &mut impl Hasher) {
+    path.hash(hasher);
+    let Ok(meta) = std::fs::metadata(path) else {
+        0u8.hash(hasher);
+        return;
+    };
+    1u8.hash(hasher);
+    meta.len().hash(hasher);
+    if let Ok(modified) = meta.modified()
+        && let Ok(dur) = modified.duration_since(UNIX_EPOCH)
+    {
+        dur.as_secs().hash(hasher);
+        dur.subsec_nanos().hash(hasher);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino().hash(hasher);
+        meta.ctime().hash(hasher);
+        meta.ctime_nsec().hash(hasher);
+    }
+    // Small config files (`<= 64 KiB`) are also content-hashed (`< 10 µs`) so sub-millisecond
+    // same-length writes on coarse-granularity filesystems invalidate 100% deterministically.
+    if meta.is_file()
+        && meta.len() <= 65_536
+        && let Ok(bytes) = std::fs::read(path)
+    {
+        bytes.hash(hasher);
+    }
+}
+
+/// Compute the deterministic `(home_dir, config_files_mtime_fingerprint, persisted_active_mtime)` cache key.
+pub fn compute_backend_catalog_cache_key_from_paths(
+    paths: &XdgPaths,
+    opts: &DiscoveryOptions,
+) -> BackendCatalogCacheKey {
+    let mut active_hasher = DefaultHasher::new();
+    hash_tracked_file_fingerprint(
+        &paths.config_dir.join("quick_chat_backend.json"),
+        &mut active_hasher,
+    );
+    let persisted_active_mtime = active_hasher.finish();
+
+    let mut cfg_hasher = DefaultHasher::new();
+    paths.config_dir.hash(&mut cfg_hasher);
+    paths.runtime_dir.hash(&mut cfg_hasher);
+    opts.include_system_paths.hash(&mut cfg_hasher);
+    opts.extra_bin_dirs.hash(&mut cfg_hasher);
+    opts.opt_zcode_cjs.hash(&mut cfg_hasher);
+    opts.ollama_tags_url.hash(&mut cfg_hasher);
+    opts.probe_remote_models.hash(&mut cfg_hasher);
+    opts.allow_env_keys.hash(&mut cfg_hasher);
+
+    for tracked in [
+        opts.home_dir.join(".zcode/v2/provider_config.json"),
+        opts.home_dir.join(".zcode/v2/config.json"),
+        opts.home_dir.join(".zcode/cli/config.json"),
+        opts.home_dir.join(".codex/config.toml"),
+        opts.home_dir.join(".codex/models_cache.json"),
+        opts.home_dir.join(".codex/auth.json"),
+        opts.home_dir.join(".pi/agent/models.json"),
+        paths.config_dir.join("domains.json"),
+        paths.config_dir.join("brain.toml"),
+        paths.config_dir.join("config.toml"),
+        paths.runtime_dir.join("vault/credentials.json"),
+    ] {
+        hash_tracked_file_fingerprint(&tracked, &mut cfg_hasher);
+    }
+
+    if let Ok(keys_guard) = ephemeral_keys().lock() {
+        keys_guard.len().hash(&mut cfg_hasher);
+        let mut pairs: Vec<(&str, usize, u8)> = keys_guard
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    v.len(),
+                    v.as_bytes().first().copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        pairs.hash(&mut cfg_hasher);
+    }
+
+    BackendCatalogCacheKey {
+        home_dir: opts.home_dir.clone(),
+        config_files_mtime_fingerprint: cfg_hasher.finish(),
+        persisted_active_mtime,
+    }
+}
+
+fn upsert_cached_catalog(
+    key: BackendCatalogCacheKey,
+    config_dir: PathBuf,
+    catalog: BackendsCatalog,
+) {
+    let mut guard = backend_catalog_cache().lock().unwrap();
+    // Evict stale keys for the same `(home_dir, config_dir)` so A -> B -> A file edits never hit stale A.
+    guard.retain(|existing_key, entry| {
+        !(existing_key.home_dir == key.home_dir
+            && entry.config_dir == config_dir
+            && *existing_key != key)
+    });
+    if guard.len() >= 16
+        && !guard.contains_key(&key)
+        && let Some(oldest_key) = guard
+            .iter()
+            .min_by_key(|(_, v)| v.fetched_at)
+            .map(|(k, _)| k.clone())
+    {
+        guard.remove(&oldest_key);
+    }
+    guard.insert(
+        key,
+        CachedBackendsCatalog {
+            config_dir,
+            catalog,
+            fetched_at: Instant::now(),
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_spawn_background_catalog_refresh(
+    expected_key: BackendCatalogCacheKey,
+    paths: XdgPaths,
+    mut bg_opts: DiscoveryOptions,
+    mut base_backends: CatalogBackends,
+    main_provider_id: Option<String>,
+    main_model_id: Option<String>,
+) {
+    if BACKGROUND_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let Ok(rt_handle) = tokio::runtime::Handle::try_current() else {
+        BACKGROUND_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+        return;
+    };
+
+    rt_handle.spawn(async move {
+        let _in_flight_guard = AtomicBoolResetGuard(&BACKGROUND_REFRESH_IN_FLIGHT);
+        // Force fresh `/v1/models` probe on background TTL revalidation off the turn hot path.
+        bg_opts.force_refresh_models = true;
+        probe_and_merge_ollama_into_openai(
+            &mut base_backends.openai,
+            &bg_opts,
+            main_provider_id,
+            main_model_id,
+        )
+        .await;
+        enrich_backends_with_live_models_and_proxy_sharing_by_paths(
+            &mut base_backends,
+            &paths,
+            &bg_opts,
+        )
+        .await;
+
+        let latest_key = compute_backend_catalog_cache_key_from_paths(&paths, &bg_opts);
+        if latest_key == expected_key {
+            let active = resolve_active_selection_from_paths(&paths, &base_backends);
+            let refreshed = assemble_backends_catalog(active, base_backends);
+            upsert_cached_catalog(latest_key, paths.config_dir.clone(), refreshed);
+        }
+    });
+}
+
+/// Non-blocking `BackendsCatalog` snapshot lookup & single-flight probe coalescer (`H09.2`):
+/// - Caches `BackendsCatalog` in memory keyed by `(home_dir, config_files_mtime_fingerprint, persisted_active_mtime)`
+///   with a `60s` warm TTL when `!opts.force_refresh()`.
+/// - Moves remote `/v1/models` HTTP probing out of the synchronous turn hot path when a cached snapshot
+///   exists (coalescing any background refresh with an `AtomicBool` in-flight guard so concurrent turns
+///   NEVER trigger a probe storm!).
+/// - Refreshes immediately (coalescing concurrent foreground callers) when `opts.force_refresh() == true`
+///   or when config files on disk changed (`~/.zcode`, `~/.codex`, `quick_chat_backend.json`, etc.).
+pub async fn discover_backends_catalog_fast(
+    core: &IntentOsCore,
+    opts: &DiscoveryOptions,
+) -> BackendsCatalog {
+    let key = compute_backend_catalog_cache_key_from_paths(&core.paths, opts);
+
+    if !opts.force_refresh() {
+        let cached_hit = backend_catalog_cache()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|entry| (entry.catalog.clone(), entry.fetched_at.elapsed()));
+
+        if let Some((cached_catalog, age)) = cached_hit {
+            if age < BACKEND_CATALOG_CACHE_TTL {
+                return cached_catalog;
+            }
+
+            // Cached snapshot exists for the current disk fingerprint, so return immediately on the
+            // turn hot path and coalesce a single non-blocking background `/v1/models` refresh!
+            if opts.probe_remote_models || opts.ollama_tags_url.is_some() {
+                if !is_background_catalog_refresh_in_flight() {
+                    let search_dirs = build_search_dirs(opts);
+                    let zcode = discover_zcode_backend(opts, &search_dirs);
+                    let codex = discover_codex_backend(opts, &search_dirs);
+                    let pi = discover_pi_backend(core, opts, &search_dirs);
+                    let (openai, main_prov, main_mod) = discover_openai_backend_local(core, opts);
+                    let base_backends = CatalogBackends {
+                        zcode,
+                        codex,
+                        pi,
+                        openai,
+                    };
+                    maybe_spawn_background_catalog_refresh(
+                        key,
+                        core.paths.clone(),
+                        opts.clone(),
+                        base_backends,
+                        main_prov,
+                        main_mod,
+                    );
+                }
+                return cached_catalog;
+            }
+        }
+    }
+
+    // Cold cache, disk config/active selection changed, or explicit `force_refresh`:
+    // coalesce concurrent foreground callers for the same `(home_dir, config_dir)` so concurrent turns
+    // NEVER trigger a `/v1/models` probe storm!
+    let slot = foreground_refresh_slot(&opts.home_dir, &core.paths.config_dir);
+    loop {
+        let notified = slot.notify.notified();
+        if slot
+            .in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let _reset_guard = SlotResetGuard { slot: slot.clone() };
+            let refreshed_key = compute_backend_catalog_cache_key_from_paths(&core.paths, opts);
+            let catalog = discover_backends_catalog(core, opts).await;
+            upsert_cached_catalog(
+                refreshed_key,
+                core.paths.config_dir.clone(),
+                catalog.clone(),
+            );
+            return catalog;
+        }
+
+        // Another concurrent caller is already refreshing this `(home_dir, config_dir)`.
+        notified.await;
+
+        let post_wait_key = compute_backend_catalog_cache_key_from_paths(&core.paths, opts);
+        if let Some(entry) = backend_catalog_cache()
+            .lock()
+            .unwrap()
+            .get(&post_wait_key)
+            .cloned()
+            && entry.fetched_at.elapsed() < Duration::from_secs(5)
+        {
+            return entry.catalog;
+        }
+    }
+}
+
+#[cfg(test)]
+fn age_backends_catalog_cache_for_test(age: Duration) {
+    let past = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+    let mut guard = backend_catalog_cache().lock().unwrap();
+    for entry in guard.values_mut() {
+        entry.fetched_at = past;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_mock_models_server(
+        models_state: Arc<Mutex<Vec<String>>>,
+        delay_ms: Arc<AtomicUsize>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock /v1/models server");
+        let addr = listener.local_addr().expect("local_addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&hits);
+
+        let handle = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut req_buf = [0u8; 2048];
+                let _ = stream.read(&mut req_buf).await;
+                hits_clone.fetch_add(1, Ordering::SeqCst);
+
+                let sleep_ms = delay_ms.load(Ordering::SeqCst) as u64;
+                if sleep_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                }
+
+                let current_models = models_state.lock().unwrap().clone();
+                let data: Vec<Value> = current_models
+                    .into_iter()
+                    .map(|id| json!({ "id": id, "object": "model" }))
+                    .collect();
+                let body = serde_json::to_string(&json!({ "object": "list", "data": data }))
+                    .expect("serialize models response");
+                let http_resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(http_resp.as_bytes()).await;
+            }
+        });
+
+        (format!("http://{}/v1", addr), hits, handle)
+    }
+
+    #[tokio::test]
+    async fn h09_discover_backends_catalog_fast_sub_ms_warm_coalesces_probes_and_invalidates_on_config_change()
+     {
+        clear_backends_catalog_cache();
+        clear_live_models_cache();
+
+        let tmp = tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+
+        let models_state = Arc::new(Mutex::new(vec![
+            "qwen3-coder-live".to_string(),
+            "deepseek-r1-live".to_string(),
+        ]));
+        let delay_ms = Arc::new(AtomicUsize::new(35));
+        let (mock_base_url, probe_hits, server_handle) =
+            spawn_mock_models_server(Arc::clone(&models_state), Arc::clone(&delay_ms)).await;
+
+        // Configure `~/.zcode/v2/provider_config.json` pointing to our local mock `/v1/models` endpoint.
+        let zcode_v2_dir = base.join(".zcode/v2");
+        std::fs::create_dir_all(&zcode_v2_dir).unwrap();
+        let zcode_cfg_path = zcode_v2_dir.join("provider_config.json");
+        std::fs::write(
+            &zcode_cfg_path,
+            serde_json::to_vec_pretty(&json!({
+                "activeProvider": "zcode-local",
+                "activeModel": "qwen3-coder-live",
+                "providers": {
+                    "zcode-local": {
+                        "name": "ZCode Local Proxy",
+                        "kind": "openai-compatible",
+                        "baseUrl": mock_base_url,
+                        "apiKey": "sk-test-h09-ephemeral-do-not-leak",
+                        "enabled": true,
+                        "models": ["qwen3-coder-live"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let core = IntentOsCore::initialize(Some(&base), repo_root).expect("init core");
+        let paths = core.paths.clone();
+
+        let mut opts = DiscoveryOptions::isolated_for_test(base.clone());
+        opts.probe_remote_models = true;
+
+        // 1. 16 concurrent cold callers must coalesce into a SINGLE `/v1/models` probe (zero probe storm!).
+        let mut join_set = Vec::new();
+        for _ in 0..16 {
+            let c = Arc::clone(&core);
+            let o = opts.clone();
+            join_set.push(tokio::spawn(async move {
+                discover_backends_catalog_fast(&c, &o).await
+            }));
+        }
+        for jh in join_set {
+            let cat = jh.await.expect("join concurrent discovery");
+            assert!(
+                cat.backends
+                    .zcode
+                    .models
+                    .contains(&"deepseek-r1-live".to_string())
+            );
+        }
+        assert_eq!(
+            probe_hits.load(Ordering::SeqCst),
+            1,
+            "16 concurrent cold turns must coalesce into exactly 1 /v1/models HTTP probe"
+        );
+
+        // 2. Warm cache hit must run in < 1 ms and issue ZERO `/v1/models` probes.
+        let warm_iters = 40u32;
+        let warm_start = Instant::now();
+        for _ in 0..warm_iters {
+            let cat = discover_backends_catalog_fast(&core, &opts).await;
+            assert_eq!(cat.active.backend, "zcode");
+            assert_eq!(cat.active.model, "qwen3-coder-live");
+        }
+        let avg_warm = warm_start.elapsed() / warm_iters;
+        assert!(
+            avg_warm.as_micros() < 1_000,
+            "warm discover_backends_catalog_fast must take < 1 ms (got {:?})",
+            avg_warm
+        );
+        assert_eq!(probe_hits.load(Ordering::SeqCst), 1);
+
+        // 3. Expired 60s TTL must return cached snapshot immediately on hot path (non-blocking)
+        //    and coalesce background refresh via `AtomicBool` (zero probe storm!).
+        models_state
+            .lock()
+            .unwrap()
+            .push("glm-5-turbo-bg".to_string());
+        delay_ms.store(75, Ordering::SeqCst);
+        age_backends_catalog_cache_for_test(Duration::from_secs(65));
+
+        let bg_burst_start = Instant::now();
+        let mut bg_callers = Vec::new();
+        for _ in 0..12 {
+            let c = Arc::clone(&core);
+            let o = opts.clone();
+            bg_callers.push(tokio::spawn(async move {
+                discover_backends_catalog_fast(&c, &o).await
+            }));
+        }
+        for jh in bg_callers {
+            let cat = jh.await.expect("join stale-while-revalidate caller");
+            assert_eq!(cat.active.backend, "zcode");
+        }
+        let bg_burst_elapsed = bg_burst_start.elapsed();
+        assert!(
+            bg_burst_elapsed < Duration::from_millis(45),
+            "12 concurrent turns during expired TTL must not block on 75ms HTTP probe (took {:?})",
+            bg_burst_elapsed
+        );
+
+        // Wait for the single coalesced background task to complete and verify model list updated.
+        for _ in 0..40 {
+            if !is_background_catalog_refresh_in_flight() && probe_hits.load(Ordering::SeqCst) >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            probe_hits.load(Ordering::SeqCst),
+            2,
+            "AtomicBool background guard must coalesce 12 concurrent turns into 1 background probe"
+        );
+        let after_bg = discover_backends_catalog_fast(&core, &opts).await;
+        assert!(
+            after_bg
+                .backends
+                .zcode
+                .models
+                .contains(&"glm-5-turbo-bg".to_string()),
+            "background refresh should populate newly available upstream model"
+        );
+
+        // 4. Modifying `quick_chat_backend.json` must invalidate cache immediately (0ms wait),
+        //    including same-byte-length sub-millisecond updates!
+        delay_ms.store(0, Ordering::SeqCst);
+        let active_file = paths.config_dir.join("quick_chat_backend.json");
+        std::fs::write(
+            &active_file,
+            serde_json::to_vec(&json!({
+                "pinned": true,
+                "backend": "zcode",
+                "provider": "zcode-local",
+                "model": "deepseek-r1-live",
+                "reasoning_effort": "high",
+                "updated_at": "2026-11-15T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let after_pin_1 = discover_backends_catalog_fast(&core, &opts).await;
+        assert!(after_pin_1.active.pinned);
+        assert_eq!(after_pin_1.active.model, "deepseek-r1-live");
+        assert_eq!(after_pin_1.active.reasoning_effort, "high");
+
+        // Same-byte-length overwrite (`deepseek-r1-live` == 16 chars, `qwen3-coder-live` == 16 chars)
+        std::fs::write(
+            &active_file,
+            serde_json::to_vec(&json!({
+                "pinned": true,
+                "backend": "zcode",
+                "provider": "zcode-local",
+                "model": "qwen3-coder-live",
+                "reasoning_effort": "high",
+                "updated_at": "2026-11-15T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let after_pin_2 = discover_backends_catalog_fast(&core, &opts).await;
+        assert_eq!(
+            after_pin_2.active.model, "qwen3-coder-live",
+            "same-length sub-millisecond update to quick_chat_backend.json must invalidate immediately"
+        );
+
+        server_handle.abort();
     }
 }

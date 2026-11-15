@@ -31,9 +31,8 @@ use crate::intent_engine::pattern_compiler::PatternCompiler;
 use crate::intent_engine::slot_extractor::parse_numeric_slot;
 use intentos_protocol::{CapabilityDescriptor, DataClass, Effect, RouteLayer};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Maximum candidate capabilities passed into the Fast-LLM structured parser (`H08`).
 pub const MAX_FAST_LLM_CANDIDATE_CAPS: usize = 12;
@@ -52,36 +51,10 @@ const FAST_LLM_SYSTEM_PROMPT: &str = concat!(
     "Rules:1)Use ONLY candidate capability IDs.2)goal_workspace/system_diagnosis/procedural_or_knowledge/compound_task=>recommended_route=\"L2\",requires_planning=true,direct_capability=null.3)direct_capability=[\"id\",{args}] or null."
 );
 
-type CachedCompilerEntry = Option<(u64, Arc<PatternCompiler>)>;
-
-static COMPILER_CACHE: OnceLock<Mutex<CachedCompilerEntry>> = OnceLock::new();
-
 fn cached_pattern_compiler(capabilities: &[CapabilityDescriptor]) -> Arc<PatternCompiler> {
-    let mut hasher = DefaultHasher::new();
-    capabilities.len().hash(&mut hasher);
-    for c in capabilities {
-        c.id.hash(&mut hasher);
-        c.version.hash(&mut hasher);
-        c.summary.hash(&mut hasher);
-        c.aliases.hash(&mut hasher);
-        c.l0_patterns.hash(&mut hasher);
-    }
-    let fp = hasher.finish();
-
-    let cell = COMPILER_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cell.lock()
-        && let Some((cached_fp, ref compiler)) = *guard
-        && cached_fp == fp
-    {
-        return Arc::clone(compiler);
-    }
-
-    let refs: Vec<&CapabilityDescriptor> = capabilities.iter().collect();
-    let compiled = Arc::new(PatternCompiler::compile_from_descriptors(&refs));
-    if let Ok(mut guard) = cell.lock() {
-        *guard = Some((fp, Arc::clone(&compiled)));
-    }
-    compiled
+    crate::capability_snapshot::capability_snapshot_from_slice(capabilities)
+        .pattern_compiler
+        .clone()
 }
 
 /// Fast, zero-latency Stage 0 + Stage 1 progressive semantic goal & state-intent analyzer.

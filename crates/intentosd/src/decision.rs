@@ -459,6 +459,133 @@ impl DecisionAdapter {
         .await
     }
 
+    /// Progressive L0 → L1 → L2 routing & empirical calibration (`H08` + `H09`):
+    /// - Uses `CapabilitySnapshotCache` for zero-clone descriptor access.
+    /// - Invokes compact Fast LLM (`resolve_progressive_intent`) ONLY on genuinely ambiguous L1 utterances
+    ///   when `gateway.has_usable_credentials()`, skipping Fast LLM on clear L0 or clear L2 intents.
+    pub async fn classify_colloquial_intent_progressive(
+        &self,
+        text: &str,
+        descriptors: &[&CapabilityDescriptor],
+        context_hint: Option<&str>,
+    ) -> (L1DecisionOutcome, StructuredIntent) {
+        let trimmed = text.trim();
+        let snap = crate::capability_snapshot::capability_snapshot_from_refs(descriptors);
+        let prog_intent = resolve_progressive_intent(
+            &self.gateway,
+            Some(&self.state_db),
+            trimmed,
+            context_hint,
+            snap.descriptors_slice(),
+        )
+        .await;
+
+        let injection_score = score_prompt_injection_risk(trimmed);
+        let extra_taint = if injection_score >= 0.65 {
+            Some(Taint::LocalUntrusted)
+        } else {
+            None
+        };
+
+        if matches!(
+            prog_intent.intent_type,
+            CognitiveIntentKind::GoalWorkspace
+                | CognitiveIntentKind::SystemDiagnosis
+                | CognitiveIntentKind::ProceduralOrKnowledge
+                | CognitiveIntentKind::CompoundTask
+        ) || prog_intent.requires_planning
+        {
+            self.state_db.record_decision_calibration(
+                trimmed,
+                "escalate_l2_progressive_goal",
+                prog_intent.confidence,
+                1.0,
+                estimate_multistep_probability(trimmed).max(0.85),
+                injection_score,
+                "escalate_l2",
+            );
+            return (
+                L1DecisionOutcome::EscalateL2 {
+                    reason: prog_intent.escalation_summary(),
+                    extra_taint,
+                },
+                prog_intent,
+            );
+        }
+
+        // If compact Fast LLM resolved an ambiguous colloquial command into a schema-validated single capability:
+        if !matches!(
+            prog_intent.confidence_provenance,
+            ConfidenceProvenance::HeuristicLexical
+        ) && let Some((ref cap_id, ref args)) = prog_intent.direct_capability
+            && (descriptors.is_empty() || snap.get_descriptor(cap_id).is_some())
+        {
+            let prob = prog_intent.confidence;
+            if prob >= self.direct_threshold {
+                self.state_db.record_decision_calibration(
+                    trimmed,
+                    cap_id,
+                    prob,
+                    0.45,
+                    0.0,
+                    injection_score,
+                    "execute_l1_progressive",
+                );
+                return (
+                    L1DecisionOutcome::Execute {
+                        capability_id: cap_id.clone(),
+                        arguments: args.clone(),
+                        summary: format!(
+                            "L1 渐进语义解析匹配：{} (p={:.2}, prov={})",
+                            prog_intent.goal,
+                            prob,
+                            prog_intent.confidence_provenance.as_str()
+                        ),
+                        probability: prob,
+                        extra_taint,
+                    },
+                    prog_intent,
+                );
+            }
+            if prob >= self.clarify_threshold {
+                let matched_desc = snap.get_descriptor(cap_id);
+                let title = matched_desc
+                    .map(|d| d.summary.clone())
+                    .unwrap_or_else(|| prog_intent.goal.clone());
+                let badge = matched_desc
+                    .map(|d| format!("L1·{}", d.max_effect().risk_badge()))
+                    .unwrap_or_else(|| "L1·操作".to_string());
+                let candidate = CandidateItem {
+                    id: format!("l1:{}:{}", cap_id, trimmed),
+                    kind: CandidateKind::Capability,
+                    title,
+                    subtitle: format!(
+                        "能力 `{}` · 渐进解析置信分 {:.0}% ({})",
+                        cap_id,
+                        (prob * 100.0).min(99.0),
+                        prog_intent.confidence_provenance.as_str()
+                    ),
+                    badge,
+                    score: prob * 100.0,
+                    capability_id: Some(cap_id.clone()),
+                    arguments: args.clone(),
+                    resource_uri: None,
+                };
+                return (
+                    L1DecisionOutcome::Clarify {
+                        prompt: format!("请确认是否执行以下操作（p={:.2}）：", prob),
+                        candidates: vec![candidate],
+                        extra_taint,
+                    },
+                    prog_intent,
+                );
+            }
+        }
+
+        let sync_outcome = self.classify_colloquial_intent(text, descriptors);
+        (sync_outcome, prog_intent)
+    }
+
     /// L1 Routing & Calibration step between L0 deterministic grammar and L2 Agent Runtime (§4.1, §4.2, `H08`).
     pub fn classify_colloquial_intent(
         &self,
@@ -474,8 +601,8 @@ impl DecisionAdapter {
         };
 
         let multistep_prob = estimate_multistep_probability(trimmed);
-        let owned_caps: Vec<CapabilityDescriptor> = descriptors.iter().copied().cloned().collect();
-        let raw_structured = parse_structured_intent(trimmed, &owned_caps);
+        let snap = crate::capability_snapshot::capability_snapshot_from_refs(descriptors);
+        let raw_structured = parse_structured_intent(trimmed, snap.descriptors_slice());
 
         if matches!(
             raw_structured.intent_type,

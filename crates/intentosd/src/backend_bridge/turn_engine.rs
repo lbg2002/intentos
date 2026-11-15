@@ -23,7 +23,7 @@ use crate::backend_bridge::broker_bridge::{
 };
 use crate::backend_bridge::detector::{
     ActiveBackendSelection, BackendsCatalog, CatalogBackends, DiscoveryOptions,
-    auto_select_best_backend, discover_backends_catalog, is_direct_http_endpoint,
+    auto_select_best_backend, discover_backends_catalog_fast, is_direct_http_endpoint,
     lookup_ephemeral_backend_key, normalize_reasoning_effort, sanitize_url_no_secrets,
     scrub_json_secrets, store_ephemeral_backend_key,
 };
@@ -42,7 +42,7 @@ use crate::backend_bridge::turn_checkpoint::{
 use crate::config_center::brain_manager::{store_provider_credential, upsert_provider};
 use crate::config_center::store::{load_domains_config, save_domains_config};
 use crate::core::IntentOsCore;
-use crate::intent_engine::{CognitiveIntentKind, parse_structured_intent};
+use crate::intent_engine::{CognitiveIntentKind, resolve_progressive_intent};
 use crate::runtime::SessionState;
 use crate::security_guard::{ExecutionContext, PrivacySessionPolicy, SensitiveDataGuard};
 use chrono::Utc;
@@ -357,14 +357,14 @@ pub async fn set_active_backend_with_options(
             updated_at: Utc::now().to_rfc3339(),
         };
         save_persisted_backend(core, &record)?;
-        let catalog = discover_backends_catalog(core, opts).await;
+        let catalog = discover_backends_catalog_fast(core, opts).await;
         return Ok(json!({
             "saved": true,
             "active": catalog.active,
         }));
     }
 
-    let pre_catalog = discover_backends_catalog(core, opts).await;
+    let pre_catalog = discover_backends_catalog_fast(core, opts).await;
     let disc = pre_catalog.backends.get(&raw_backend);
     let final_provider = req_provider
         .or_else(|| disc.and_then(|b| b.default_provider.clone()))
@@ -396,7 +396,7 @@ pub async fn set_active_backend_with_options(
     };
     save_persisted_backend(core, &record)?;
 
-    let post_catalog = discover_backends_catalog(core, opts).await;
+    let post_catalog = discover_backends_catalog_fast(core, opts).await;
     Ok(json!({
         "saved": true,
         "active": post_catalog.active,
@@ -595,7 +595,7 @@ pub async fn send_quick_chat_turn_with_options(
     };
     let mut turn_guard = ActiveTurnDropGuard::new(turn_handle.clone());
 
-    let catalog = discover_backends_catalog(core, opts).await;
+    let catalog = discover_backends_catalog_fast(core, opts).await;
     let mut active = catalog.active.clone();
 
     if let Some(eff_override) = payload.get("reasoning_effort").and_then(|v| v.as_str()) {
@@ -730,15 +730,28 @@ pub async fn send_quick_chat_turn_with_options(
         });
     }
 
-    let owned_descriptors: Vec<intentos_protocol::CapabilityDescriptor> =
-        core.broker.descriptors().into_iter().cloned().collect();
-    let structured_intent = parse_structured_intent(&text, &owned_descriptors);
+    let cap_snapshot = crate::capability_snapshot::capability_snapshot_for_core(core);
+    let cal_db = if privacy.allows_memory_read() {
+        Some(core.state_db.as_ref())
+    } else {
+        None
+    };
+    let structured_intent = resolve_progressive_intent(
+        &core.gateway,
+        cal_db,
+        &text,
+        clipboard_context.as_deref(),
+        cap_snapshot.descriptors_slice(),
+    )
+    .await;
     if matches!(
         structured_intent.intent_type,
         CognitiveIntentKind::GoalWorkspace
             | CognitiveIntentKind::SystemDiagnosis
             | CognitiveIntentKind::CompoundTask
-    ) {
+            | CognitiveIntentKind::RelativeAdjustment
+    ) || structured_intent.prerequisite_observe_capability.is_some()
+    {
         extra_blocks.push(ContextBlock {
             id: "cognitive_goal_hint".to_string(),
             label: "cognitive_goal_analysis".to_string(),
