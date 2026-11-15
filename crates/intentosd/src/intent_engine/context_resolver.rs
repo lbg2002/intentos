@@ -469,8 +469,32 @@ pub fn resolve_context_references(
             }
         }
 
-        for phrase in ["剪贴板里的内容", "剪贴板内容", "剪贴板里的文字", "剪贴板"]
-        {
+        let is_clipboard_destination_or_clear = [
+            "复制到剪贴板",
+            "拷贝到剪贴板",
+            "拷到剪贴板",
+            "写入剪贴板",
+            "写到剪贴板",
+            "放到剪贴板",
+            "存入剪贴板",
+            "发到剪贴板",
+            "到剪贴板",
+            "进剪贴板",
+            "清空剪贴板",
+        ]
+        .iter()
+        .any(|pat| trimmed.contains(pat));
+
+        for phrase in [
+            "剪贴板里的内容",
+            "剪贴板中的内容",
+            "剪贴板内容",
+            "剪贴板里的文字",
+            "剪贴板",
+        ] {
+            if phrase == "剪贴板" && is_clipboard_destination_or_clear {
+                continue;
+            }
             if trimmed.contains(phrase) {
                 if let Some(clip) = dctx
                     .clipboard_text
