@@ -42,7 +42,8 @@ AIOS 的交付单位应为用户目标闭环：**理解目标 → 找到授权�
 | P1 | `meta_tools.rs::execute_task_verify` | 应用进程未观察到时，以历史启动记录判定通过 | 启动账本仅作诊断信息；缺少进程观察即不通过该谓词 |
 | P1 | 同上 | `succeeded` 包含 `RequestedUnverified`，却被计入已验证步骤 | 只计入 `succeeded && verification_status == Passed` |
 | P1 | 同上 | 失败后任意同能力调用成功都能掩盖原失败，例如 A 文件查询失败、B 成功 | 恢复要求同能力、同规范化参数和 `Passed` |
-| P1 | 同上及元工具包装层 | 数据 `verified:false` 与外层 `Exited/Passed/0` 矛盾 | 失败返回 `VerificationFailed/VerificationFailed/1`；无检查证据时显式列出失败原因 |
+| P1 | `intentosctl/src/eval.rs` | 固定 Node 路径导致红队中止；未监听端口的拒绝连接可能伪装为网络隔离 | 从 PATH 定位 Node，使用真实本地监听端口；探针错误记录失败而非中止整份报告 |
+| P1 | `meta_tools.rs` 及元工具包装层 | 数据 `verified:false` 与外层 `Exited/Passed/0` 矛盾 | 失败返回 `VerificationFailed/VerificationFailed/1`；无检查证据时显式列出失败原因 |
 
 兼容性：沿用工具参数和返回数据主体；失败状态更严格是有意修复。Web/GTK 本地无 Origin 客户端继续可用；浏览器须使用页面同源地址。远程直连 `--web-listen 0.0.0.0` 不再支持，远程访问需另行设计认证、授权与传输协议。
 
@@ -54,7 +55,8 @@ AIOS 的交付单位应为用户目标闭环：**理解目标 → 找到授权�
 4. `execution_hub/project_memory.rs::with_store` 读取也可能重写 JSON，且写入错误被忽略。M3 需分离读写、原子持久化、传播错误并验证隐私链路；不能认为所有记忆都已统一在 SQLite。
 5. `execution_hub/drive_scheduler.rs` 有规则、触发与防抖判断，但无独立后台监听/调度循环；不代表 M4 的真实事件总线已交付。
 6. 尚无仓库 `.github/workflows/`。建议在确认 Ubuntu 系统依赖与沙箱运行能力后增加分层 CI；容器不能执行的 bwrap 测试须明确失败/条件，不以静默跳过冒充安全验证。
-7. README 的固定测试数量、兼容平台和性能数字是历史记录，应附运行环境与提交。`Cargo.toml` 的 Apache-2.0 与 README 的 MIT 声明存在冲突，需由维护者结合原始授权决定，本轮不擅自变更许可证。
+7. README 原先的全仓禁用 `unsafe` 声明与 `fsops` / `sandbox` 原生系统调用实现不符，已修正文档。系统调用边界需要单独审查，不应通过删除隔离实现来迎合文档。
+8. README 的固定测试数量、兼容平台和性能数字是历史记录，应附运行环境与提交。`Cargo.toml` 的 Apache-2.0 与 README 的 MIT 声明存在冲突，需由维护者结合原始授权决定，本轮不擅自变更许可证。
 
 ## 3. 更新后的交付顺序
 

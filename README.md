@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Ubuntu%2022.04%20%7C%2024.04%20%7C%2026.04-E95420)](https://ubuntu.com/)
-[![Rust](https://img.shields.io/badge/Rust-unsafe__forbid-orange.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/Rust-trusted__core-orange.svg)](Cargo.toml)
 
 **IntentOS** 是一个运行在 Ubuntu / GNOME 桌面之上的开源 **AI 操作系统智能壳层（AIOS Shell & Safe Execution Core）**。
 
@@ -40,7 +40,7 @@ Linux 上大量第三方/国产桌面软件没有命令行参数或标准接口�
   - 越近的对话保留越完整，越早的对话按指数时间衰减浓缩摘要，超远期自动滚动归并，长会话永不撑爆模型上下文。
 
 ### 4. 可信四级路径边界、内联审批续接会话与可逆撤销 (`policy` & `fsops`)
-- 基于 Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` 内核级防符号链接逃逸，全核心 `#![forbid(unsafe_code)]`。
+- 基于 Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` 内核级防符号链接逃逸；守护进程与协议等模块禁用 `unsafe`，`fsops` / `sandbox` 的内核系统调用包含需单独审查的 `unsafe` 边界。
 - **四级权限边界**：
   - **禁区（永不放行）**：`~/.ssh`、`~/.gnupg`、`/etc/shadow`、私钥凭据等硬性拦截；
   - **常规用户空间**：自动识别中英文 XDG 目录（`桌面/文档/下载` 等），读取/打开丝滑免打扰；
@@ -141,7 +141,7 @@ cargo build --release
 ## 🧪 运行测试与门禁检查
 
 ```bash
-# 全仓零警告静态检查与 226 项单元/端到端集成测试
+# 格式、静态检查与全量单元/端到端测试（真实沙箱用例需要宿主机隔离能力）
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace -- --test-threads=1
@@ -158,7 +158,7 @@ env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace -- --test-threads=1
 
 ## 🗺️ v0.2 Cognitive Shell 路线图
 
-最新的代码审查、目标验收方法与交付优先级见 [AIOS 代码审查与目标交付方案](docs/AIOS_REVIEW_AND_DELIVERY_PLAN.md)。该方案区分请求已发送、步骤已验证和用户目标达成，并记录当前实现边界及 M3/M4 验收条件。
+最新的代码审查、目标验收方法与交付优先级见 [AIOS 代码审查与目标交付方案](docs/AIOS_REVIEW_AND_DELIVERY_PLAN.md)。本轮实际测试结果与未通过项见 [验证报告](docs/AIOS_VALIDATION_REPORT.md)。该方案区分请求已发送、步骤已验证和用户目标达成，并记录当前实现边界及 M3/M4 验收条件。
 
 IntentOS 正在从 v0.1「单点系统控制与命令路由壳层」全面升级为 **v0.2 Cognitive Shell（懂个人项目上下文、能跨软件协同、可验证且可逆的高可信桌面认知壳层）**。完整架构设计与同机性能对照实测请参阅 **[docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md)** 与 **[docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md](docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md)**，实时研发进度可在 **[GitHub Milestones](https://github.com/lbg2002/intentos/milestones)** 查看：
 

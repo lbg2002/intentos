@@ -17,7 +17,7 @@ IntentOS v0.2 围绕以下四条核心工程准则推进架构升级：
 1. **大脑可插拔，身体强统一**：无论底层接入云端 OpenAI / Anthropic 接口还是本机 CLI 模型（`ZCode` / `Codex` / `Pi`），所有工具发现、文件读写、软件协同、权限审批、幂等记账与回滚快照均 100% 收口至统一的 `CapabilityBroker`。
 2. **从“关键词匹配”升级为“结构化目标理解”**：L1 认知层不再把模糊口语强行塞进单一静态命令，而是识别用户的真实目标态（如进入论文专注状态、排查电脑卡顿、晨间工作接续），保障复合意图零静默丢步。
 3. **动态按需发现取代全量静态平铺**：通过 5 个核心元工具（`capability.search / describe / invoke / app.discover / task.verify`）与 C0–C4 受控终端，以更低 Token 开销撬动 95+ 内置能力、本机全量桌面软件与长尾系统排障。
-4. **安全、幂等与隐私是不可妥协的底座**：全核心 `#![forbid(unsafe_code)]`，`openat2` 内核级路径防逃逸，`TurnEffectLedger` 阻断故障回退时的重复副作用，`PrivacySessionPolicy` 严格隔离无痕会话读写，`SensitiveDataGuard` 保障高敏凭据零明文落盘。
+4. **安全、幂等与隐私是不可妥协的底座**：守护进程与协议等模块禁用 `unsafe`，原生系统调用模块保留独立审查边界，`openat2` 内核级路径防逃逸，`TurnEffectLedger` 阻断故障回退时的重复副作用，`PrivacySessionPolicy` 严格隔离无痕会话读写，`SensitiveDataGuard` 保障高敏凭据零明文落盘。
 
 ---
 
@@ -74,7 +74,7 @@ flowchart TB
 | **Layer 2：结构化认知理解层** | 将自然语言转化为带目标、子目标、隐含约束与路由建议的 `StructuredIntent` | `intent_engine/goal_schema.rs`、`cognitive_parser.rs`、`compound_splitter.rs`、`decision.rs`、`router.rs` | 多子句复合指令 **100% 追踪未决子句**，绝不静默吞步 |
 | **Layer 3：统一智能体核心层** | 统一编排 HTTP/CLI 多后端推理、审批挂起续接、副作用账本与后台主动触发 | `backend_bridge/{turn_engine,turn_checkpoint,broker_bridge,providers_http,providers_cli}.rs`、`execution_hub/` | 已产生副作用后遇上游报错**严禁跨后端重放**；后台事件严格防抖限流 |
 | **Layer 4：个人认知记忆层** | 贯通 M0–M4 五层个人记忆、动态重要性召回、项目工作空间恢复与技能自沉淀 | `memory_hub/`、`execution_hub/{project_memory,skill_workflow}.rs`、`db.rs` | 无关指令零噪音注入；技能复用**零越权免审继承** |
-| **Layer 5：受控能力与安全内核** | 元工具动态发现、五级软件通道降级、C0–C4 终端提案与内核级安全脱敏防线 | `broker.rs`、`policy.rs`、`security_guard.rs`、`app_adapter/`、`crates/fsops/`、`crates/sandbox/` | 全仓 `#![forbid(unsafe_code)]`；高敏密钥磁盘 **0 明文残留** |
+| **Layer 5：受控能力与安全内核** | 元工具动态发现、五级软件通道降级、C0–C4 终端提案与内核级安全脱敏防线 | `broker.rs`、`policy.rs`、`security_guard.rs`、`app_adapter/`、`crates/fsops/`、`crates/sandbox/` | 守护进程禁用 `unsafe`，原生系统调用独立审查；高敏密钥磁盘 **0 明文残留** |
 
 ---
 
