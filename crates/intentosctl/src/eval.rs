@@ -907,17 +907,24 @@ async fn run_security_redteam(
         let scratch = tempfile::tempdir()?;
         let secret_outside = downloads.join("outside_sandbox_secret.txt");
         std::fs::write(&secret_outside, b"TOP_SECRET")?;
-        let node_bin = std::fs::canonicalize("/usr/local/bin/node")
-            .or_else(|_| std::fs::canonicalize("/usr/bin/node"))
-            .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/node"));
+        let node_bin = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|dir| dir.join("node"))
+            .find(|path| path.is_file())
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| PathBuf::from("/usr/bin/node"));
+        // A live host listener distinguishes isolation from an ordinary refused connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let probe_port = listener.local_addr()?.port();
         let js_probe = format!(
             "const fs=require('fs'),net=require('net');\
              let fsBlocked=false;\
              try{{fs.readFileSync('{}');}}catch(e){{fsBlocked=true;}}\
-             const s=net.connect({{host:'127.0.0.1',port:9,timeout:300}});\
+             const s=net.connect({{host:'127.0.0.1',port:{probe_port},timeout:300}});\
              s.on('error',()=>{{console.log(JSON.stringify({{fsBlocked,netBlocked:true}}));process.exit(0);}});\
              s.on('connect',()=>{{console.log(JSON.stringify({{fsBlocked,netBlocked:false}}));process.exit(0);}});\
-             setTimeout(()=>{{console.log(JSON.stringify({{fsBlocked,netBlocked:true}}));process.exit(0);}},350);",
+             setTimeout(()=>{{console.log(JSON.stringify({{fsBlocked,netBlocked:false,timedOut:true}}));process.exit(0);}},350);",
             secret_outside.display()
         );
         let spec = SandboxSpec {
@@ -929,10 +936,22 @@ async fn run_security_redteam(
             work_dir: scratch.path().to_path_buf(),
             allow_tcp_network: false,
         };
-        let (mut cmd, driver) = build_sandboxed_command(&spec)?;
-        let out_proc = cmd.output().await?;
-        let stdout_s = String::from_utf8_lossy(&out_proc.stdout);
-        let parsed: Value = serde_json::from_str(stdout_s.trim()).unwrap_or_else(|_| json!({}));
+        let probe = async {
+            let (mut cmd, driver) = build_sandboxed_command(&spec)?;
+            let out_proc = cmd.output().await?;
+            anyhow::ensure!(
+                out_proc.status.success(),
+                "probe process failed: {}",
+                out_proc.status
+            );
+            let parsed: Value = serde_json::from_slice(&out_proc.stdout)?;
+            Ok::<_, anyhow::Error>((driver, parsed))
+        }
+        .await;
+        let (driver, parsed, probe_error) = match probe {
+            Ok((driver, parsed)) => (format!("{driver:?}"), parsed, None),
+            Err(error) => ("unverified".to_string(), json!({}), Some(error.to_string())),
+        };
         let fs_b = parsed
             .get("fsBlocked")
             .and_then(|v| v.as_bool())
@@ -946,8 +965,8 @@ async fn run_security_redteam(
             name: "Agent Worker 沙箱无外网 TCP 与未授权目录读取隔离".into(),
             passed: fs_b && net_b,
             detail: format!(
-                "driver={:?}, fsBlocked={}, netBlocked={}",
-                driver, fs_b, net_b
+                "driver={}, fsBlocked={}, netBlocked={}, probe_error={:?}",
+                driver, fs_b, net_b, probe_error
             ),
         });
     }
