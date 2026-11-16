@@ -279,14 +279,13 @@ fn decode_file_uri(raw_href: &str) -> Option<String> {
     } else if let Some(rest) = unescaped.strip_prefix("file://~/") {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
         format!("{}/{}", home.trim_end_matches('/'), rest)
-    } else if let Some(rest) = unescaped.strip_prefix("file://") {
+    } else {
+        let rest = unescaped.strip_prefix("file://")?;
         if rest.starts_with('/') {
             rest.to_string()
         } else {
             return None;
         }
-    } else {
-        return None;
     };
 
     Some(percent_decode_utf8_lossy(&encoded_path))
@@ -1209,10 +1208,7 @@ fn matches_xbel_app(app: &SoftwareProfile, x_name: &str, x_exec: &str) -> bool {
             return true;
         }
     }
-    if !xe.is_empty() && xe != "gio" && xe != "sh" && xe != "bash" && xe == app_exec_lc {
-        return true;
-    }
-    false
+    !xe.is_empty() && xe != "gio" && xe != "sh" && xe != "bash" && xe == app_exec_lc
 }
 
 /// Increment IntentOS usage count for a file path in `long_term_files` and recompute Frecency.

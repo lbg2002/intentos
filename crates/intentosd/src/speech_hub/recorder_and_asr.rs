@@ -804,7 +804,7 @@ pub fn inspect_wav_audio_quality(wav_path: &Path) -> anyhow::Result<WavAudioStat
     let mut sample_count = 0usize;
 
     if audio_format == 3 && bytes_per_sample == 4 {
-        for chunk in data_slice.chunks_exact(4) {
+        for chunk in data_slice.as_chunks::<4>().0 {
             let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
             let clamped = v.clamp(-1.0, 1.0);
             sum_sq += clamped * clamped;
@@ -812,7 +812,7 @@ pub fn inspect_wav_audio_quality(wav_path: &Path) -> anyhow::Result<WavAudioStat
             sample_count += 1;
         }
     } else if bytes_per_sample == 2 {
-        for chunk in data_slice.chunks_exact(2) {
+        for chunk in data_slice.as_chunks::<2>().0 {
             let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 / 32768.0;
             sum_sq += s * s;
             peak_norm = peak_norm.max(s.abs());
@@ -826,7 +826,7 @@ pub fn inspect_wav_audio_quality(wav_path: &Path) -> anyhow::Result<WavAudioStat
             sample_count += 1;
         }
     } else if bytes_per_sample == 4 {
-        for chunk in data_slice.chunks_exact(4) {
+        for chunk in data_slice.as_chunks::<4>().0 {
             let s =
                 i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64 / 2147483648.0;
             sum_sq += s * s;

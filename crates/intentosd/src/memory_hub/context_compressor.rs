@@ -360,12 +360,7 @@ fn line_has_salient_structure_or_entity(line: &str) -> bool {
     }
     // Numbered list like `1. ...`
     let mut chars = t.chars();
-    if chars.next().is_some_and(|c| c.is_ascii_digit())
-        && chars.take(3).any(|c| c == '.' || c == '、')
-    {
-        return true;
-    }
-    false
+    chars.next().is_some_and(|c| c.is_ascii_digit()) && chars.take(3).any(|c| c == '.' || c == '、')
 }
 
 /// Structure-aware Markdown answer compressor for Zone 1 (`w in [0.28, 1.0)`):

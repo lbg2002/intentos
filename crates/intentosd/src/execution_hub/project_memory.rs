@@ -161,16 +161,12 @@ pub fn discover_and_list_projects(
                     return false;
                 }
                 let name = e.file_name().to_string_lossy();
-                if e.depth() > 0
+                !(e.depth() > 0
                     && (name.starts_with('.')
                         || matches!(
                             name.as_ref(),
                             "target" | "node_modules" | ".venv" | "dist" | "build" | "__pycache__"
-                        ))
-                {
-                    return false;
-                }
-                true
+                        )))
             })
             .flatten()
         {

@@ -1309,13 +1309,12 @@ fn fx_mix_u64(state: u64, word: u64) -> u64 {
 #[inline]
 fn fx_mix_bytes(mut state: u64, bytes: &[u8]) -> u64 {
     state = fx_mix_u64(state, bytes.len() as u64);
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, rem) = bytes.as_chunks::<8>();
+    for chunk in chunks {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(chunk);
         state = fx_mix_u64(state, u64::from_le_bytes(buf));
     }
-    let rem = chunks.remainder();
     if !rem.is_empty() {
         let mut tail = [0u8; 8];
         tail[..rem.len()].copy_from_slice(rem);
