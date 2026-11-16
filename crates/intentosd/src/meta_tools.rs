@@ -2041,14 +2041,10 @@ fn is_path_within_authorized_or_session_scope(
     }
 
     let _ = session_id;
-    if core.policy.is_session_granted(
+    core.policy.is_session_granted(
         "file.read",
         &json!({ "path": check_target.to_string_lossy() }),
-    ) {
-        return true;
-    }
-
-    false
+    )
 }
 
 fn is_process_running_by_hint(hint: &str) -> Vec<u32> {
@@ -2242,19 +2238,14 @@ fn execute_task_verify(
                 "running": true,
                 "pids": pids,
             }));
-        } else if launched_in_ledger {
-            passed.push(json!({
-                "check": "expected_app",
-                "target": app_hint,
-                "running": false,
-                "launch_step_verified_in_ledger": true,
-            }));
         } else {
             failed.push(json!({
                 "check": "expected_app",
                 "target": app_hint,
+                "running": false,
+                "launch_step_recorded_in_ledger": launched_in_ledger,
                 "installed": !desktop_matches.is_empty(),
-                "reason": "process_not_running_and_not_launched",
+                "reason": "process_not_observed",
             }));
         }
     }
@@ -2282,19 +2273,24 @@ fn execute_task_verify(
             {
                 continue;
             }
-            if rec.succeeded {
+            let is_verified = |r: &crate::backend_bridge::turn_checkpoint::StepExecutionRecord| {
+                r.succeeded && r.verification_status.eq_ignore_ascii_case("passed")
+            };
+            if is_verified(rec) {
                 verified_domain_steps.push(format!("{}:{}", rec.step_id, rec.capability_id));
             } else {
-                let recovered_later = records[idx + 1..]
-                    .iter()
-                    .any(|later| later.capability_id == rec.capability_id && later.succeeded);
+                let recovered_later = records[idx + 1..].iter().any(|later| {
+                    later.capability_id == rec.capability_id
+                        && later.canonical_args_json == rec.canonical_args_json
+                        && is_verified(later)
+                });
                 if !recovered_later {
                     failed.push(json!({
                         "check": "ledger_step",
                         "step_id": rec.step_id,
                         "capability_id": rec.capability_id,
                         "verification_status": rec.verification_status,
-                        "reason": if rec.was_denied() { "step_denied" } else { "step_failed" },
+                        "reason": if rec.was_denied() { "step_denied" } else if rec.succeeded { "step_not_verified" } else { "step_failed" },
                     }));
                 }
             }
@@ -2314,6 +2310,12 @@ fn execute_task_verify(
         }
     }
 
+    if passed.is_empty() && failed.is_empty() {
+        failed.push(json!({
+            "check": "execution_evidence",
+            "reason": "no_verified_steps_or_host_targets",
+        }));
+    }
     let verified = failed.is_empty() && !passed.is_empty();
     let msg = if verified {
         format!("task.verify 校验通过（{} 项检查全部通过）", passed.len())
@@ -2332,7 +2334,11 @@ fn execute_task_verify(
         "changeset_ids": effect_ledger.committed_changeset_ids(),
     });
     (
-        ExecutionStatus::Exited,
+        if verified {
+            ExecutionStatus::Exited
+        } else {
+            ExecutionStatus::VerificationFailed
+        },
         msg,
         data,
         "host_and_ledger_verify",
@@ -2549,6 +2555,123 @@ mod tests {
         )
         .unwrap();
         IntentOsCore::initialize(Some(base), repo_root).expect("init m2a test core")
+    }
+
+    fn verification_record(
+        step: &str,
+        capability: &str,
+        args: Value,
+        status: &str,
+    ) -> crate::backend_bridge::turn_checkpoint::StepExecutionRecord {
+        crate::backend_bridge::turn_checkpoint::StepExecutionRecord {
+            step_id: step.into(),
+            idempotency_key: step.into(),
+            capability_id: capability.into(),
+            canonical_args_json: args.to_string(),
+            effect: Effect::Observe,
+            mutated_state: false,
+            succeeded: status != "VerificationFailed",
+            changeset_id: None,
+            verification_status: status.into(),
+            cached_output: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_verify_reports_failed_evidence_in_protocol_and_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let core = init_m2a_test_core(tmp.path(), &ws);
+        for args in [
+            json!({"goal":"missing output", "expected_files":[ws.join("missing.txt")]}),
+            json!({"goal":"no evidence", "check_ledger": false}),
+        ] {
+            let result = execute_non_invoke_meta_tool(
+                &core,
+                META_TASK_VERIFY,
+                "verify-test",
+                None,
+                "test",
+                PrivacySessionPolicy::Standard,
+                &args,
+                &TurnEffectLedger::new("verify-test"),
+            )
+            .await;
+            assert_eq!(result.status, ExecutionStatus::VerificationFailed);
+            assert_eq!(
+                result.verification.state,
+                VerificationState::VerificationFailed
+            );
+            assert_eq!(result.exit_code, Some(1));
+            assert_eq!(result.data["verified"], false);
+            assert!(!result.data["failed"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn task_verify_requires_observed_app_and_verified_same_target_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let core = init_m2a_test_core(tmp.path(), &ws);
+        let mut ledger = TurnEffectLedger::new("verify-test");
+        // A successful launch receipt is not evidence of a currently running app.
+        let app = "intentos_nonexistent_app_for_verification_test";
+        ledger.record_step(verification_record(
+            "launch",
+            "app.launch",
+            json!({"app":app}),
+            "Passed",
+        ));
+        let (_, _, data, _, _) = execute_task_verify(
+            &core,
+            "test",
+            &json!({"goal":"open app", "expected_apps":[app]}),
+            &ledger,
+        );
+        assert_eq!(data["verified"], false);
+        assert_eq!(data["failed"][0]["launch_step_recorded_in_ledger"], true);
+
+        let mut ledger = TurnEffectLedger::new("retry-test");
+        ledger.record_step(verification_record(
+            "failed",
+            "file.search",
+            json!({"query":"A"}),
+            "VerificationFailed",
+        ));
+        ledger.record_step(verification_record(
+            "different",
+            "file.search",
+            json!({"query":"B"}),
+            "Passed",
+        ));
+        let args = json!({"goal":"find A and B"});
+        assert_eq!(
+            execute_task_verify(&core, "test", &args, &ledger).2["verified"],
+            false
+        );
+        ledger.record_step(verification_record(
+            "retry",
+            "file.search",
+            json!({"query":"A"}),
+            "Passed",
+        ));
+        assert_eq!(
+            execute_task_verify(&core, "test", &args, &ledger).2["verified"],
+            true
+        );
+
+        let mut ledger = TurnEffectLedger::new("unverified-test");
+        ledger.record_step(verification_record(
+            "requested",
+            "app.launch",
+            json!({"app":app}),
+            "RequestedUnverified",
+        ));
+        let data = execute_task_verify(&core, "test", &args, &ledger).2;
+        assert_eq!(data["verified"], false);
+        assert_eq!(data["failed"][0]["reason"], "step_not_verified");
     }
 
     #[test]
