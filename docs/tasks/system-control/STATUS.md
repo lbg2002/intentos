@@ -15,7 +15,7 @@
 | SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | SC-07 局部修复提交 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
 | SC-08 | Bash复合计划 | 03/04 | blocked | SC-08 草案校验提交 | 显式 argv 管道草案静态校验；不可执行，解析器/运行时受03/04阻塞 |
 | SC-09 | 审批与结果体验 | 03/05，特权依赖07 | blocked | SC-09 安全显示与服务端收口提交 | Web 标记注入与终端会话授权防护；全客户端 V14/V15 blocked |
-| SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | todo | — | 不将环境跳过计为通过 |
+| SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | blocked | SC-10 发布门禁提交 | 显式 release_allowed=false；现有 P0/真实 L2/L3/L4 未达标 |
 
 ## 每次交付追加模板
 
@@ -95,3 +95,10 @@ GitHub提交或PR链接：
 - Web 的审批 cap ID 和资源结果 cap ID 使用 textContent 替代字符串插入 innerHTML，避免来自模型/外部参数的标记注入。
 - 浏览器隐藏终端“允许本任务/本会话”并阻止点击；**服务端** PolicyEngine 的 session grant、GrantEnvelope 的创建与消费、持久化审批续跑均拒绝对 terminal.execute 使用跨动作授权，防止只改 UI 的绕过。
 - 不变更终端单次 nonce+digest 原有审批；真实 CLI/HTTP/GTK/GNOME 双端一致性、V14/V15 与脚本冻结依赖仍 blocked。静态/回归由 CI 核验，不因缺桌面而算通过。
+
+
+## SC-10（2026-11-17）
+
+- 增加 `scripts/sc10_release_gate.py`，逐包要求 STATUS=verified 且相应的 SHA、runner、命令与 L1/L2/L3 证据文件齐全；skipped/failed 不计 passed；默认阻断发布。没有扩展已启用能力。
+- 本地隔离 fixture 的 3 个 Python 单元测试 PASS；缺实际 L1/L2/L3/L4 证据，当前批次 release_allowed=false。门禁仅能检查报告字段，不是签名证明或真实硬件认证的替代品。
+- SC-03/04/06/07/08/09 关键验收未通过，SC-10 blocked。未运行 Release 性能 benchmark，不发布完整 Bash、特权代理或全面软件兼容声明。
