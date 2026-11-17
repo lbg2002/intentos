@@ -28,7 +28,7 @@ setup_build_env_if_needed() {
   fi
 }
 
-if [[ "${1:-}" == "--prebuilt" ]] || { [[ -x "${REPO_ROOT}/bin/intentosd" ]] && ! command -v cargo >/dev/null 2>&1; }; then
+if [[ "${1:-}" == "--prebuilt" ]] || { [[ -x "${REPO_ROOT}/bin/intentosd" && -x "${REPO_ROOT}/bin/intentosctl" ]] && ! command -v cargo >/dev/null 2>&1; }; then
   echo "==> [1/4] 使用发行包预编译 Release 二进制 (intentosd, intentosctl)..."
   install -m 0755 "${REPO_ROOT}/bin/intentosd" "${BIN_DIR}/intentosd"
   install -m 0755 "${REPO_ROOT}/bin/intentosctl" "${BIN_DIR}/intentosctl"
@@ -84,13 +84,15 @@ if [[ -f "${REPO_ROOT}/desktop/settings/org.intentos.Settings.desktop" ]]; then
 fi
 
 echo "==> [4/4] 安装 systemd --user 服务单元..."
-cp "${REPO_ROOT}/packaging/systemd/intentosd.service" "${SYSTEMD_USER_DIR}/intentosd.service"
+sed "s@%h/.local/bin/intentosd@${BIN_DIR}/intentosd@g" "${REPO_ROOT}/packaging/systemd/intentosd.service" > "${SYSTEMD_USER_DIR}/intentosd.service"
 if command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
   systemctl --user daemon-reload
   systemctl --user enable --now intentosd.service
-  echo "✓ intentosd 已作为用户级 systemd 服务启动 (Web Shell: http://127.0.0.1:8787)"
+  systemctl --user is-active --quiet intentosd.service || { echo "intentosd.service did not start" >&2; exit 1; }
+  echo "✓ intentosd user service active"
 else
-  echo "ℹ 当前非完整 systemd 登录会话，可直接运行: ${REPO_ROOT}/scripts/run-local.sh"
+  echo "systemd user manager unavailable; service not started" >&2
+  exit 2
 fi
 
 echo ""

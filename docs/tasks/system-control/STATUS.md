@@ -7,7 +7,7 @@
 | ID | 工作包 | 依赖 | 状态 | 实现提交 | 验证证据/阻塞 |
 | --- | --- | --- | --- | --- | --- |
 | SC-01 | 分层验证与失败归因 | 无 | implemented_unverified | SC-01 分支提交 | CI/探针已写；历史13项未复测；L1/L2/L3/L4关键验证 blocked |
-| SC-02 | 安装/打包一致性 | 退出需01 | todo | — | 服务参数已修，用户/系统布局仍需核验 |
+| SC-02 | 安装/打包一致性 | 退出需01 | implemented_unverified | SC-02 分支提交 | 路径静态修正；V16 干净 VM 安装/升级/卸载 blocked |
 | SC-03 | 冻结脚本与审批摘要 | 01基础回归 | todo | — | 已有单命令输入不等于脚本冻结 |
 | SC-04 | 取消/预算/崩溃恢复 | 03 | todo | — | 复用已有进程组和账本，补生命周期 |
 | SC-05 | 软件动作契约/矩阵 | 01基础回归 | todo | — | 已有Provider需增量演进 |
@@ -40,3 +40,10 @@ GitHub提交或PR链接：
 - 基线 `d0b9f56e1b3f454e6bda380f7d2ebe7ca223362b`，分支 `sc/system-control-20261117`；实现 probe / L1-L4 workflow / 固定工具链 / 历史失败归因台账。
 - 本地实测：探针脚本 bash -n PASS；L1 blocked (missing rustc)；L2 blocked (missing bwrap)。无 Cargo、L2 OS、L3 GUI、L4 Release 行为验证。
 - 完整证据：`docs/validation/system-control-sc01.md`；未达到验收，不得宣称 verified。后续非依赖任务可继续。
+
+
+## SC-02（2026-11-17）
+
+- 修复 Debian 服务 /usr/bin/intentosd 与用户安装 ~/.local/bin/intentosd 的布局差异；修复用户模块、worker、skills 搜索路径以及开发机路径硬编码。
+- 安装器检测 systemd 用户服务 active；当前无 systemd 用户管理器时返回非零，不报告假成功。
+- 静态审查完成，实际 Ubuntu VM 安装/升级/卸载、Rust 编译及真桌面验证 blocked。SC-01 门槛未达，不能标记 verified。

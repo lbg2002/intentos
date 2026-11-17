@@ -88,7 +88,11 @@ pub fn scan_skills_and_workflows(core: &IntentOsCore) -> anyhow::Result<Vec<Skil
     if repo_builtin.exists() {
         roots.push((repo_builtin, "builtin"));
     }
-    let sys_builtin = PathBuf::from("/usr/share/intentos/builtin-skills");
+    let user_builtin = core.paths.data_dir.join("skills/builtin");
+    if user_builtin.exists() {
+        roots.push((user_builtin, "builtin"));
+    }
+    let sys_builtin = PathBuf::from("/usr/share/intentos/skills");
     if sys_builtin.exists() {
         roots.push((sys_builtin, "builtin"));
     }

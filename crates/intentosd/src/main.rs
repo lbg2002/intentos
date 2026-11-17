@@ -85,5 +85,5 @@ fn detect_repo_root() -> PathBuf {
     {
         return cwd;
     }
-    PathBuf::from("/home/antigravity/intentos")
+    PathBuf::from("/usr/share/intentos")
 }

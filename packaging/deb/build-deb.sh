@@ -39,7 +39,8 @@ cp -r "${REPO_ROOT}/desktop/gnome-extension/"* "${PKG_DIR}/usr/share/intentos/gn
 cp "${REPO_ROOT}/desktop/dbus/org.intentos.Core1.xml" "${PKG_DIR}/usr/share/dbus-1/interfaces/org.intentos.Core1.xml"
 cp "${REPO_ROOT}/desktop/gtk-fallback/org.intentos.Launcher.desktop" "${PKG_DIR}/usr/share/applications/"
 cp "${REPO_ROOT}/desktop/settings/org.intentos.Settings.desktop" "${PKG_DIR}/usr/share/applications/"
-cp "${REPO_ROOT}/packaging/systemd/intentosd.service" "${PKG_DIR}/usr/lib/systemd/user/intentosd.service"
+sed 's@%h/.local/bin/intentosd@/usr/bin/intentosd@g' "${REPO_ROOT}/packaging/systemd/intentosd.service" > "${PKG_DIR}/usr/lib/systemd/user/intentosd.service"
+grep -Fq 'ExecStart=/usr/bin/intentosd --web-listen' "${PKG_DIR}/usr/lib/systemd/user/intentosd.service"
 cp "${REPO_ROOT}/packaging/apparmor/intentos-sandbox" "${PKG_DIR}/etc/apparmor.d/intentos-sandbox"
 
 cat > "${PKG_DIR}/DEBIAN/control" <<EOF
