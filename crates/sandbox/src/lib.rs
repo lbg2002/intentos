@@ -449,6 +449,22 @@ pub fn build_sandboxed_command_with_mounts(
         return Ok((cmd, SandboxDriver::Bubblewrap));
     }
 
+    // Security gate: Landlock is an allowlist LSM, not a mount namespace. A
+    // granted parent directory still exposes descendant ~/.ssh/.aws/etc.
+    // It also cannot provide Bubblewrap's private /tmp or masked bind mounts.
+    // Never silently downgrade an untrusted worker/CLI/terminal to this path.
+    // Keep the legacy implementation below for future independently reviewed
+    // capability work, but it is not an approved executable fallback today.
+    if probe.selected_driver != SandboxDriver::Bubblewrap
+        || !probe.bwrap_userns_ok
+        || probe.bwrap_path.is_none()
+    {
+        return Err(SandboxError::Setup(
+            "secure credential masking and private tmpfs require working Bubblewrap user namespaces; Landlock/NodePermission fallback disabled"
+                .to_string(),
+        ));
+    }
+
     let is_node_program = spec
         .program
         .file_name()
@@ -1241,6 +1257,33 @@ except FileNotFoundError:
             "unexpected output: {}",
             stdout
         );
+    }
+
+    #[test]
+    fn sc10_landlock_does_not_silently_downgrade_credential_isolation() {
+        let temp = TempDir::new().unwrap();
+        let broad_read = temp.path().join("mock_home");
+        let secrets = broad_read.join(".ssh");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("id_ed25519"), "secret").unwrap();
+        let spec = SandboxSpec {
+            program: PathBuf::from("/usr/bin/true"),
+            args: Vec::new(),
+            readonly_paths: vec![broad_read],
+            readwrite_paths: Vec::new(),
+            env_vars: BTreeMap::new(),
+            work_dir: temp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let unsafe_probe = SandboxProbe {
+            bwrap_path: None,
+            bwrap_userns_ok: false,
+            landlock_abi_version: Some(8),
+            node_permission_available: true,
+            selected_driver: SandboxDriver::Landlock,
+        };
+        let result = build_sandboxed_command_with_mounts(&spec, &[], &unsafe_probe);
+        assert!(matches!(result, Err(SandboxError::Setup(_))));
     }
 
     #[tokio::test]

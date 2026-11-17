@@ -118,3 +118,9 @@ GitHub提交或PR链接：
 ### SC-10 发布门禁加固（2026-11-17）
 
 - 对照 ACCEPTANCE.md 的 V01–V17 案例加入逐包必需案例 ID 检查；SC-10 强制 L4 性能证据，SC-01 强制 L2 环境证据，避免仅有若干 L1 成功日志就误过发布。添加一组**合成**正向与遗漏案例负向单测，合成证据不构成真实验收。
+
+
+### 跨包 P0 沙箱缺陷（2026-11-17）
+
+- 全工作区 Ubuntu L1 `44036688627` 中 `sandbox_enforces_readonly_workspace_private_tmpfs_and_credential_masking` 真正观测到 Landlock 模式 `SECRET_LEAKED`，不能仅解释为缺少 bwrap。已在通用 SandboxSpec 构造器中禁止无法提供凭据掩码和私有 tmpfs 的 Landlock/NodePermission 回退；保持原严格测试不变，新增拒绝降级的纯逻辑测试。
+- 该行为是**默认禁用不合格执行路径**，可能影响无 bwrap 的 agent/CLI/terminal；须 Ubuntu L2 具备 bwrap userns 正反测试后恢复服务能力，未达标仍 blocked。旧测试在无 bwrap 的 L1 预期失败，不能宣布全部通过。
