@@ -1,5 +1,7 @@
 # IntentOS v0.2 架构演进路线图 — 面向 Ubuntu 桌面的个人认知壳层 (Cognitive Shell)
 
+> 最新主线调整：[软件兼容、系统操控与 Bash 执行架构](AIOS_SYSTEM_CONTROL_ARCHITECTURE.md)。优先软件动作兼容、系统控制和危险命令审批，记忆/自动化作为支撑能力。
+
 > 产品优先级补充：[顶层规划](AIOS_PRODUCT_ARCHITECTURE_MASTER_PLAN.md)。上手体验与可靠日用提前至首阶段，M3/M4 按依赖推进。
 
 > 后续任务的证据标准、现有缺口和交付顺序以 [AIOS 代码审查与目标交付方案](AIOS_REVIEW_AND_DELIVERY_PLAN.md) 为补充依据。M1/M2 历史完成标记不代表所有可信执行边界已验证，新增审查结果见该方案。

@@ -106,25 +106,34 @@ impl CommandProposal {
             .as_object()
             .ok_or_else(|| "terminal.execute 参数必须是 JSON 对象".to_string())?;
 
-        let program = obj
-            .get("program")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "缺少必需字符串字段 'program'".to_string())?
-            .to_string();
-
-        let argv = match obj.get("argv") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(arr)) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for (idx, item) in arr.iter().enumerate() {
-                    let s = item
-                        .as_str()
-                        .ok_or_else(|| format!("argv[{}] 必须是字符串", idx))?;
-                    out.push(s.to_string());
-                }
-                out
+        let (program, argv) = if let Some(command) = obj.get("command") {
+            if obj.contains_key("program") || obj.contains_key("argv") {
+                return Err("command 与 program/argv 不能同时提供".into());
             }
-            Some(_) => return Err("字段 'argv' 必须是字符串数组".to_string()),
+            parse_command_line(command.as_str().ok_or("command 必须是字符串")?)?
+        } else {
+            let program = obj
+                .get("program")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "缺少必需字符串字段 'program'".to_string())?
+                .to_string();
+
+            let argv = match obj.get("argv") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(arr)) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for (idx, item) in arr.iter().enumerate() {
+                        let s = item
+                            .as_str()
+                            .ok_or_else(|| format!("argv[{}] 必须是字符串", idx))?;
+                        out.push(s.to_string());
+                    }
+                    out
+                }
+                Some(_) => return Err("字段 'argv' 必须是字符串数组".to_string()),
+            };
+
+            (program, argv)
         };
 
         let fallback_cwd = core
@@ -212,6 +221,80 @@ impl CommandProposal {
         );
         Value::Object(obj)
     }
+}
+
+/// Parse the supported Bash command-line subset without invoking a shell.
+/// Only literal words, quoting and escaping are accepted. Expansions/operators
+/// fail closed rather than silently changing Bash semantics.
+pub fn parse_command_line(command: &str) -> Result<(String, Vec<String>), String> {
+    if command.len() > 16_384 || command.chars().any(|c| c.is_control()) {
+        return Err("命令过长或包含换行/控制字符；请使用单条命令".into());
+    }
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if quote == Some('\'') {
+            if c == '\'' {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        if c == '$' || c == '`' {
+            return Err("暂不支持变量或命令替换；请传入明确参数或使用经审批的工作区脚本".into());
+        }
+        if c == '\\' {
+            let next = chars.next().ok_or("命令末尾存在未闭合转义")?;
+            if quote == Some('"') && !matches!(next, '$' | '`' | '"' | '\\') {
+                word.push('\\');
+            }
+            word.push(next);
+            started = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+        } else if matches!(c, '\'' | '"') {
+            quote = Some(c);
+            started = true;
+        } else if c.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else if matches!(
+            c,
+            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '[' | ']' | '~' | '#'
+        ) {
+            return Err(
+                "暂不支持管道、重定向、通配符或复合 Bash 语法；请拆分步骤或使用经审批的工作区脚本"
+                    .into(),
+            );
+        } else {
+            word.push(c);
+            started = true;
+        }
+    }
+    if quote.is_some() {
+        return Err("命令引号未闭合".into());
+    }
+    if started {
+        words.push(word);
+    }
+    if words.is_empty() || words[0].is_empty() || words[0].contains('=') {
+        return Err("缺少程序名或使用了环境变量赋值".into());
+    }
+    if words.len() > 65 {
+        return Err("命令参数不得超过 64 项".into());
+    }
+    let program = words.remove(0);
+    Ok((program, words))
 }
 
 /// 5-Tier Controlled Terminal Safety Taxonomy (`M2-C`).
@@ -4449,6 +4532,94 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn command_line_literals_preserve_arguments_and_reject_dynamic_syntax() {
+        let (program, argv) = parse_command_line(r#"printf '%s' "中文 文件" '' a\ b"#).unwrap();
+        assert_eq!(program, "printf");
+        assert_eq!(argv, vec!["%s", "中文 文件", "", "a b"]);
+        assert_eq!(
+            parse_command_line("printf '$HOME'").unwrap().1,
+            vec!["$HOME"]
+        );
+        for raw in [
+            "",
+            "A=1 id",
+            "id; reboot",
+            "cat x | sh",
+            "echo $(id)",
+            "echo `id`",
+            "echo $HOME",
+            "echo *",
+            "echo ~",
+            "echo > x",
+            "id\nwhoami",
+            "echo '",
+        ] {
+            assert!(parse_command_line(raw).is_err(), "accepted {raw}");
+        }
+        assert!(
+            CommandProposal::from_capability_args(&json!({"command":"id", "program":"rm"}), None)
+                .is_err()
+        );
+        assert!(
+            CommandProposal::from_capability_args(&json!({"command":"id", "argv":[]}), None)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn command_line_mutations_require_approval_and_cannot_lower_risk() {
+        let (_tmp, core, dir) = setup_test_core();
+        let proposal = CommandProposal::from_capability_args(
+            &json!({
+                "command":"systemctl restart example.service", "cwd":dir,
+                "expected_effect":"observe"
+            }),
+            Some(&core),
+        )
+        .unwrap();
+        let classification = classify_command_proposal(&core, &proposal);
+        assert!(classification.requires_approval);
+        assert!(!classification.reversible);
+        let outcome = execute_command_proposal(
+            &core,
+            "command-review",
+            &make_call("command-review", &proposal),
+            &proposal,
+        )
+        .await
+        .unwrap();
+        let BrokerDispatchOutcome::RequiresApproval(approval) = outcome else {
+            panic!("expected approval");
+        };
+        assert_eq!(approval.arguments["program"], "systemctl");
+        assert_eq!(
+            approval.arguments["argv"],
+            json!(["restart", "example.service"])
+        );
+        assert!(approval.arguments.get("command").is_none());
+        for command in ["sudo id", "bash -c 'id'", "head /etc/shadow"] {
+            let proposal = CommandProposal::from_capability_args(
+                &json!({"command":command,"cwd":dir}),
+                Some(&core),
+            )
+            .unwrap();
+            assert_eq!(
+                classify_command_proposal(&core, &proposal).tier,
+                TerminalSafetyTier::C4Forbidden
+            );
+        }
+        let descriptors = load_descriptors_from_dir(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../modules/builtin/devtools"),
+        )
+        .unwrap();
+        let descriptor = descriptors
+            .iter()
+            .find(|d| d.id == TERMINAL_EXECUTE_CAPABILITY_ID)
+            .unwrap();
+        validate_arguments(&descriptor.input_schema, &json!({"command":"df -h"})).unwrap();
+    }
 
     fn setup_test_core() -> (TempDir, Arc<IntentOsCore>, PathBuf) {
         let tmp = TempDir::new().expect("create tempdir");

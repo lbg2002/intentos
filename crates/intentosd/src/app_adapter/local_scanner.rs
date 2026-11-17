@@ -895,16 +895,14 @@ pub fn classify_software_category(
         .and_then(|s| s.to_str())
         .unwrap_or(exec_binary)
         .to_ascii_lowercase();
-    let bin_full_lc = exec_binary.to_ascii_lowercase();
     let name_lc = name.to_ascii_lowercase();
     let zh = name_zh.unwrap_or("");
     let zh_lc = zh.to_ascii_lowercase();
     let wm_lc = startup_wm_class.unwrap_or("").to_ascii_lowercase();
 
-    let haystack = format!(
-        "{} {} {} {} {} {}",
-        id_lc, bin_base, bin_full_lc, name_lc, zh_lc, wm_lc
-    );
+    // Installation directories are not application identity: a WPS binary under
+    // /home/vlc/projects must not become a media player.
+    let haystack = format!("{} {} {} {} {}", id_lc, bin_base, name_lc, zh_lc, wm_lc);
     let has_any = |needles: &[&str]| needles.iter().any(|n| haystack.contains(n));
 
     // 1. Media & Music Entertainment (`media_entertainment`) — check BEFORE `qq` so `qqmusic` lands here!
@@ -5356,6 +5354,28 @@ mod tests {
         assert!(categories_match("media_entertainment", "media"));
         assert!(categories_match("office_notes_doc", "notes"));
         assert!(categories_match("dev_ai_ide", "all"));
+    }
+
+    #[test]
+    fn classifier_ignores_unrelated_installation_directory_names() {
+        for directory in [
+            "/opt/vlc",
+            "/home/spotify/projects",
+            "/tmp/discord-test",
+            "/tmp/normal",
+        ] {
+            let category = classify_software_category(
+                "wps-office-wps.desktop",
+                &format!("{directory}/wps-mock"),
+                "WPS Writer",
+                Some("WPS 文字"),
+                None,
+                &[],
+                &[],
+                &["Office".into(), "WordProcessor".into()],
+            );
+            assert_eq!(category.id, "office_notes_doc", "{directory}");
+        }
     }
 
     #[test]

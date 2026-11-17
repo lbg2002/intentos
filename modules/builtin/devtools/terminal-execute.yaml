@@ -1,13 +1,19 @@
 id: terminal.execute
-version: 1
-summary: 在受控 OS 沙箱（bwrap/Landlock）内按 C0–C4 多因子风险分级执行结构化 CommandProposal（仅限 argv 参数数组，严禁 Shell 拼接）
+version: 2
+summary: 在受控 OS 沙箱（bwrap/Landlock）内按 C0–C4 多因子风险分级执行结构化 CommandProposal（支持字面量 Bash 单命令输入并编译为 argv，危险修改审批）
 category: devtools
 aliases: ["受控终端执行", "沙箱命令执行", "controlled terminal", "command proposal"]
 l0_patterns: []
 input_schema:
   type: object
-  required: [program]
+  oneOf:
+    - required: [program]
+    - required: [command]
   properties:
+    command:
+      type: string
+      maxLength: 16384
+      description: "单条 Bash 风格命令，支持引号和转义；不支持管道、替换或重定向。与 program/argv 互斥。"
     program:
       type: string
       maxLength: 512
