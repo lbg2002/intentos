@@ -6,16 +6,16 @@
 
 | ID | 工作包 | 依赖 | 状态 | 实现提交 | 验证证据/阻塞 |
 | --- | --- | --- | --- | --- | --- |
-| SC-01 | 分层验证与失败归因 | 无 | implemented_unverified | SC-01 分支提交 | CI/探针已写；历史13项未复测；L1/L2/L3/L4关键验证 blocked |
-| SC-02 | 安装/打包一致性 | 退出需01 | implemented_unverified | SC-02 分支提交 | 路径静态修正；V16 干净 VM 安装/升级/卸载 blocked |
-| SC-03 | 冻结脚本与审批摘要 | 01基础回归 | blocked | SC-03 安全门禁提交 | 未实现可信冻结 artifact；所有解释器/工作区脚本暂拒绝；V01–V05 blocked |
-| SC-04 | 取消/预算/崩溃恢复 | 03 | blocked | SC-04 局部修复提交 | 正常退出后孙进程清理补强；取消和崩溃恢复 V06/V07 未验证，依赖03冻结 |
-| SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | SC-05 独立提交 | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
-| SC-06 | 代表软件真机认证 | 05 | blocked | SC-06 证据工具提交 | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
-| SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | SC-07 局部修复提交 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
-| SC-08 | Bash复合计划 | 03/04 | blocked | SC-08 草案校验提交 | 显式 argv 管道草案静态校验；不可执行，解析器/运行时受03/04阻塞 |
-| SC-09 | 审批与结果体验 | 03/05，特权依赖07 | blocked | SC-09 安全显示与服务端收口提交 | Web 标记注入与终端会话授权防护；全客户端 V14/V15 blocked |
-| SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | blocked | SC-10 发布门禁提交 | 显式 release_allowed=false；现有 P0/真实 L2/L3/L4 未达标 |
+| SC-01 | 分层验证与失败归因 | 无 | implemented_unverified | c835c9b | CI/探针已写；历史13项未复测；L1/L2/L3/L4关键验证 blocked |
+| SC-02 | 安装/打包一致性 | 退出需01 | implemented_unverified | 2ce685e | 路径静态修正；V16 干净 VM 安装/升级/卸载 blocked |
+| SC-03 | 冻结脚本与审批摘要 | 01基础回归 | blocked | 8420a8b, 72b6812 | 未实现可信冻结 artifact；所有解释器/工作区脚本暂拒绝；V01–V05 blocked |
+| SC-04 | 取消/预算/崩溃恢复 | 03 | blocked | c89fbba | 正常退出后孙进程清理补强；取消和崩溃恢复 V06/V07 未验证，依赖03冻结 |
+| SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | e08a959, a2e548f | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
+| SC-06 | 代表软件真机认证 | 05 | blocked | 5e2b8fb | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
+| SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | e5f4a08 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
+| SC-08 | Bash复合计划 | 03/04 | blocked | ef5f27f | 显式 argv 管道草案静态校验；不可执行，解析器/运行时受03/04阻塞 |
+| SC-09 | 审批与结果体验 | 03/05，特权依赖07 | blocked | c103d40 | Web 标记注入与终端会话授权防护；全客户端 V14/V15 blocked |
+| SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | blocked | ac71df3, b5ab0d7 | 显式 release_allowed=false；现有 P0/真实 L2/L3/L4 未达标 |
 
 ## 每次交付追加模板
 
@@ -124,3 +124,11 @@ GitHub提交或PR链接：
 
 - 全工作区 Ubuntu L1 `44036688627` 中 `sandbox_enforces_readonly_workspace_private_tmpfs_and_credential_masking` 真正观测到 Landlock 模式 `SECRET_LEAKED`，不能仅解释为缺少 bwrap。已在通用 SandboxSpec 构造器中禁止无法提供凭据掩码和私有 tmpfs 的 Landlock/NodePermission 回退；保持原严格测试不变，新增拒绝降级的纯逻辑测试。
 - 该行为是**默认禁用不合格执行路径**，可能影响无 bwrap 的 agent/CLI/terminal；须 Ubuntu L2 具备 bwrap userns 正反测试后恢复服务能力，未达标仍 blocked。旧测试在无 bwrap 的 L1 预期失败，不能宣布全部通过。
+
+
+## 2026-11-17 本批实际 L1/全量回归报告（区分被测 SHA）
+
+- 定向 L1 GitHub Runner `44037507542`，**被测 SHA `42a7729fe4ba3dcd5583ae34d789310e32b77e08`**：rustfmt、全 workspace Clippy `-D warnings`、协议/SDK 测试、`command_line_`、SC-03/05/07/08/09 定向 Rust 测试、Web JS 语法以及 SC-06/10 Python 8 项 **PASS**；SC-10 发布门禁 `release_allowed=false` 也符合预期。参见 `docs/validation/system-control-batch-20261117.md`。
+- 全量 L1 GitHub Runner `44036688627`，**被测 SHA `b219cf863fe735c2fc590d65f0236347799fcb58`**：22 个 test target 合计 **235 PASS / 9 FAIL**，包括真凭据泄漏 `SECRET_LEAKED`、CLI 权限逃逸 `AUTH_CFG_WRITE_ESCAPED` 和环境缺少 bwrap/numpy 等。原断言全部保留，CI **FAIL**；未把环境不合格计通过。
+- P0 防止 Landlock 回退泄漏：`4b692b1` 禁止无可信 bwrap 的通用沙箱执行；`2bfecaa` 加入定向测试和 CI。该代码后续流水线结果须核实，**不能用较早 SHA 的通过记录冒充此新修复已通过**。
+- L2 实际 Bubblewrap/userns、L3 Ubuntu GNOME Wayland/X11、L4 独占性能均未执行（manual self-hosted runner 未就绪）；对应工作包仍 blocked/implemented_unverified，全部发布门槛未达。
