@@ -12,7 +12,7 @@
 | SC-04 | 取消/预算/崩溃恢复 | 03 | blocked | SC-04 局部修复提交 | 正常退出后孙进程清理补强；取消和崩溃恢复 V06/V07 未验证，依赖03冻结 |
 | SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | SC-05 独立提交 | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
 | SC-06 | 代表软件真机认证 | 05 | blocked | SC-06 证据工具提交 | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
-| SC-07 | 系统控制/有限特权代理 | 03/04 | todo | — | 分非特权与特权子包；特权默认关闭 |
+| SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | SC-07 局部修复提交 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
 | SC-08 | Bash复合计划 | 03/04 | todo | — | 不允许退化为裸bash -c |
 | SC-09 | 审批与结果体验 | 03/05，特权依赖07 | todo | — | GTK/GNOME/Web逐项验收 |
 | SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | todo | — | 不将环境跳过计为通过 |
@@ -74,3 +74,10 @@ GitHub提交或PR链接：
 - 提交只读七类代表软件探针 `scripts/sc06_certification_probe.py`，各类的 launch/open/focus/status/quit 仅收集桌面入口、打包线索与会话元信息，35 个结果全部明确 unverified；禁止将发现等同认证。
 - 独立 Python fixture 测试（3/3 PASS，当前 Linux 容器）验证发现不自动认证、未发现状态、symlink 不接受；没有执行任何软件启动、退出或桌面控制。
 - V08–V10 在 Ubuntu 24.04 GNOME Wayland/X11、deb 与 Flatpak/Snap 样本上的实测 **blocked**；未完善功能通道与 SDK 认证，SC-06 不能标 verified。
+
+
+## SC-07（2026-11-17）
+
+- 修改既有 SystemSettingsEngine/CapabilityBroker 的 ChangeSet 撤销路径：恢复前按记录 after 读回；外部修改则将变更集标记 Conflict，不再覆盖当前用户新值。先预检多个设置项并二次读回，减少部分撤销。保持统一 Broker/ChangeSet 通路。
+- 新增模拟亮度值外部变化的针对性单测（未执行，当前无 Cargo）；读回与写入之间仍是非原子窗口，需 OS 驱动支持 compare-and-swap 才能严格消除竞态。
+- SC-03/04 未解除，Polkit/受限特权代理、包管理系统动作未实现；V11/V12 真实机器与用户认证测试 **blocked**，特权默认关闭，不新增 sudo/root Shell。
