@@ -11,7 +11,7 @@
 | SC-03 | 冻结脚本与审批摘要 | 01基础回归 | blocked | SC-03 安全门禁提交 | 未实现可信冻结 artifact；所有解释器/工作区脚本暂拒绝；V01–V05 blocked |
 | SC-04 | 取消/预算/崩溃恢复 | 03 | blocked | SC-04 局部修复提交 | 正常退出后孙进程清理补强；取消和崩溃恢复 V06/V07 未验证，依赖03冻结 |
 | SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | SC-05 独立提交 | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
-| SC-06 | 代表软件真机认证 | 05 | todo | — | 需要实际软件版本与桌面会话 |
+| SC-06 | 代表软件真机认证 | 05 | blocked | SC-06 证据工具提交 | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
 | SC-07 | 系统控制/有限特权代理 | 03/04 | todo | — | 分非特权与特权子包；特权默认关闭 |
 | SC-08 | Bash复合计划 | 03/04 | todo | — | 不允许退化为裸bash -c |
 | SC-09 | 审批与结果体验 | 03/05，特权依赖07 | todo | — | GTK/GNOME/Web逐项验收 |
@@ -67,3 +67,10 @@ GitHub提交或PR链接：
 - 增加不授予执行能力的 `app_adapter.get_compatibility_matrix` 只读 RPC。按 action_id/channel/package_format 暴露 schema_version=1、发现状态、认证状态、版本未知、桌面/Flatpak/Snap 约束；不伪造认证记录。
 - 对模型已有 `app.discover` 补充 `certification_state: unverified` 和版本未知提示；保持原 Broker/Policy/Provider 链路不变。无认证写入或持久化迁移，旧客户端忽略新增字段。
 - 添加三个纯逻辑负向单测；当前无 cargo/rustc，尚未执行。V08/V10、历史 13 项回归和真实环境认证均 blocked，状态不能 verified。
+
+
+## SC-06（2026-11-17）
+
+- 提交只读七类代表软件探针 `scripts/sc06_certification_probe.py`，各类的 launch/open/focus/status/quit 仅收集桌面入口、打包线索与会话元信息，35 个结果全部明确 unverified；禁止将发现等同认证。
+- 独立 Python fixture 测试（3/3 PASS，当前 Linux 容器）验证发现不自动认证、未发现状态、symlink 不接受；没有执行任何软件启动、退出或桌面控制。
+- V08–V10 在 Ubuntu 24.04 GNOME Wayland/X11、deb 与 Flatpak/Snap 样本上的实测 **blocked**；未完善功能通道与 SDK 认证，SC-06 不能标 verified。
