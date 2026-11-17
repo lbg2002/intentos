@@ -111,7 +111,14 @@ impl XdgPaths {
         if repo_builtin.exists() {
             return repo_builtin;
         }
-        PathBuf::from("/usr/share/intentos/builtin-modules")
+        {
+            let user = self.data_dir.join("builtin-modules");
+            if user.is_dir() {
+                user
+            } else {
+                PathBuf::from("/usr/share/intentos/builtin-modules")
+            }
+        }
     }
 
     pub fn pi_adapter_script(&self) -> PathBuf {
@@ -119,7 +126,14 @@ impl XdgPaths {
         if repo_script.exists() {
             return repo_script;
         }
-        PathBuf::from("/usr/lib/intentos/intentos-agent/dist/worker.js")
+        {
+            let user = self.data_dir.join("pi-adapter/dist/worker.js");
+            if user.is_file() {
+                user
+            } else {
+                PathBuf::from("/usr/lib/intentos/intentos-agent/dist/worker.js")
+            }
+        }
     }
 }
 

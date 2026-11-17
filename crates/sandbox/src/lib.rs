@@ -449,6 +449,22 @@ pub fn build_sandboxed_command_with_mounts(
         return Ok((cmd, SandboxDriver::Bubblewrap));
     }
 
+    // Security gate: Landlock is an allowlist LSM, not a mount namespace. A
+    // granted parent directory still exposes descendant ~/.ssh/.aws/etc.
+    // It also cannot provide Bubblewrap's private /tmp or masked bind mounts.
+    // Never silently downgrade an untrusted worker/CLI/terminal to this path.
+    // Keep the legacy implementation below for future independently reviewed
+    // capability work, but it is not an approved executable fallback today.
+    if probe.selected_driver != SandboxDriver::Bubblewrap
+        || !probe.bwrap_userns_ok
+        || probe.bwrap_path.is_none()
+    {
+        return Err(SandboxError::Setup(
+            "secure credential masking and private tmpfs require working Bubblewrap user namespaces; Landlock/NodePermission fallback disabled"
+                .to_string(),
+        ));
+    }
+
     let is_node_program = spec
         .program
         .file_name()
@@ -1046,10 +1062,6 @@ impl ProcessGroupKillGuard {
             }
         }
     }
-
-    fn disarm(&mut self) {
-        self.pgid = None;
-    }
 }
 
 impl Drop for ProcessGroupKillGuard {
@@ -1103,7 +1115,8 @@ pub async fn execute_terminal_sandbox_bounded(
 
     match tokio::time::timeout(timeout, read_and_wait).await {
         Ok(Ok((status, mut out_buf, mut err_buf))) => {
-            pg_guard.disarm();
+            // Do not disarm on leader exit: detached descendants in the
+            // same process group may still be running. Drop kills the group.
             let duration_ms = start.elapsed().as_millis() as u64;
             let mut truncated = false;
             if out_buf.len() > max_output_bytes {
@@ -1246,6 +1259,33 @@ except FileNotFoundError:
         );
     }
 
+    #[test]
+    fn sc10_landlock_does_not_silently_downgrade_credential_isolation() {
+        let temp = TempDir::new().unwrap();
+        let broad_read = temp.path().join("mock_home");
+        let secrets = broad_read.join(".ssh");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("id_ed25519"), "secret").unwrap();
+        let spec = SandboxSpec {
+            program: PathBuf::from("/usr/bin/true"),
+            args: Vec::new(),
+            readonly_paths: vec![broad_read],
+            readwrite_paths: Vec::new(),
+            env_vars: BTreeMap::new(),
+            work_dir: temp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let unsafe_probe = SandboxProbe {
+            bwrap_path: None,
+            bwrap_userns_ok: false,
+            landlock_abi_version: Some(8),
+            node_permission_available: true,
+            selected_driver: SandboxDriver::Landlock,
+        };
+        let result = build_sandboxed_command_with_mounts(&spec, &[], &unsafe_probe);
+        assert!(matches!(result, Err(SandboxError::Setup(_))));
+    }
+
     #[tokio::test]
     async fn sandbox_enforces_readonly_workspace_private_tmpfs_and_credential_masking() {
         let probe = probe_sandbox_support();
@@ -1360,6 +1400,49 @@ print("DONE_OK")
         } else {
             let _ = std::fs::remove_file(&host_tmp_probe);
         }
+    }
+
+    #[tokio::test]
+    async fn sc04_normal_exit_reaps_surviving_process_group_descendants() {
+        let probe = probe_sandbox_support();
+        if !probe.has_os_isolation() {
+            // Not a pass: L2 CI probe must gate this entire test suite.
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let marker_file = tmp.path().join("grandchild_marker");
+        let python = format!(
+            "import subprocess; subprocess.Popen(['/usr/bin/python3', '-c', {:?}], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            format!(
+                "import time; time.sleep(1.0); open({:?}, 'w').write('escaped')",
+                marker_file
+            )
+        );
+        let spec = TerminalSandboxSpec {
+            program: PathBuf::from("/usr/bin/python3"),
+            args: vec!["-c".into(), python],
+            ro_bind_root: true,
+            readonly_paths: vec![tmp.path().to_path_buf()],
+            readwrite_paths: vec![tmp.path().to_path_buf()],
+            masked_paths: vec![],
+            env_vars: BTreeMap::new(),
+            work_dir: tmp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let out = execute_terminal_sandbox_bounded(
+            &spec,
+            std::time::Duration::from_secs(4),
+            65536,
+            &probe,
+        )
+        .await
+        .unwrap();
+        assert!(!out.timed_out, "leader should exit normally");
+        tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+        assert!(
+            !marker_file.exists(),
+            "surviving grandchild wrote after leader exit"
+        );
     }
 
     #[tokio::test]

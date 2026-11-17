@@ -102,6 +102,29 @@ pub async fn handle_module_rpc(
         }
 
         "resume_approved_turn" => {
+            // Server-side guard: never trust a UI's request for a session
+            // grant for terminal execution. Check both in-memory and
+            // crash-restored approval metadata before resuming.
+            if matches!(
+                payload.get("decision").and_then(Value::as_str),
+                Some("session" | "scope")
+            ) {
+                let approval_id = payload
+                    .get("approval_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let live = core.policy.peek_pending_approval(approval_id);
+                let stored = core.state_db.get_suspended_checkpoint_row(approval_id)?;
+                let is_terminal = live
+                    .as_ref()
+                    .is_some_and(|a| a.capability_id == "terminal.execute")
+                    || stored
+                        .as_ref()
+                        .is_some_and(|r| r.capability_id == "terminal.execute");
+                if is_terminal {
+                    anyhow::bail!("terminal.execute 不允许会话范围授权；请逐次批准或拒绝");
+                }
+            }
             let opts = build_rpc_discovery_options(core, &payload, false);
             resume_approved_turn_with_options(core, &payload, &opts).await
         }

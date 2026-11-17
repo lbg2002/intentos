@@ -1021,6 +1021,33 @@ impl CapabilityBroker {
             anyhow::bail!("变更集 {} 当前状态为 {:?}，无法重复撤销", cs.id, cs.status);
         }
 
+        // SC-07 optimistic concurrency check: a setting changed after the
+        // recorded ChangeSet must not be clobbered by Undo. Preflight before
+        // reverting any file ops, to reduce partial rollback surprises.
+        for op in &cs.operations {
+            if let ChangeOp::Setting { key, after, .. } = op {
+                match self.settings.undo_precondition_met(key, after) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        cs.status = ChangeSetStatus::Conflict;
+                        self.state_db.save_changeset(&cs)?;
+                        return Ok((
+                            cs.clone(),
+                            format!("撤销冲突：{} 的当前值与记录不符，未执行撤销", key),
+                        ));
+                    }
+                    Err(err) => {
+                        cs.status = ChangeSetStatus::Conflict;
+                        self.state_db.save_changeset(&cs)?;
+                        return Ok((
+                            cs.clone(),
+                            format!("撤销受阻：无法核验 {} 的当前值：{}", key, err),
+                        ));
+                    }
+                }
+            }
+        }
+
         let mut summary_parts = Vec::new();
         let has_file_ops = cs
             .operations
@@ -1045,11 +1072,14 @@ impl CapabilityBroker {
             if let ChangeOp::Setting {
                 key,
                 before,
+                after,
                 backend_mode,
                 ..
             } = op
             {
-                let (restored, _) = self.settings.undo_setting_op(key, before, backend_mode)?;
+                let (restored, _) =
+                    self.settings
+                        .undo_setting_op_checked(key, before, after, backend_mode)?;
                 summary_parts.push(format!(
                     "已恢复 {} 至 {}",
                     crate::settings::setting_human_name(key),

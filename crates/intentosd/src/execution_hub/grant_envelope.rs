@@ -205,6 +205,16 @@ pub fn create_grant_envelope(
     if capabilities.is_empty() {
         anyhow::bail!("GrantEnvelope 必须至少声明一项允许的能力 (capabilities)");
     }
+    // Never mint an envelope explicitly covering shell/terminal execution.
+    // Historic wildcard grants are also blocked at the consume boundary.
+    if capabilities.iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "terminal.execute" | "terminal_execute" | "terminal.*"
+        )
+    }) {
+        anyhow::bail!("terminal.execute 仅允许本次审批，不得创建会话/任务批量授权");
+    }
 
     let raw_scopes: Vec<String> = payload
         .get("resource_scope")
@@ -324,6 +334,18 @@ pub fn check_within_envelope(
     requires_network: bool,
 ) -> EnvelopeCheckOutcome {
     let op_count = operation_count.max(1);
+
+    // SC-09 deny terminal even with historic wildcard envelopes or a
+    // falsified low effect; real approval requires a unique nonce/digest.
+    if matches!(
+        call.capability_id.as_str(),
+        "terminal.execute" | "terminal_execute"
+    ) {
+        return EnvelopeCheckOutcome::OutOfBounds {
+            reason: "terminal.execute 必须逐次审批，禁止复用授权包络".into(),
+            violation_kind: "terminal_requires_single_use_approval".into(),
+        };
+    }
 
     // 1. Check untrusted taint escalation (§10.4): untrusted context cannot silently bypass approval for writes/egress
     if call.taints.iter().any(|t| t.is_untrusted()) && call_effect >= Effect::WriteReversible {

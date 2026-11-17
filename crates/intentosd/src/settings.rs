@@ -1192,6 +1192,28 @@ impl SystemSettingsEngine {
         Ok((readback, active_mode))
     }
 
+    /// SC-07: verify the currently observed value still matches the value we wrote.
+    /// A false result means an external change happened; never overwrite it on undo.
+    pub fn undo_precondition_met(&self, key: &str, expected_after: &Value) -> anyhow::Result<bool> {
+        let (observed, _) = self.read_setting_value(key)?;
+        Ok(values_match(&observed, expected_after, 1.0))
+    }
+
+    /// Optimistic readback guard (not an atomic OS-level compare-and-swap).
+    /// The caller also preflights all setting ops before any file rollback.
+    pub fn undo_setting_op_checked(
+        &self,
+        key: &str,
+        restore_value: &Value,
+        expected_after: &Value,
+        recorded_mode: &str,
+    ) -> anyhow::Result<(Value, String)> {
+        if !self.undo_precondition_met(key, expected_after)? {
+            anyhow::bail!("撤销冲突：设置 {} 已被外部修改，拒绝覆盖", key);
+        }
+        self.undo_setting_op(key, restore_value, recorded_mode)
+    }
+
     fn execute_control_center(
         &self,
         request_id: &str,
@@ -2533,6 +2555,41 @@ mod tests {
         };
         let (restored, _) = eng.undo_setting_op(key, before, backend_mode).unwrap();
         assert_eq!(restored.as_f64().unwrap(), 70.0);
+    }
+
+    #[test]
+    fn sc07_conflicting_external_setting_is_not_overwritten_on_undo() {
+        let tmp = TempDir::new().unwrap();
+        let db = Arc::new(StateDb::open(&tmp.path().join("state.db")).unwrap());
+        let eng = SystemSettingsEngine::new(db, true);
+        let repo_sys = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/builtin/system");
+        let descriptors = load_descriptors_from_dir(&repo_sys).unwrap();
+        let bright_set = descriptors
+            .iter()
+            .find(|d| d.id == "display.brightness.set")
+            .unwrap();
+        let original = eng.read_setting_value("display.brightness").unwrap().0;
+        let first = eng
+            .execute("first", "task1", bright_set, &json!({"value": 35}))
+            .unwrap();
+        let first_after = first.data["after"].clone();
+        eng.execute("external", "task2", bright_set, &json!({"value": 80}))
+            .unwrap();
+        assert!(
+            !eng.undo_precondition_met("display.brightness", &first_after)
+                .unwrap()
+        );
+        assert!(
+            eng.undo_setting_op_checked(
+                "display.brightness",
+                &original,
+                &first_after,
+                "simulated_headless"
+            )
+            .is_err()
+        );
+        let (current, _) = eng.read_setting_value("display.brightness").unwrap();
+        assert_eq!(current.as_f64(), Some(80.0));
     }
 
     #[test]

@@ -113,11 +113,12 @@ export class ResultSurfaces {
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.45rem;">
-        <strong style="font-size:0.82rem;">📂 资源列表视图 (${items.length} 项 · ${capabilityId})</strong>
+        <strong style="font-size:0.82rem;">📂 资源列表视图 (${items.length} 项 · <span class="result-capability-name"></span>)</strong>
         <span class="risk-badge risk-R0">R0 只读枚举</span>
       </div>
       <div class="resource-cards-grid"></div>
     `;
+    wrap.querySelector('.result-capability-name').textContent = String(capabilityId);
     const grid = wrap.querySelector('.resource-cards-grid');
 
     items.slice(0, 12).forEach((entry) => {
@@ -187,7 +188,7 @@ export class ResultSurfaces {
 
     card.innerHTML = `
       <div class="approval-diff-header">
-        <span>🛡 可信审批通道 (${pa.capability_id}) · Nonce 已绑定</span>
+        <span>🛡 可信审批通道 (<span class="approval-capability-name"></span>) · Nonce 已绑定</span>
         <span class="risk-badge risk-R2">R2 需人工确认</span>
       </div>
       <div class="diff-lines-view"></div>
@@ -203,6 +204,12 @@ export class ResultSurfaces {
         <button type="button" class="btn-ghost btn-danger" data-role="deny">✕ 拒绝</button>
       </div>
     `;
+
+    card.querySelector('.approval-capability-name').textContent = String(pa.capability_id || '');
+    // C3 terminal scripts cannot inherit a task-wide GrantEnvelope.
+    if (pa.capability_id === 'terminal.execute') {
+      card.querySelector('[data-role="approve-envelope"]').hidden = true;
+    }
 
     const diffBox = card.querySelector('.diff-lines-view');
     diffLines.forEach((dl) => {
@@ -235,6 +242,10 @@ export class ResultSurfaces {
     };
 
     card.querySelector('[data-role="approve-envelope"]').onclick = async () => {
+      if (pa.capability_id === 'terminal.execute') {
+        this.onToast('终端命令必须逐次审批，不能批量放行');
+        return;
+      }
       await moduleRpc('execution_hub', 'create_grant_envelope', {
         task_id: task.id,
         capabilities: [pa.capability_id],

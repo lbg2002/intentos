@@ -303,6 +303,11 @@ impl PolicyEngine {
     /// Never matches if any argument touches a `Forbidden` path. When matched, also registers
     /// non-forbidden target paths in `SafeFsEngine::approve_path_scope` so `openat2` succeeds.
     pub fn is_session_granted(&self, capability_id: &str, args: &Value) -> bool {
+        // SC-09: terminal.execute is per-action only, even when a wildcard
+        // or directory grant exists. Safe script identity is not persistent.
+        if matches!(capability_id, "terminal.execute" | "terminal_execute") {
+            return false;
+        }
         let arg_paths = extract_arg_paths(args);
         if arg_paths.iter().any(|(_, _, p)| {
             p.components().any(|c| matches!(c, Component::ParentDir))
@@ -1129,6 +1134,10 @@ mod tests {
 
         // Subsequent turns in the same session MUST NOT re-prompt for `/home` or child dot-paths!
         assert!(policy.is_session_granted("file.search", &home_search_args));
+        assert!(
+            !policy.is_session_granted("terminal.execute", &json!({"cwd": "/home"})),
+            "terminal approvals must never inherit directory session grants"
+        );
         assert_eq!(
             policy.evaluate(
                 search_desc,

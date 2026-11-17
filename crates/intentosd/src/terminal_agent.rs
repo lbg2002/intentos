@@ -1447,33 +1447,32 @@ fn classify_command_proposal_inner(
             script_path,
             mount_root,
         } => {
-            // Verify `cwd` and `required_paths` are also in authorized scope
+            // Keep the original scoped-path policy checks before the SC-03
+            // safe migration gate. No script may execute until its frozen
+            // bytes are cryptographically bound to an approval.
             let mut rw_mounts = vec![mount_root];
-            if let Err(deny_cls) = collect_verified_paths_for_write(
+            if let Err(denial) = collect_verified_paths_for_write(
                 core,
                 proposal,
                 std::slice::from_ref(&proposal.cwd),
                 &mut rw_mounts,
             ) {
-                return *deny_cls;
+                return *denial;
             }
-            if let Err(deny_cls) = collect_verified_paths_for_write(
+            if let Err(denial) = collect_verified_paths_for_write(
                 core,
                 proposal,
                 &proposal.required_paths,
                 &mut rw_mounts,
             ) {
-                return *deny_cls;
+                return *denial;
             }
-            return c3_modify(
+            return c4_denied(
                 proposal,
                 Some(script_path.clone()),
                 Some(script_path),
                 Some("workspace_script".to_string()),
-                Effect::WriteDestructive,
-                Vec::new(),
-                rw_mounts,
-                "执行工作区项目脚本属于 C3SystemModify，必须经用户显式审批且不可自动撤销",
+                "workspace scripts disabled pending SC-03 immutable artifact approval",
             );
         }
         ResolvedExec::TrustedSystem {
@@ -1492,6 +1491,23 @@ fn classify_command_proposal_inner(
             requested_family,
         } => (None, None, requested_name, requested_family),
     };
+
+    // SC-03 fail-closed gate: interpreter scripts and module entrypoints
+    // cannot be approved before script bytes are frozen and bound to nonce.
+    // This intentionally disables previously supported C3 script execution.
+    if matches!(
+        prog_family.as_str(),
+        "shell" | "python" | "node" | "perl" | "ruby"
+    ) || matches!(prog_name.as_str(), "php" | "lua")
+    {
+        return c4_denied(
+            proposal,
+            resolved_opt,
+            canonical_opt,
+            Some(prog_family),
+            "interpreter execution disabled pending SC-03 immutable artifact approval",
+        );
+    }
 
     // 3. Check `env` command wrapper bypasses (`env bash -c ...`, `env LD_PRELOAD=...`)
     if prog_name == "env" || prog_family == "env" {
@@ -4566,6 +4582,39 @@ mod tests {
             CommandProposal::from_capability_args(&json!({"command":"id", "argv":[]}), None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn sc03_unfrozen_scripts_fail_closed_before_any_approval() {
+        let (_tmp, core, dir) = setup_test_core();
+        let script = dir.join("sc03-test.sh");
+        std::fs::write(&script, "echo original\\n").unwrap();
+        for (program, argv) in [
+            (
+                "bash".to_string(),
+                vec![script.to_string_lossy().into_owned()],
+            ),
+            (script.to_string_lossy().into_owned(), Vec::new()),
+            (
+                "python3".to_string(),
+                vec!["-m".into(), "http.server".into()],
+            ),
+        ] {
+            let proposal = CommandProposal {
+                program,
+                argv,
+                cwd: dir.clone(),
+                purpose: "SC03 negative gate".into(),
+                expected_effect: None,
+                required_paths: Vec::new(),
+                network_access: false,
+                timeout_seconds: 5,
+            };
+            assert_eq!(
+                classify_command_proposal(&core, &proposal).tier,
+                TerminalSafetyTier::C4Forbidden,
+            );
+        }
     }
 
     #[tokio::test]
