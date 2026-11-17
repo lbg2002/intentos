@@ -6,7 +6,7 @@
 
 | ID | 工作包 | 依赖 | 状态 | 实现提交 | 验证证据/阻塞 |
 | --- | --- | --- | --- | --- | --- |
-| SC-01 | 分层验证与失败归因 | 无 | todo | — | 当前历史全量有13项失败，需重新建立最新基线 |
+| SC-01 | 分层验证与失败归因 | 无 | implemented_unverified | SC-01 分支提交 | CI/探针已写；历史13项未复测；L1/L2/L3/L4关键验证 blocked |
 | SC-02 | 安装/打包一致性 | 退出需01 | todo | — | 服务参数已修，用户/系统布局仍需核验 |
 | SC-03 | 冻结脚本与审批摘要 | 01基础回归 | todo | — | 已有单命令输入不等于脚本冻结 |
 | SC-04 | 取消/预算/崩溃恢复 | 03 | todo | — | 复用已有进程组和账本，补生命周期 |
@@ -34,3 +34,9 @@ GitHub提交或PR链接：
 ```
 
 不要写“全部完成”替代明细。代码提交、验证提交、文档提交可不同，测试报告须明确被测代码SHA，避免把最后文档提交误当作重新运行过测试。
+
+## SC-01（2026-11-17）
+
+- 基线 `d0b9f56e1b3f454e6bda380f7d2ebe7ca223362b`，分支 `sc/system-control-20261117`；实现 probe / L1-L4 workflow / 固定工具链 / 历史失败归因台账。
+- 本地实测：探针脚本 bash -n PASS；L1 blocked (missing rustc)；L2 blocked (missing bwrap)。无 Cargo、L2 OS、L3 GUI、L4 Release 行为验证。
+- 完整证据：`docs/validation/system-control-sc01.md`；未达到验收，不得宣称 verified。后续非依赖任务可继续。

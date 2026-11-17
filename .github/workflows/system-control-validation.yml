@@ -1,0 +1,67 @@
+name: system-control-validation
+on:
+  push:
+    branches: [main, "sc/**"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  l1:
+    name: L1 - static and pure logic
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev libsqlite3-dev pkg-config
+      - run: bash scripts/probe-validation-env.sh --l1
+      - run: bash -n scripts/*.sh packaging/deb/build-deb.sh
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test -p intentos-protocol -p intentos-capability-sdk --locked -- --test-threads=1
+      - run: cargo test -p intentosd --lib command_line_ --locked -- --test-threads=1
+  l2:
+    name: L2 - trusted actual isolation (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, intentos-ubuntu-isolation]
+    environment: intentos-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/probe-validation-env.sh --l2
+      - run: cargo test -p intentos-sandbox --lib --locked -- --test-threads=1
+      - run: env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+  l3:
+    name: L3 - trusted GNOME (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, intentos-ubuntu-desktop]
+    environment: intentos-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/probe-validation-env.sh --l3
+      - name: GUI smoke; skip is not pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 desktop/settings/intentos-settings.py --smoke-ui | tee settings.log
+          /usr/bin/python3 desktop/gtk-fallback/intentos-launcher.py --smoke-ui | tee launcher.log
+          if grep -iE '(^|[^a-z])(skip|skipped)([^a-z]|$)' settings.log launcher.log; then exit 1; fi
+  l4:
+    name: L4 - exclusive Release benchmark (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, intentos-perf-exclusive]
+    environment: intentos-performance
+    env:
+      INTENTOS_PERF_EXCLUSIVE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/probe-validation-env.sh --l4
+      - run: cargo build --release --workspace --locked
+      - run: |
+          mkdir -p work
+          ./target/release/intentosctl eval --corpus eval/intents/v0_1_shell_300.json --report-out work/system-control-eval.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: system-control-release-eval
+          path: work/system-control-eval.md
