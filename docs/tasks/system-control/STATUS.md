@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | SC-01 | 分层验证与失败归因 | 无 | implemented_unverified | SC-01 分支提交 | CI/探针已写；历史13项未复测；L1/L2/L3/L4关键验证 blocked |
 | SC-02 | 安装/打包一致性 | 退出需01 | implemented_unverified | SC-02 分支提交 | 路径静态修正；V16 干净 VM 安装/升级/卸载 blocked |
-| SC-03 | 冻结脚本与审批摘要 | 01基础回归 | todo | — | 已有单命令输入不等于脚本冻结 |
+| SC-03 | 冻结脚本与审批摘要 | 01基础回归 | blocked | SC-03 安全门禁提交 | 未实现可信冻结 artifact；所有解释器/工作区脚本暂拒绝；V01–V05 blocked |
 | SC-04 | 取消/预算/崩溃恢复 | 03 | todo | — | 复用已有进程组和账本，补生命周期 |
 | SC-05 | 软件动作契约/矩阵 | 01基础回归 | todo | — | 已有Provider需增量演进 |
 | SC-06 | 代表软件真机认证 | 05 | todo | — | 需要实际软件版本与桌面会话 |
@@ -47,3 +47,10 @@ GitHub提交或PR链接：
 - 修复 Debian 服务 /usr/bin/intentosd 与用户安装 ~/.local/bin/intentosd 的布局差异；修复用户模块、worker、skills 搜索路径以及开发机路径硬编码。
 - 安装器检测 systemd 用户服务 active；当前无 systemd 用户管理器时返回非零，不报告假成功。
 - 静态审查完成，实际 Ubuntu VM 安装/升级/卸载、Rust 编译及真桌面验证 blocked。SC-01 门槛未达，不能标记 verified。
+
+
+## SC-03（2026-11-17）
+
+- 已提交 **安全门禁增量**：在任何审批前拒绝未冻结的工作区可执行脚本和 Bash/Python/Node/Perl/Ruby/PHP/Lua 解释器执行，并补无需内核沙箱的分类负向回归。避免审批后重新读取源脚本造成 TOCTOU。
+- 未实现真正 immutable artifact、script SHA-256 审批绑定、session/step 签名、旧 checkpoint 迁移、删除生命周期；不能将此项标记完成。
+- 当前无 cargo，新增测试未执行；V01–V05 真实执行/攻击用例 **blocked**。脚本保持默认关闭，旧版本允许的脚本能力有意收紧。
