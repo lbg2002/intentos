@@ -130,5 +130,12 @@ GitHub提交或PR链接：
 
 - 定向 L1 GitHub Runner `44037507542`，**被测 SHA `42a7729fe4ba3dcd5583ae34d789310e32b77e08`**：rustfmt、全 workspace Clippy `-D warnings`、协议/SDK 测试、`command_line_`、SC-03/05/07/08/09 定向 Rust 测试、Web JS 语法以及 SC-06/10 Python 8 项 **PASS**；SC-10 发布门禁 `release_allowed=false` 也符合预期。参见 `docs/validation/system-control-batch-20261117.md`。
 - 全量 L1 GitHub Runner `44036688627`，**被测 SHA `b219cf863fe735c2fc590d65f0236347799fcb58`**：22 个 test target 合计 **235 PASS / 9 FAIL**，包括真凭据泄漏 `SECRET_LEAKED`、CLI 权限逃逸 `AUTH_CFG_WRITE_ESCAPED` 和环境缺少 bwrap/numpy 等。原断言全部保留，CI **FAIL**；未把环境不合格计通过。
-- P0 防止 Landlock 回退泄漏：`4b692b1` 禁止无可信 bwrap 的通用沙箱执行；`2bfecaa` 加入定向测试和 CI。该代码后续流水线结果须核实，**不能用较早 SHA 的通过记录冒充此新修复已通过**。
+- P0 防止 Landlock 回退泄漏：`4b692b1` 禁止无可信 bwrap 的通用沙箱执行；`2bfecaa` 加入定向测试和 CI。定向 L1 GitHub Actions `44037855283` 在被测 SHA `2bfecaa0a5d8ef8c897ee3c1bcfe1207774e710a` 上 **PASS**（含新 `sc10_landlock_does_not_silently_downgrade_credential_isolation` 负向测试）。这只能证明拒绝降级行为；真实 Bubblewrap/Landlock 边界正向和全量仍 blocked/FAIL。
 - L2 实际 Bubblewrap/userns、L3 Ubuntu GNOME Wayland/X11、L4 独占性能均未执行（manual self-hosted runner 未就绪）；对应工作包仍 blocked/implemented_unverified，全部发布门槛未达。
+
+
+### P0 安全修复定向验证结果（2026-11-17）
+
+- 测试 SHA：`2bfecaa0a5d8ef8c897ee3c1bcfe1207774e710a`，CI：https://github.com/lbg2002/intentos/actions/runs/44037855283
+- L1 `cargo fmt --check`、严格 Clippy、SC-03/05/07/08/09/P0 定向 Rust、8 项 Python fixture、JS syntax、发布必须拒绝检查全部 PASS。
+- 原始完整回归 `b219cf8` 仍为 235 PASS/9 FAIL；L2 具备 Bubblewrap userns 的实测正向不能由“默认拒绝无 bwrap”负向测试代替。新代码未完成完整 L2/L3/L4 验收。

@@ -6,7 +6,7 @@
 - 本批开发分支：`sc/system-control-05-10-20261117`，草稿 PR：https://github.com/lbg2002/intentos/pull/17 ；**未合并到 main**。
 - GitHub Ubuntu 24.04 L1 定向成功：`42a7729fe4ba3dcd5583ae34d789310e32b77e08`，https://github.com/lbg2002/intentos/actions/runs/44037507542
 - GitHub Ubuntu 24.04 L1 全量失败：`b219cf863fe735c2fc590d65f0236347799fcb58`，https://github.com/lbg2002/intentos/actions/runs/44036688627
-- 安全修复 `4b692b1` 与 CI 补测 `2bfecaa` 晚于上述被测版本，不能视为已由上述运行验证。后续 CI 应另列 SHA/URL。
+- 安全修复 `4b692b1` 与 CI 补测 `2bfecaa` 晚于旧全量被测版本；新的 L1 定向已在被测 SHA `2bfecaa0a5d8ef8c897ee3c1bcfe1207774e710a` **PASS**：https://github.com/lbg2002/intentos/actions/runs/44037855283 。这是针对“无可信 bwrap 时拒绝降级”的单元检验，不构成 L2 真实安全认证。
 
 ## 真实执行结果
 
@@ -46,3 +46,10 @@
 - 即使 L1 定向所有用例通过，也不等于 L2 沙箱、L3 桌面或 L4 性能通过；未执行的测试不计入成功分母。
 - P0 安全修复为拒绝不安全回退（功能降级），不是已经证明隔离正确；等可恢复 Ubuntu VM 启用可信 bwrap/userns 后执行正/负用例。
 - 保留原始 GitHub Actions 日志、错误和测试断言；任何人工解除 gate 必须引用可信机器的独立证据，禁止篡改 STATUS 为 verified 代替测试。
+
+
+## P0 修复后新增 L1 验证（明确 SHA）
+
+- GitHub Actions https://github.com/lbg2002/intentos/actions/runs/44037855283 ，被测 `2bfecaa0a5d8ef8c897ee3c1bcfe1207774e710a`。
+- `cargo fmt --check`、`clippy -D warnings`、协议/SDK、`command_line_`、SC-03/05/07/08/09 定向测试、P0 `sc10_landlock_does_not_silently_downgrade_credential_isolation`、Web JS 语法及 SC-06/10 Python fixture 8 项 **PASS**。
+- 重要限制：新增负向测试证明在无 bwrap 条件下构造器返回拒绝；**没有证明真实 bwrap 工作区允许、机密子路径阻断或网络隔离已通过**，L2/L3/L4 和全量发布仍 blocked。
