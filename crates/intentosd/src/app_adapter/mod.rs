@@ -1179,24 +1179,35 @@ pub async fn handle_module_rpc(
         "get_compatibility_matrix" => {
             // Read-only discovery endpoint; it must not invoke software, grant
             // approvals, or accept arbitrary host scan directories.
-            let query = payload.get("query").and_then(Value::as_str)
+            let query = payload
+                .get("query")
+                .and_then(Value::as_str)
                 .map(|s| s.chars().take(128).collect::<String>());
             let app_id = payload.get("app_id").and_then(Value::as_str);
-            let limit = payload.get("limit").and_then(Value::as_u64)
-                .unwrap_or(100).clamp(1, 200) as usize;
+            let limit = payload
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(100)
+                .clamp(1, 200) as usize;
             let reg = AdapterRegistry::load(Some(&core.paths.config_dir));
             let opts = local_scanner::LocalScanOptions {
                 query,
-                force_refresh: payload.get("force_refresh").and_then(Value::as_bool).unwrap_or(false),
+                force_refresh: payload
+                    .get("force_refresh")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 ..Default::default()
             };
-            let catalog = local_scanner::deep_scan_local_software(
-                Some(&core.paths.config_dir), &reg, &opts,
-            ).await;
-            let actions: Vec<_> = catalog.apps.iter()
+            let catalog =
+                local_scanner::deep_scan_local_software(Some(&core.paths.config_dir), &reg, &opts)
+                    .await;
+            let actions: Vec<_> = catalog
+                .apps
+                .iter()
                 .filter(|app| app_id.is_none_or(|id| app.id == id || app.desktop_id == id))
                 .flat_map(compatibility::observations_for_app)
-                .take(limit).collect();
+                .take(limit)
+                .collect();
             Ok(json!({
                 "schema_version": compatibility::MATRIX_SCHEMA_VERSION,
                 "source": "desktop_discovery_not_certification",

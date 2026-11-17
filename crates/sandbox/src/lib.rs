@@ -1046,7 +1046,6 @@ impl ProcessGroupKillGuard {
             }
         }
     }
-
 }
 
 impl Drop for ProcessGroupKillGuard {
@@ -1371,7 +1370,10 @@ print("DONE_OK")
         let marker_file = tmp.path().join("grandchild_marker");
         let python = format!(
             "import subprocess; subprocess.Popen(['/usr/bin/python3', '-c', {:?}], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
-            format!("import time; time.sleep(1.0); open({:?}, 'w').write('escaped')", marker_file)
+            format!(
+                "import time; time.sleep(1.0); open({:?}, 'w').write('escaped')",
+                marker_file
+            )
         );
         let spec = TerminalSandboxSpec {
             program: PathBuf::from("/usr/bin/python3"),
@@ -1389,10 +1391,15 @@ print("DONE_OK")
             std::time::Duration::from_secs(4),
             65536,
             &probe,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert!(!out.timed_out, "leader should exit normally");
         tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
-        assert!(!marker_file.exists(), "surviving grandchild wrote after leader exit");
+        assert!(
+            !marker_file.exists(),
+            "surviving grandchild wrote after leader exit"
+        );
     }
 
     #[tokio::test]

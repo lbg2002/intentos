@@ -1475,8 +1475,10 @@ fn classify_command_proposal_inner(
     // SC-03 fail-closed gate: interpreter scripts and module entrypoints
     // cannot be approved before script bytes are frozen and bound to nonce.
     // This intentionally disables previously supported C3 script execution.
-    if matches!(prog_family.as_str(), "shell" | "python" | "node" | "perl" | "ruby")
-        || matches!(prog_name.as_str(), "php" | "lua")
+    if matches!(
+        prog_family.as_str(),
+        "shell" | "python" | "node" | "perl" | "ruby"
+    ) || matches!(prog_name.as_str(), "php" | "lua")
     {
         return c4_denied(
             proposal,
@@ -4568,9 +4570,15 @@ mod tests {
         let script = dir.join("sc03-test.sh");
         std::fs::write(&script, "echo original\\n").unwrap();
         for (program, argv) in [
-            ("bash".to_string(), vec![script.to_string_lossy().into_owned()]),
+            (
+                "bash".to_string(),
+                vec![script.to_string_lossy().into_owned()],
+            ),
             (script.to_string_lossy().into_owned(), Vec::new()),
-            ("python3".to_string(), vec!["-m".into(), "http.server".into()]),
+            (
+                "python3".to_string(),
+                vec!["-m".into(), "http.server".into()],
+            ),
         ] {
             let proposal = CommandProposal {
                 program,

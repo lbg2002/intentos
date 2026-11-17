@@ -113,7 +113,11 @@ impl XdgPaths {
         }
         {
             let user = self.data_dir.join("builtin-modules");
-            if user.is_dir() { user } else { PathBuf::from("/usr/share/intentos/builtin-modules") }
+            if user.is_dir() {
+                user
+            } else {
+                PathBuf::from("/usr/share/intentos/builtin-modules")
+            }
         }
     }
 
@@ -124,7 +128,11 @@ impl XdgPaths {
         }
         {
             let user = self.data_dir.join("pi-adapter/dist/worker.js");
-            if user.is_file() { user } else { PathBuf::from("/usr/lib/intentos/intentos-agent/dist/worker.js") }
+            if user.is_file() {
+                user
+            } else {
+                PathBuf::from("/usr/lib/intentos/intentos-agent/dist/worker.js")
+            }
         }
     }
 }
