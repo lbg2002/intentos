@@ -22,6 +22,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p intentos-protocol -p intentos-capability-sdk --locked -- --test-threads=1
       - run: cargo test -p intentosd --lib command_line_ --locked -- --test-threads=1
+      - name: P0 - fail-closed credential masking when Bubblewrap is unavailable
+        run: cargo test -p intentos-sandbox --lib sc10_landlock_does_not_silently_downgrade_credential_isolation --locked -- --test-threads=1
       - name: SC-05 action compatibility contract
         run: cargo test -p intentosd --lib sc05_ --locked -- --test-threads=1
       - name: SC-07 settings optimistic undo conflict
