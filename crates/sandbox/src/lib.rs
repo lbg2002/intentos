@@ -1047,9 +1047,6 @@ impl ProcessGroupKillGuard {
         }
     }
 
-    fn disarm(&mut self) {
-        self.pgid = None;
-    }
 }
 
 impl Drop for ProcessGroupKillGuard {
@@ -1103,7 +1100,8 @@ pub async fn execute_terminal_sandbox_bounded(
 
     match tokio::time::timeout(timeout, read_and_wait).await {
         Ok(Ok((status, mut out_buf, mut err_buf))) => {
-            pg_guard.disarm();
+            // Do not disarm on leader exit: detached descendants in the
+            // same process group may still be running. Drop kills the group.
             let duration_ms = start.elapsed().as_millis() as u64;
             let mut truncated = false;
             if out_buf.len() > max_output_bytes {
@@ -1360,6 +1358,41 @@ print("DONE_OK")
         } else {
             let _ = std::fs::remove_file(&host_tmp_probe);
         }
+    }
+
+    #[tokio::test]
+    async fn sc04_normal_exit_reaps_surviving_process_group_descendants() {
+        let probe = probe_sandbox_support();
+        if !probe.has_os_isolation() {
+            // Not a pass: L2 CI probe must gate this entire test suite.
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let marker_file = tmp.path().join("grandchild_marker");
+        let python = format!(
+            "import subprocess; subprocess.Popen(['/usr/bin/python3', '-c', {:?}], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            format!("import time; time.sleep(1.0); open({:?}, 'w').write('escaped')", marker_file)
+        );
+        let spec = TerminalSandboxSpec {
+            program: PathBuf::from("/usr/bin/python3"),
+            args: vec!["-c".into(), python],
+            ro_bind_root: true,
+            readonly_paths: vec![tmp.path().to_path_buf()],
+            readwrite_paths: vec![tmp.path().to_path_buf()],
+            masked_paths: vec![],
+            env_vars: BTreeMap::new(),
+            work_dir: tmp.path().to_path_buf(),
+            allow_tcp_network: false,
+        };
+        let out = execute_terminal_sandbox_bounded(
+            &spec,
+            std::time::Duration::from_secs(4),
+            65536,
+            &probe,
+        ).await.unwrap();
+        assert!(!out.timed_out, "leader should exit normally");
+        tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+        assert!(!marker_file.exists(), "surviving grandchild wrote after leader exit");
     }
 
     #[tokio::test]
