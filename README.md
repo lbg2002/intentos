@@ -158,6 +158,8 @@ env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace -- --test-threads=1
 
 ## 🗺️ v0.2 Cognitive Shell 路线图
 
+产品规划入口：[产品、架构与性能顶层规划](docs/AIOS_PRODUCT_ARCHITECTURE_MASTER_PLAN.md)，覆盖可靠日用、个人工作空间、主动协助、易用性和发布门槛。
+
 最新的代码审查、目标验收方法与交付优先级见 [AIOS 代码审查与目标交付方案](docs/AIOS_REVIEW_AND_DELIVERY_PLAN.md)。本轮实际测试结果与未通过项见 [验证报告](docs/AIOS_VALIDATION_REPORT.md)。该方案区分请求已发送、步骤已验证和用户目标达成，并记录当前实现边界及 M3/M4 验收条件。
 
 IntentOS 正在从 v0.1「单点系统控制与命令路由壳层」全面升级为 **v0.2 Cognitive Shell（懂个人项目上下文、能跨软件协同、可验证且可逆的高可信桌面认知壳层）**。完整架构设计与同机性能对照实测请参阅 **[docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md)** 与 **[docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md](docs/M1_1_HARDENING_AND_M2_IMPLEMENTATION.md)**，实时研发进度可在 **[GitHub Milestones](https://github.com/lbg2002/intentos/milestones)** 查看：

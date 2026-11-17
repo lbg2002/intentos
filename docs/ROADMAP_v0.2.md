@@ -1,5 +1,7 @@
 # IntentOS v0.2 架构演进路线图 — 面向 Ubuntu 桌面的个人认知壳层 (Cognitive Shell)
 
+> 产品优先级补充：[顶层规划](AIOS_PRODUCT_ARCHITECTURE_MASTER_PLAN.md)。上手体验与可靠日用提前至首阶段，M3/M4 按依赖推进。
+
 > 后续任务的证据标准、现有缺口和交付顺序以 [AIOS 代码审查与目标交付方案](AIOS_REVIEW_AND_DELIVERY_PLAN.md) 为补充依据。M1/M2 历史完成标记不代表所有可信执行边界已验证，新增审查结果见该方案。
 
 > **版本定位**：从 v0.1「系统开关与单点命令路由器」全面演进为 **IntentOS v0.2 Cognitive Shell（懂个人上下文、能跨软件协同、可验证且可逆的高可信个人桌面认知壳层）**。  
