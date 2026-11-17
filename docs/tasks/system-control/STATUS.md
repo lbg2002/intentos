@@ -10,7 +10,7 @@
 | SC-02 | 安装/打包一致性 | 退出需01 | implemented_unverified | SC-02 分支提交 | 路径静态修正；V16 干净 VM 安装/升级/卸载 blocked |
 | SC-03 | 冻结脚本与审批摘要 | 01基础回归 | blocked | SC-03 安全门禁提交 | 未实现可信冻结 artifact；所有解释器/工作区脚本暂拒绝；V01–V05 blocked |
 | SC-04 | 取消/预算/崩溃恢复 | 03 | blocked | SC-04 局部修复提交 | 正常退出后孙进程清理补强；取消和崩溃恢复 V06/V07 未验证，依赖03冻结 |
-| SC-05 | 软件动作契约/矩阵 | 01基础回归 | todo | — | 已有Provider需增量演进 |
+| SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | SC-05 独立提交 | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
 | SC-06 | 代表软件真机认证 | 05 | todo | — | 需要实际软件版本与桌面会话 |
 | SC-07 | 系统控制/有限特权代理 | 03/04 | todo | — | 分非特权与特权子包；特权默认关闭 |
 | SC-08 | Bash复合计划 | 03/04 | todo | — | 不允许退化为裸bash -c |
@@ -60,3 +60,10 @@ GitHub提交或PR链接：
 
 - 局部修复：受控沙箱主进程正常退出后仍清理同进程组孙进程，防止短生命周期父进程遗留后台任务；增加异步真实沙箱负向测试。已有 timeout/output 上限、killpg 和账本代码未放宽。
 - **未完成**：完整任务取消联动、硬性磁盘预算、prepared/executing/applied/verified 崩溃注入与恢复证明；依赖 SC-03 未完成。本次测试因无 cargo/bwrap 未执行，V06/V07 blocked，不能验收或开放未验证功能。
+
+
+## SC-05（2026-11-17）
+
+- 增加不授予执行能力的 `app_adapter.get_compatibility_matrix` 只读 RPC。按 action_id/channel/package_format 暴露 schema_version=1、发现状态、认证状态、版本未知、桌面/Flatpak/Snap 约束；不伪造认证记录。
+- 对模型已有 `app.discover` 补充 `certification_state: unverified` 和版本未知提示；保持原 Broker/Policy/Provider 链路不变。无认证写入或持久化迁移，旧客户端忽略新增字段。
+- 添加三个纯逻辑负向单测；当前无 cargo/rustc，尚未执行。V08/V10、历史 13 项回归和真实环境认证均 blocked，状态不能 verified。

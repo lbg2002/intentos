@@ -1307,6 +1307,9 @@ async fn execute_app_discover(
                 "install_source": entry.install_source,
                 "is_running": entry.is_running,
                 "supported_channels": entry.channels,
+                "certification_state": "unverified",
+                "observed_version": null,
+                "verification_reason": "desktop discovery does not establish successful action verification",
             })
         })
         .collect();

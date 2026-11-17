@@ -10,6 +10,7 @@
 //! 4. `headless_bridge.rs` — Silent Background Document/Media Transformation (`libreoffice --headless`, `pdftotext`, `ffmpeg`)
 //! 5. `gui_bridge.rs` — Window Focus & AT-SPI2 Accessibility Inspection / Approval-Gated UI Action Fallback
 
+pub mod compatibility;
 pub mod dynamic_profiler;
 pub mod gui_bridge;
 pub mod headless_bridge;
@@ -1173,6 +1174,35 @@ pub async fn handle_module_rpc(
                     "app_provider_execute"
                 ],
                 "categories": local_scanner::all_software_categories()
+            }))
+        }
+        "get_compatibility_matrix" => {
+            // Read-only discovery endpoint; it must not invoke software, grant
+            // approvals, or accept arbitrary host scan directories.
+            let query = payload.get("query").and_then(Value::as_str)
+                .map(|s| s.chars().take(128).collect::<String>());
+            let app_id = payload.get("app_id").and_then(Value::as_str);
+            let limit = payload.get("limit").and_then(Value::as_u64)
+                .unwrap_or(100).clamp(1, 200) as usize;
+            let reg = AdapterRegistry::load(Some(&core.paths.config_dir));
+            let opts = local_scanner::LocalScanOptions {
+                query,
+                force_refresh: payload.get("force_refresh").and_then(Value::as_bool).unwrap_or(false),
+                ..Default::default()
+            };
+            let catalog = local_scanner::deep_scan_local_software(
+                Some(&core.paths.config_dir), &reg, &opts,
+            ).await;
+            let actions: Vec<_> = catalog.apps.iter()
+                .filter(|app| app_id.is_none_or(|id| app.id == id || app.desktop_id == id))
+                .flat_map(compatibility::observations_for_app)
+                .take(limit).collect();
+            Ok(json!({
+                "schema_version": compatibility::MATRIX_SCHEMA_VERSION,
+                "source": "desktop_discovery_not_certification",
+                "count": actions.len(),
+                "actions": actions,
+                "note": "All actions unverified until real Ubuntu session evidence is reviewed. No execution grants are issued.",
             }))
         }
         "deep_scan_local_software" | "get_categorized_catalog" => {
