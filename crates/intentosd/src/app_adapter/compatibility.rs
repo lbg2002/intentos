@@ -98,7 +98,11 @@ pub fn observations_for_app(entry: &ScannedSoftwareEntry) -> Vec<ActionCompatibi
 
 /// Distinguish an installed desktop entry from a certified action and give
 /// a stable missing-app response without claiming a package was installed.
-pub fn lookup_status(requested_app_id: Option<&str>, detected_apps: usize, emitted_actions: usize) -> &'static str {
+pub fn lookup_status(
+    requested_app_id: Option<&str>,
+    detected_apps: usize,
+    emitted_actions: usize,
+) -> &'static str {
     if requested_app_id.is_some() && detected_apps == 0 {
         "not_installed_or_not_detected"
     } else if detected_apps == 0 {
@@ -177,10 +181,19 @@ mod tests {
     }
     #[test]
     fn sc05_explicit_missing_app_and_empty_action_are_not_reported_as_compatible() {
-        assert_eq!(lookup_status(Some("absent.app"), 0, 0), "not_installed_or_not_detected");
+        assert_eq!(
+            lookup_status(Some("absent.app"), 0, 0),
+            "not_installed_or_not_detected"
+        );
         assert_eq!(lookup_status(None, 0, 0), "no_desktop_entries_observed");
-        assert_eq!(lookup_status(Some("installed"), 1, 0), "no_declared_actions");
-        assert_eq!(lookup_status(Some("installed"), 1, 1), "desktop_entry_observed_not_certified");
+        assert_eq!(
+            lookup_status(Some("installed"), 1, 0),
+            "no_declared_actions"
+        );
+        assert_eq!(
+            lookup_status(Some("installed"), 1, 1),
+            "desktop_entry_observed_not_certified"
+        );
     }
 
     #[test]
@@ -188,7 +201,11 @@ mod tests {
         let raw = include_str!("../../../../docs/validation/system-control-sc05-fixture.json");
         let entries: Vec<ActionCompatibilityV1> = serde_json::from_str(raw).unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().all(|x| x.certification_state == CertificationState::Unverified && !x.execution_enabled_by_matrix));
+        assert!(
+            entries
+                .iter()
+                .all(|x| x.certification_state == CertificationState::Unverified
+                    && !x.execution_enabled_by_matrix)
+        );
     }
-
 }
