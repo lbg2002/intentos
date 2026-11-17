@@ -1,0 +1,41 @@
+[
+  {
+    "schema_version": 1,
+    "app_id": "org.gnome.Nautilus",
+    "desktop_id": "org.gnome.Nautilus.desktop",
+    "display_name": "Files",
+    "package_format": "system_apt",
+    "observed_version": null,
+    "action_id": "launch",
+    "channel": "dbus_freedesktop",
+    "discovery_state": "desktop_entry_observed",
+    "certification_state": "unverified",
+    "verification_reason": "Synthetic test fixture only; no Ubuntu action performed",
+    "environment_requirements": [
+      "session_dbus_interface"
+    ],
+    "requires_approval": false,
+    "execution_enabled_by_matrix": false,
+    "source": "fixture_synthetic"
+  },
+  {
+    "schema_version": 1,
+    "app_id": "org.example.FlatpakApp",
+    "desktop_id": "org.example.FlatpakApp.desktop",
+    "display_name": "Example",
+    "package_format": "flatpak",
+    "observed_version": null,
+    "action_id": "focus",
+    "channel": "gui_atspi",
+    "discovery_state": "desktop_entry_observed",
+    "certification_state": "unverified",
+    "verification_reason": "Synthetic test fixture only; no desktop verification performed",
+    "environment_requirements": [
+      "live_desktop_session",
+      "package_sandbox_interface_permission_unverified"
+    ],
+    "requires_approval": true,
+    "execution_enabled_by_matrix": false,
+    "source": "fixture_synthetic"
+  }
+]

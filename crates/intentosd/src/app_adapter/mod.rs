@@ -1201,10 +1201,14 @@ pub async fn handle_module_rpc(
             let catalog =
                 local_scanner::deep_scan_local_software(Some(&core.paths.config_dir), &reg, &opts)
                     .await;
-            let actions: Vec<_> = catalog
+            let matching_apps: Vec<_> = catalog
                 .apps
                 .iter()
                 .filter(|app| app_id.is_none_or(|id| app.id == id || app.desktop_id == id))
+                .collect();
+            let observed_app_count = matching_apps.len();
+            let actions: Vec<_> = matching_apps
+                .into_iter()
                 .flat_map(compatibility::observations_for_app)
                 .take(limit)
                 .collect();
@@ -1212,6 +1216,8 @@ pub async fn handle_module_rpc(
                 "schema_version": compatibility::MATRIX_SCHEMA_VERSION,
                 "source": "desktop_discovery_not_certification",
                 "count": actions.len(),
+                "lookup_status": compatibility::lookup_status(app_id, observed_app_count, actions.len()),
+                "observed_app_count": observed_app_count,
                 "actions": actions,
                 "note": "All actions unverified until real Ubuntu session evidence is reviewed. No execution grants are issued.",
             }))

@@ -102,3 +102,8 @@ GitHub提交或PR链接：
 - 增加 `scripts/sc10_release_gate.py`，逐包要求 STATUS=verified 且相应的 SHA、runner、命令与 L1/L2/L3 证据文件齐全；skipped/failed 不计 passed；默认阻断发布。没有扩展已启用能力。
 - 本地隔离 fixture 的 3 个 Python 单元测试 PASS；缺实际 L1/L2/L3/L4 证据，当前批次 release_allowed=false。门禁仅能检查报告字段，不是签名证明或真实硬件认证的替代品。
 - SC-03/04/06/07/08/09 关键验收未通过，SC-10 blocked。未运行 Release 性能 benchmark，不发布完整 Bash、特权代理或全面软件兼容声明。
+
+
+### SC-05 查询语义补全（2026-11-17）
+
+- 显式 app_id 查无 desktop entry 返回 `lookup_status=not_installed_or_not_detected`；找到但无动作返回 `no_declared_actions`；已发现且可列出动作也不会自动转为 certified。新增两条 Rust 状态边界测试及两条合成 fixture，仍不启用新执行通路。
