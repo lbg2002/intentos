@@ -1443,15 +1443,29 @@ fn classify_command_proposal_inner(
         ResolvedExec::Forbidden(reason) => {
             return c4_denied(proposal, None, None, None, reason);
         }
-        ResolvedExec::AuthorizedWorkspaceScript { .. } => {
-            // SC-03 safe migration gate: no source-path execution until an
-            // approval-bound immutable artifact is available. Approval alone
-            // must not permit a TOCTOU script replacement.
+        ResolvedExec::AuthorizedWorkspaceScript {
+            script_path,
+            mount_root,
+        } => {
+            // Keep the original scoped-path policy checks before the SC-03
+            // safe migration gate. No script may execute until its frozen
+            // bytes are cryptographically bound to an approval.
+            let mut rw_mounts = vec![mount_root];
+            if let Err(denial) = collect_verified_paths_for_write(
+                core, proposal, std::slice::from_ref(&proposal.cwd), &mut rw_mounts,
+            ) {
+                return *denial;
+            }
+            if let Err(denial) = collect_verified_paths_for_write(
+                core, proposal, &proposal.required_paths, &mut rw_mounts,
+            ) {
+                return *denial;
+            }
             return c4_denied(
                 proposal,
-                None,
-                None,
-                None,
+                Some(script_path.clone()),
+                Some(script_path),
+                Some("workspace_script".to_string()),
                 "workspace scripts disabled pending SC-03 immutable artifact approval",
             );
         }
