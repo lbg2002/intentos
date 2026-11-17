@@ -158,6 +158,8 @@ env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace -- --test-threads=1
 
 ## 🗺️ v0.2 Cognitive Shell 路线图
 
+开发智能体入口：[后续开发任务书](docs/tasks/system-control/README.md)（10 个工作包、接口契约、验收矩阵、状态表和可复制执行提示词）。
+
 最新主线：[软件兼容、系统操控与 Bash 执行架构](docs/AIOS_SYSTEM_CONTROL_ARCHITECTURE.md)。受控终端新增单条命令 `command` 输入，沿用危险操作审批和沙箱；完整 Bash 复合语法按阶段交付。
 
 产品规划入口：[产品、架构与性能顶层规划](docs/AIOS_PRODUCT_ARCHITECTURE_MASTER_PLAN.md)，覆盖可靠日用、个人工作空间、主动协助、易用性和发布门槛。
