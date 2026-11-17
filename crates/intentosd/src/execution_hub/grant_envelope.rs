@@ -207,7 +207,12 @@ pub fn create_grant_envelope(
     }
     // Never mint an envelope explicitly covering shell/terminal execution.
     // Historic wildcard grants are also blocked at the consume boundary.
-    if capabilities.iter().any(|c| matches!(c.as_str(), "terminal.execute" | "terminal_execute" | "terminal.*")) {
+    if capabilities.iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "terminal.execute" | "terminal_execute" | "terminal.*"
+        )
+    }) {
         anyhow::bail!("terminal.execute 仅允许本次审批，不得创建会话/任务批量授权");
     }
 
@@ -332,7 +337,10 @@ pub fn check_within_envelope(
 
     // SC-09 deny terminal even with historic wildcard envelopes or a
     // falsified low effect; real approval requires a unique nonce/digest.
-    if matches!(call.capability_id.as_str(), "terminal.execute" | "terminal_execute") {
+    if matches!(
+        call.capability_id.as_str(),
+        "terminal.execute" | "terminal_execute"
+    ) {
         return EnvelopeCheckOutcome::OutOfBounds {
             reason: "terminal.execute 必须逐次审批，禁止复用授权包络".into(),
             violation_kind: "terminal_requires_single_use_approval".into(),

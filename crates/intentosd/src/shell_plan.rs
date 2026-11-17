@@ -59,7 +59,9 @@ pub fn validate_shell_plan_draft(
             return Err("invalid_step_identity");
         }
         if s.program.trim().is_empty()
-            || s.program.chars().any(|c| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '`' | '$' | '\0'))
+            || s.program.chars().any(|c| {
+                c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '`' | '$' | '\0')
+            })
         {
             return Err("unsupported_syntax");
         }
@@ -83,8 +85,16 @@ mod tests {
         ShellPlanDraftV1 {
             version: 1,
             steps: vec![
-                PipelineDraftStep { step_id: "a".into(), program: "printf".into(), argv: vec!["hello".into()] },
-                PipelineDraftStep { step_id: "b".into(), program: "wc".into(), argv: vec!["-c".into()] },
+                PipelineDraftStep {
+                    step_id: "a".into(),
+                    program: "printf".into(),
+                    argv: vec!["hello".into()],
+                },
+                PipelineDraftStep {
+                    step_id: "b".into(),
+                    program: "wc".into(),
+                    argv: vec!["-c".into()],
+                },
             ],
             operators: vec!["pipe".into()],
         }
@@ -101,19 +111,31 @@ mod tests {
     fn sc08_rejects_conditional_and_shell_escape_as_unsupported_syntax() {
         let mut p = candidate();
         p.operators = vec!["&&".into()];
-        assert_eq!(validate_shell_plan_draft(&p).unwrap_err(), "unsupported_syntax");
+        assert_eq!(
+            validate_shell_plan_draft(&p).unwrap_err(),
+            "unsupported_syntax"
+        );
         p.operators = vec!["pipe".into()];
         p.steps[0].program = "bash -c".into();
-        assert_eq!(validate_shell_plan_draft(&p).unwrap_err(), "unsupported_syntax");
+        assert_eq!(
+            validate_shell_plan_draft(&p).unwrap_err(),
+            "unsupported_syntax"
+        );
         p.steps[0].program = "echo;id".into();
-        assert_eq!(validate_shell_plan_draft(&p).unwrap_err(), "unsupported_syntax");
+        assert_eq!(
+            validate_shell_plan_draft(&p).unwrap_err(),
+            "unsupported_syntax"
+        );
     }
 
     #[test]
     fn sc08_rejects_duplicate_step_ids_and_extra_redirection_fields() {
         let mut p = candidate();
         p.steps[1].step_id = "a".into();
-        assert_eq!(validate_shell_plan_draft(&p).unwrap_err(), "invalid_step_identity");
+        assert_eq!(
+            validate_shell_plan_draft(&p).unwrap_err(),
+            "invalid_step_identity"
+        );
         let raw = r#"{"version":1,"steps":[{"step_id":"a","program":"echo","argv":[],"redirect":"/tmp/file"}],"operators":[]}"#;
         assert!(serde_json::from_str::<ShellPlanDraftV1>(raw).is_err());
     }

@@ -2564,15 +2564,30 @@ mod tests {
         let eng = SystemSettingsEngine::new(db, true);
         let repo_sys = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/builtin/system");
         let descriptors = load_descriptors_from_dir(&repo_sys).unwrap();
-        let bright_set = descriptors.iter().find(|d| d.id == "display.brightness.set").unwrap();
+        let bright_set = descriptors
+            .iter()
+            .find(|d| d.id == "display.brightness.set")
+            .unwrap();
         let original = eng.read_setting_value("display.brightness").unwrap().0;
-        let first = eng.execute("first", "task1", bright_set, &json!({"value": 35})).unwrap();
+        let first = eng
+            .execute("first", "task1", bright_set, &json!({"value": 35}))
+            .unwrap();
         let first_after = first.data["after"].clone();
-        eng.execute("external", "task2", bright_set, &json!({"value": 80})).unwrap();
-        assert!(!eng.undo_precondition_met("display.brightness", &first_after).unwrap());
-        assert!(eng.undo_setting_op_checked(
-            "display.brightness", &original, &first_after, "simulated_headless"
-        ).is_err());
+        eng.execute("external", "task2", bright_set, &json!({"value": 80}))
+            .unwrap();
+        assert!(
+            !eng.undo_precondition_met("display.brightness", &first_after)
+                .unwrap()
+        );
+        assert!(
+            eng.undo_setting_op_checked(
+                "display.brightness",
+                &original,
+                &first_after,
+                "simulated_headless"
+            )
+            .is_err()
+        );
         let (current, _) = eng.read_setting_value("display.brightness").unwrap();
         assert_eq!(current.as_f64(), Some(80.0));
     }

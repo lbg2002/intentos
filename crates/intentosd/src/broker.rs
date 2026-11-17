@@ -1031,7 +1031,10 @@ impl CapabilityBroker {
                     Ok(false) => {
                         cs.status = ChangeSetStatus::Conflict;
                         self.state_db.save_changeset(&cs)?;
-                        return Ok((cs, format!("撤销冲突：{} 的当前值与记录不符，未执行撤销", key)));
+                        return Ok((
+                            cs,
+                            format!("撤销冲突：{} 的当前值与记录不符，未执行撤销", key),
+                        ));
                     }
                     Err(err) => {
                         cs.status = ChangeSetStatus::Conflict;
@@ -1071,9 +1074,9 @@ impl CapabilityBroker {
                 ..
             } = op
             {
-                let (restored, _) = self.settings.undo_setting_op_checked(
-                    key, before, after, backend_mode,
-                )?;
+                let (restored, _) =
+                    self.settings
+                        .undo_setting_op_checked(key, before, after, backend_mode)?;
                 summary_parts.push(format!(
                     "已恢复 {} 至 {}",
                     crate::settings::setting_human_name(key),

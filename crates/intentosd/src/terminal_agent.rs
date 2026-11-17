@@ -1452,12 +1452,18 @@ fn classify_command_proposal_inner(
             // bytes are cryptographically bound to an approval.
             let mut rw_mounts = vec![mount_root];
             if let Err(denial) = collect_verified_paths_for_write(
-                core, proposal, std::slice::from_ref(&proposal.cwd), &mut rw_mounts,
+                core,
+                proposal,
+                std::slice::from_ref(&proposal.cwd),
+                &mut rw_mounts,
             ) {
                 return *denial;
             }
             if let Err(denial) = collect_verified_paths_for_write(
-                core, proposal, &proposal.required_paths, &mut rw_mounts,
+                core,
+                proposal,
+                &proposal.required_paths,
+                &mut rw_mounts,
             ) {
                 return *denial;
             }
