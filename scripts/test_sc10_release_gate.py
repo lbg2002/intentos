@@ -21,7 +21,7 @@ class GateTests(unittest.TestCase):
         return tmp, root
 
     def test_incomplete_packages_block(self):
-        tmp, root = self.make_root('| SC-05 | name | dep | implemented_unverified | - | - |\\n')
+        tmp, root = self.make_root('| SC-05 | name | dep | implemented_unverified | - | - |\n')
         try:
             result = gate.check(root)
             self.assertFalse(result['release_allowed'])
@@ -30,7 +30,7 @@ class GateTests(unittest.TestCase):
             tmp.cleanup()
 
     def test_unverifiable_evidence_is_never_a_release_pass(self):
-        table = ''.join(f'| {p} | n | dep | verified | sha | note |\\n' for p in gate.PACKAGES)
+        table = ''.join(f'| {p} | n | dep | verified | sha | note |\n' for p in gate.PACKAGES)
         tmp, root = self.make_root(table)
         try:
             result = gate.check(root)
@@ -40,7 +40,7 @@ class GateTests(unittest.TestCase):
             tmp.cleanup()
 
     def test_all_evidence_layers_must_be_pass(self):
-        table = ''.join(f'| {p} | n | dep | verified | sha | note |\\n' for p in gate.PACKAGES)
+        table = ''.join(f'| {p} | n | dep | verified | sha | note |\n' for p in gate.PACKAGES)
         tmp, root = self.make_root(table)
         try:
             folder = root / 'docs/validation/release'
@@ -61,7 +61,7 @@ class GateTests(unittest.TestCase):
 
     def test_synthetic_all_green_is_only_a_parser_positive_control(self):
         # This fixture tests the gate logic, NOT OS/capability certification.
-        table = ''.join(f'| {p} | n | dep | verified | sha | note |\\n'
+        table = ''.join(f'| {p} | n | dep | verified | sha | note |\n'
                         for p in gate.PACKAGES)
         tmp, root = self.make_root(table)
         try:
@@ -89,7 +89,7 @@ class GateTests(unittest.TestCase):
             tmp.cleanup()
 
     def test_missing_actual_acceptance_scenario_blocks_even_if_layers_claim_pass(self):
-        table = ''.join(f'| {p} | n | dep | verified | sha | note |\\n'
+        table = ''.join(f'| {p} | n | dep | verified | sha | note |\n'
                         for p in gate.PACKAGES)
         tmp, root = self.make_root(table)
         try:

@@ -18,7 +18,7 @@ class TestSc06Probe(unittest.TestCase):
     def test_discovery_is_not_certification(self):
         with tempfile.TemporaryDirectory() as root:
             p = pathlib.Path(root)
-            (p / 'firefox.desktop').write_text('[Desktop Entry]\\nName=Firefox\\n', encoding='utf-8')
+            (p / 'firefox.desktop').write_text('[Desktop Entry]\nName=Firefox\n', encoding='utf-8')
             rows = probe.inventory([p], 'wayland')
             browser = next(x for x in rows if x['target_class'] == 'browser')
             self.assertEqual(browser['discovery_state'], 'desktop_entry_observed')
