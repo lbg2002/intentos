@@ -1039,7 +1039,10 @@ impl CapabilityBroker {
                     Err(err) => {
                         cs.status = ChangeSetStatus::Conflict;
                         self.state_db.save_changeset(&cs)?;
-                        return Ok((cs.clone(), format!("撤销受阻：无法核验 {} 的当前值：{}", key, err)));
+                        return Ok((
+                            cs.clone(),
+                            format!("撤销受阻：无法核验 {} 的当前值：{}", key, err),
+                        ));
                     }
                 }
             }
