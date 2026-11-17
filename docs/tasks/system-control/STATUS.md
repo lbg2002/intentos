@@ -107,3 +107,9 @@ GitHub提交或PR链接：
 ### SC-05 查询语义补全（2026-11-17）
 
 - 显式 app_id 查无 desktop entry 返回 `lookup_status=not_installed_or_not_detected`；找到但无动作返回 `no_declared_actions`；已发现且可列出动作也不会自动转为 certified。新增两条 Rust 状态边界测试及两条合成 fixture，仍不启用新执行通路。
+
+
+### 跨包回归门禁补充（2026-11-17）
+
+- L1 引入 SC-05/07/08/03/09 定向 Rust 测试、SC-06/10 Python fixture、Web JS 语法检查及不可发布断言；另设 Ubuntu 24.04 托管 runner 的全工作区 `--no-fail-fast` 回归，保留全部失败日志，不以 skip 或放宽断言代替合格 L2/L3。
+- 完整运行结果待 CI 记录。L1 全量测试不是 OS 隔离认证；仍需专用 Ubuntu 真实 userns/bwrap 及 GNOME 登录会话。

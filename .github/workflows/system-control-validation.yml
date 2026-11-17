@@ -32,6 +32,11 @@ jobs:
         run: cargo test -p intentosd --lib sc03_unfrozen --locked -- --test-threads=1
       - name: SC-09 policy session grant regression
         run: cargo test -p intentosd --lib home_directory_session_grant_covers_search_and_dot_children_while_blocking_ssh --locked -- --test-threads=1
+      - name: SC-09 JavaScript syntax (no desktop execution)
+        shell: bash
+        run: |
+          node --input-type=module --check < crates/intentosd/src/web_ui/assets/js/result-surfaces.js
+          node --input-type=module --check < crates/intentosd/src/web_ui/assets/js/main.js
       - name: SC-06/10 read-only Python evidence and release gate fixtures
         run: python3 -m unittest discover -s scripts -p 'test_sc*.py' -v
       - name: SC-10 release must remain blocked without verified evidence
@@ -44,6 +49,29 @@ jobs:
           cat /tmp/sc10-release-gate.json
           test "$status" -eq 2
           python3 -c 'import json; r=json.load(open("/tmp/sc10-release-gate.json")); assert r["release_allowed"] is False; assert r["blocked_packages"] >= 1'
+  l1_full:
+    name: L1 - full workspace regression (not OS-isolation certification)
+    needs: l1
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev libsqlite3-dev pkg-config
+      - run: bash scripts/probe-validation-env.sh --l1
+      - name: Full regression; errors remain errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          env -u DISPLAY -u WAYLAND_DISPLAY cargo test --workspace --locked --no-fail-fast -- --test-threads=1 2>&1 | tee work/system-control-l1-full.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: system-control-l1-full-log
+          path: work/system-control-l1-full.log
+
   l2:
     name: L2 - trusted actual isolation (manual)
     if: github.event_name == 'workflow_dispatch'
