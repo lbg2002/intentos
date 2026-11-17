@@ -2615,6 +2615,11 @@ class QuickChatDialogApp {
   async handleInlineApproval(decision, dot, turn, asstBubble, mdBody, turnIdx) {
     const pa = dot.pending_approval || dot;
     const meta = extractApprovalMetadata(pa);
+    if ((decision === 'scope' || decision === 'session')
+        && pa.capability_id === 'terminal.execute') {
+      this.showToast('终端执行必须逐次批准，不能授予会话范围权限');
+      return;
+    }
     const mode =
       decision === 'deny'
         ? 'deny'

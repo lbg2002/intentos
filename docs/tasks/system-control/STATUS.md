@@ -14,7 +14,7 @@
 | SC-06 | 代表软件真机认证 | 05 | blocked | SC-06 证据工具提交 | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
 | SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | SC-07 局部修复提交 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
 | SC-08 | Bash复合计划 | 03/04 | blocked | SC-08 草案校验提交 | 显式 argv 管道草案静态校验；不可执行，解析器/运行时受03/04阻塞 |
-| SC-09 | 审批与结果体验 | 03/05，特权依赖07 | todo | — | GTK/GNOME/Web逐项验收 |
+| SC-09 | 审批与结果体验 | 03/05，特权依赖07 | blocked | SC-09 安全显示与服务端收口提交 | Web 标记注入与终端会话授权防护；全客户端 V14/V15 blocked |
 | SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | todo | — | 不将环境跳过计为通过 |
 
 ## 每次交付追加模板
@@ -88,3 +88,10 @@ GitHub提交或PR链接：
 - 增加独立的 ShellPlanDraftV1 **只校验不可执行**模块，支持显式 argv + pipe 拓扑的结构验证；未知字段、重复 step、动态 Shell 控制符/条件链返回结构化错误，不使用 `bash -c`。
 - 未挂载工具、RPC 或任何执行入口；`executable=false` 固定值。无静态 Bash 语法解析器，也不声称支持 shell 文本/重定向/条件链，须待 ADR 评估与 SC-03/04 完成后继续。
 - 三项纯逻辑回归未在当前容器编译，L2 文件/进程隔离 V13 blocked；能力默认关闭。
+
+
+## SC-09（2026-11-17）
+
+- Web 的审批 cap ID 和资源结果 cap ID 使用 textContent 替代字符串插入 innerHTML，避免来自模型/外部参数的标记注入。
+- 浏览器隐藏终端“允许本任务/本会话”并阻止点击；**服务端** PolicyEngine 的 session grant、GrantEnvelope 的创建与消费、持久化审批续跑均拒绝对 terminal.execute 使用跨动作授权，防止只改 UI 的绕过。
+- 不变更终端单次 nonce+digest 原有审批；真实 CLI/HTTP/GTK/GNOME 双端一致性、V14/V15 与脚本冻结依赖仍 blocked。静态/回归由 CI 核验，不因缺桌面而算通过。
