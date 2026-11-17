@@ -22,6 +22,28 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p intentos-protocol -p intentos-capability-sdk --locked -- --test-threads=1
       - run: cargo test -p intentosd --lib command_line_ --locked -- --test-threads=1
+      - name: SC-05 action compatibility contract
+        run: cargo test -p intentosd --lib sc05_ --locked -- --test-threads=1
+      - name: SC-07 settings optimistic undo conflict
+        run: cargo test -p intentosd --lib sc07_ --locked -- --test-threads=1
+      - name: SC-08 non-executable draft syntax checks
+        run: cargo test -p intentosd --lib sc08_ --locked -- --test-threads=1
+      - name: SC-03 fail-closed script gate
+        run: cargo test -p intentosd --lib sc03_unfrozen --locked -- --test-threads=1
+      - name: SC-09 policy session grant regression
+        run: cargo test -p intentosd --lib home_directory_session_grant_covers_search_and_dot_children_while_blocking_ssh --locked -- --test-threads=1
+      - name: SC-06/10 read-only Python evidence and release gate fixtures
+        run: python3 -m unittest discover -s scripts -p 'test_sc*.py' -v
+      - name: SC-10 release must remain blocked without verified evidence
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/sc10_release_gate.py > /tmp/sc10-release-gate.json
+          status=$?
+          set -e
+          cat /tmp/sc10-release-gate.json
+          test "$status" -eq 2
+          python3 -c 'import json; r=json.load(open("/tmp/sc10-release-gate.json")); assert r["release_allowed"] is False; assert r["blocked_packages"] >= 1'
   l2:
     name: L2 - trusted actual isolation (manual)
     if: github.event_name == 'workflow_dispatch'
