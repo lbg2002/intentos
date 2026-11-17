@@ -22,6 +22,7 @@ pub mod resource;
 pub mod router;
 pub mod runtime;
 pub mod security_guard;
+pub mod shell_plan;
 pub mod settings;
 pub mod speech_hub;
 pub mod terminal_agent;

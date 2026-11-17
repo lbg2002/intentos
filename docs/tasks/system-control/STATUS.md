@@ -13,7 +13,7 @@
 | SC-05 | 软件动作契约/矩阵 | 01基础回归 | implemented_unverified | SC-05 独立提交 | schema v1、只读 RPC、未验证状态与单测；L1/L3 blocked |
 | SC-06 | 代表软件真机认证 | 05 | blocked | SC-06 证据工具提交 | 7 类/35 动作只读探针与 3 项本地 Python 测试；L3 实际认证未执行 |
 | SC-07 | 系统控制/有限特权代理 | 03/04 | blocked | SC-07 局部修复提交 | 设置 ChangeSet Undo 外部变更冲突检测；特权 C4、L2/L3 blocked |
-| SC-08 | Bash复合计划 | 03/04 | todo | — | 不允许退化为裸bash -c |
+| SC-08 | Bash复合计划 | 03/04 | blocked | SC-08 草案校验提交 | 显式 argv 管道草案静态校验；不可执行，解析器/运行时受03/04阻塞 |
 | SC-09 | 审批与结果体验 | 03/05，特权依赖07 | todo | — | GTK/GNOME/Web逐项验收 |
 | SC-10 | 集成/安全/性能发布 | 所发布范围全部包 | todo | — | 不将环境跳过计为通过 |
 
@@ -81,3 +81,10 @@ GitHub提交或PR链接：
 - 修改既有 SystemSettingsEngine/CapabilityBroker 的 ChangeSet 撤销路径：恢复前按记录 after 读回；外部修改则将变更集标记 Conflict，不再覆盖当前用户新值。先预检多个设置项并二次读回，减少部分撤销。保持统一 Broker/ChangeSet 通路。
 - 新增模拟亮度值外部变化的针对性单测（未执行，当前无 Cargo）；读回与写入之间仍是非原子窗口，需 OS 驱动支持 compare-and-swap 才能严格消除竞态。
 - SC-03/04 未解除，Polkit/受限特权代理、包管理系统动作未实现；V11/V12 真实机器与用户认证测试 **blocked**，特权默认关闭，不新增 sudo/root Shell。
+
+
+## SC-08（2026-11-17）
+
+- 增加独立的 ShellPlanDraftV1 **只校验不可执行**模块，支持显式 argv + pipe 拓扑的结构验证；未知字段、重复 step、动态 Shell 控制符/条件链返回结构化错误，不使用 `bash -c`。
+- 未挂载工具、RPC 或任何执行入口；`executable=false` 固定值。无静态 Bash 语法解析器，也不声称支持 shell 文本/重定向/条件链，须待 ADR 评估与 SC-03/04 完成后继续。
+- 三项纯逻辑回归未在当前容器编译，L2 文件/进程隔离 V13 blocked；能力默认关闭。
