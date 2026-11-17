@@ -9,6 +9,32 @@ import re
 PACKAGES = tuple(f'SC-{i:02d}' for i in range(1, 11))
 VALID_LAYERS = {'L1', 'L2', 'L3', 'L4'}
 
+# Every scenario in ACCEPTANCE.md must be represented by positive evidence.
+# This is a completeness check only; maintainers must inspect source logs.
+REQUIRED_CASES = {
+    'SC-02': {'V16'},
+    'SC-03': {'V01', 'V02', 'V03', 'V04', 'V05', 'V15'},
+    'SC-04': {'V06', 'V07'},
+    'SC-05': {'V08'},
+    'SC-06': {'V08', 'V09', 'V10'},
+    'SC-07': {'V11', 'V12'},
+    'SC-08': {'V13'},
+    'SC-09': {'V14', 'V15'},
+    'SC-10': {'V17'},
+}
+REQUIRED_LAYERS = {
+    'SC-01': {'L1', 'L2'},
+    'SC-02': {'L1', 'L4'},
+    'SC-03': {'L1', 'L2'},
+    'SC-04': {'L1', 'L2'},
+    'SC-05': {'L1', 'L3'},
+    'SC-06': {'L1', 'L3'},
+    'SC-07': {'L1', 'L2', 'L3'},
+    'SC-08': {'L1', 'L2'},
+    'SC-09': {'L1', 'L3'},
+    'SC-10': {'L1', 'L2', 'L3', 'L4'},
+}
+
 
 def statuses(raw: str) -> dict[str, str]:
     out = {}
@@ -55,12 +81,14 @@ def check(root: pathlib.Path) -> dict:
                     and isinstance(test.get('runner'), str) and test['runner']):
                 blockers.append({'package': package, 'reason': 'failed_skipped_or_incomplete_test'})
                 break
-        required = {'L1'} | ({'L2', 'L3'} if package in (
-            'SC-03', 'SC-04', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10') else set())
         observed = {x.get('layer') for x in entries
                     if isinstance(x, dict) and x.get('result') == 'pass'}
-        for layer in sorted(required - observed):
+        for layer in sorted(REQUIRED_LAYERS[package] - observed):
             blockers.append({'package': package, 'reason': 'missing_required_layer', 'layer': layer})
+        observed_cases = {x.get('acceptance_id') for x in entries
+                          if isinstance(x, dict) and x.get('result') == 'pass'}
+        for case in sorted(REQUIRED_CASES.get(package, set()) - observed_cases):
+            blockers.append({'package': package, 'reason': 'missing_required_case', 'case': case})
     return {
         'release_allowed': not blockers,
         'required_packages': len(PACKAGES),
